@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use serde_json::Value;
 
 use crate::config::{Config, Profile, load_config};
 use crate::graphql::introspection::load_cache;
@@ -63,6 +64,27 @@ pub async fn resolve_drive_id(client: &GraphQLClient, id_or_slug: &str) -> Resul
     match data.get("driveIdBySlug").and_then(|v| v.as_str()) {
         Some(id) => Ok(id.to_string()),
         None => bail!("Could not resolve slug '{id_or_slug}' to a drive ID"),
+    }
+}
+
+/// Convert a serde_json::Value into a GraphQL literal string (unquoted keys).
+pub fn json_to_graphql(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Value::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(json_to_graphql).collect();
+            format!("[{}]", items.join(", "))
+        }
+        Value::Object(map) => {
+            let fields: Vec<String> = map
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", json_to_graphql(v)))
+                .collect();
+            format!("{{ {} }}", fields.join(", "))
+        }
     }
 }
 

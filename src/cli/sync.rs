@@ -51,32 +51,11 @@ fn load_json_arg(input: &str) -> Result<Value> {
     }
 }
 
-/// Convert a serde_json::Value to GraphQL literal syntax
-fn json_to_gql(val: &Value) -> String {
-    match val {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
-        Value::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(json_to_gql).collect();
-            format!("[{}]", items.join(", "))
-        }
-        Value::Object(obj) => {
-            let fields: Vec<String> = obj
-                .iter()
-                .map(|(k, v)| format!("{k}: {}", json_to_gql(v)))
-                .collect();
-            format!("{{ {} }}", fields.join(", "))
-        }
-    }
-}
-
 async fn touch(input: &str, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
     let input_val = load_json_arg(input)?;
-    let gql_input = json_to_gql(&input_val);
+    let gql_input = helpers::json_to_graphql(&input_val);
 
     let mutation =
         format!(r#"mutation {{ touchChannel(input: {gql_input}) {{ id name status }} }}"#);
@@ -104,7 +83,7 @@ async fn push(
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
     let envelopes_val = load_json_arg(envelopes_input)?;
-    let gql_envelopes = json_to_gql(&envelopes_val);
+    let gql_envelopes = helpers::json_to_graphql(&envelopes_val);
 
     let mutation = format!(
         r#"mutation {{ pushSyncEnvelopes(envelopes: {gql_envelopes}) {{ status acknowledged }} }}"#

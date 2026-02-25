@@ -65,6 +65,26 @@ fn platform_suffix() -> Result<&'static str> {
     }
 }
 
+/// Strip the "## Install" boilerplate from release notes, keeping only real changelog content.
+fn strip_install_section(body: &str) -> String {
+    let mut out = String::new();
+    let mut skip = false;
+    for line in body.lines() {
+        if line.starts_with("## Install") {
+            skip = true;
+            continue;
+        }
+        if skip && line.starts_with("## ") {
+            skip = false;
+        }
+        if !skip {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.trim().to_string()
+}
+
 // ── Entry point ─────────────────────────────────────────────────────────────
 
 pub async fn run(check: bool, quiet: bool) -> Result<()> {
@@ -124,9 +144,9 @@ pub async fn run(check: bool, quiet: bool) -> Result<()> {
         for release in newer_releases.iter().rev() {
             println!("  {} {}", "─".dimmed(), release.tag_name.bold());
             if let Some(body) = &release.body {
-                let trimmed = body.trim();
-                if !trimmed.is_empty() {
-                    for line in trimmed.lines() {
+                let cleaned = strip_install_section(body);
+                if !cleaned.is_empty() {
+                    for line in cleaned.lines() {
                         println!("    {line}");
                     }
                     println!();
@@ -210,23 +230,37 @@ pub async fn run(check: bool, quiet: bool) -> Result<()> {
         std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    // ── Atomic binary replacement ───────────────────────────────────────
+    // ── Replace binary ────────────────────────────────────────────────
 
-    self_replace::self_replace(&temp_path).context(
-        "Failed to replace the current binary. You may need to run with elevated permissions.",
-    )?;
+    let exe_path = std::env::current_exe().context("Could not determine current binary path")?;
+
+    // Try direct replacement first; fall back to sudo if permission denied
+    if self_replace::self_replace(&temp_path).is_err() {
+        eprintln!(
+            "Need elevated permissions to update {}",
+            exe_path.display()
+        );
+        let status = std::process::Command::new("sudo")
+            .args(["cp", "-f"])
+            .arg(&temp_path)
+            .arg(&exe_path)
+            .status()
+            .context("Failed to run sudo")?;
+        if !status.success() {
+            let _ = std::fs::remove_file(&temp_path);
+            bail!("Failed to replace binary with sudo");
+        }
+    }
 
     let _ = std::fs::remove_file(&temp_path);
 
     // Clear macOS quarantine attribute
     #[cfg(target_os = "macos")]
     {
-        if let Ok(exe) = std::env::current_exe() {
-            let _ = std::process::Command::new("xattr")
-                .args(["-d", "com.apple.quarantine"])
-                .arg(&exe)
-                .output();
-        }
+        let _ = std::process::Command::new("sudo")
+            .args(["xattr", "-d", "com.apple.quarantine"])
+            .arg(&exe_path)
+            .output();
     }
 
     println!(

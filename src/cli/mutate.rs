@@ -130,7 +130,7 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
     let has_input_arg = operation.args.iter().any(|a| a.name == "input");
 
     // Convert JSON to GraphQL literal (unquoted keys)
-    let gql_input = json_to_graphql(&input_value);
+    let gql_input = helpers::json_to_graphql(&input_value);
 
     let mutation = if has_input_arg {
         format!(
@@ -142,7 +142,7 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
         // Spread the input object as direct arguments
         let args_str = if let Value::Object(map) = &input_value {
             map.iter()
-                .map(|(k, v)| format!("{k}: {}", json_to_graphql(v)))
+                .map(|(k, v)| format!("{k}: {}", helpers::json_to_graphql(v)))
                 .collect::<Vec<_>>()
                 .join(", ")
         } else {
@@ -182,27 +182,4 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
     }
 
     Ok(())
-}
-
-/// Convert a serde_json Value to GraphQL literal syntax.
-/// GraphQL uses unquoted keys in objects: {name: "value", count: 42}
-/// vs JSON which quotes keys: {"name": "value", "count": 42}
-fn json_to_graphql(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
-        Value::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(json_to_graphql).collect();
-            format!("[{}]", items.join(", "))
-        }
-        Value::Object(map) => {
-            let fields: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("{k}: {}", json_to_graphql(v)))
-                .collect();
-            format!("{{{}}}", fields.join(", "))
-        }
-    }
 }
