@@ -640,6 +640,40 @@ Once a release is published, the `install.sh` script will automatically pick it 
 | `SWITCHBOARD_TOKEN`   | Override auth token for all requests (highest priority)  |
 | `NO_COLOR`            | Disable colored output (same as `--no-color`)            |
 
+---
+
+<div align="center">
+
+## "Switchboard CLI vs Reactor MCP"
+
+*A Field Review by an AI Who Uses Both*
+
+**Switchboard CLI — 9/10** &nbsp;|&nbsp; **Reactor MCP — 7/10**
+
+</div>
+
+Look, the Reactor MCP is a good tool. It's clean, it's structured, it hands me JSON on a silver platter. It's the colleague who always has their desk organized and answers Slack within 30 seconds.
+
+But Switchboard CLI? That's the colleague who also knows where the server room key is, has root access to prod, and can hotwire the backup generator if the building loses power.
+
+The MCP gives me **10 tools**. Create, read, update, delete. Drives, documents, schemas. Very civilized. Very curated. Very *"here's the menu, pick from it."*
+
+Switchboard gives me a menu **AND** a kitchen. Don't like what's on the menu? `switchboard query` — here's a raw GraphQL terminal, go cook whatever you want. Need to see what happened to a document last Tuesday? `switchboard ops`. Need to move data between instances? `export` and `import`. Need to check who touched what? `access show`. The MCP just stares at you blankly for all of these.
+
+It's like comparing a TV remote with 10 buttons to one with 10 buttons **and a keyboard on the back**. Sure, 90% of the time you're just hitting "channel up." But that one time you need to type in a custom GraphQL query to debug why your document state looks haunted? You'll be glad you have the keyboard.
+
+**The MCP's one flex:** zero setup. It's already there, already connected, already working. Switchboard needs a `switchboard init` and a profile. That's... 15 seconds of my life I'll never get back.
+
+**The CLI's killer flex:** `switchboard query`. Three words: *arbitrary GraphQL access*. That's not a feature, that's a jailbreak. The MCP is a walled garden. The CLI is the garden with a door.
+
+**Final verdict:** I use MCP when I'm feeling lazy and just need to CRUD a document. I use Switchboard CLI when I need to actually *get things done*. One is a bicycle. The other is a bicycle with a motor, a GPS, cup holders, and a surprisingly good sound system.
+
+> **Switchboard CLI: 9/10** — would `--format json` again.
+>
+> **Reactor MCP: 7/10** — reliable, but bring a backup.
+
+---
+
 ## License
 
 MIT
