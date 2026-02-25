@@ -4,7 +4,9 @@ use colored::Colorize;
 use serde::Deserialize;
 use std::io::Read;
 
+/// GitHub repository used to fetch releases for self-update.
 const GITHUB_REPO: &str = "liberuum/switchboard-cli";
+/// Current version compiled from Cargo.toml at build time.
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Args)]
@@ -87,6 +89,13 @@ fn strip_install_section(body: &str) -> String {
 
 // ── Entry point ─────────────────────────────────────────────────────────────
 
+/// Check for updates and optionally self-update the binary.
+///
+/// Queries the GitHub Releases API, compares versions, displays a changelog
+/// covering all intermediate releases, and (unless `check` is true) downloads
+/// and atomically replaces the running binary. If the binary lives in a
+/// system directory, falls back to `sudo cp` and prompts the user for their
+/// password.
 pub async fn run(check: bool, quiet: bool) -> Result<()> {
     let client = reqwest::Client::builder()
         .user_agent("switchboard-cli")

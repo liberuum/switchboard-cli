@@ -376,6 +376,30 @@ For manual setup, you can output raw completions:
 switchboard completions bash   # or zsh, fish
 ```
 
+## Self-Update
+
+The CLI can update itself in place — no need to re-run the install script or download manually:
+
+```bash
+switchboard update
+```
+
+This will:
+
+1. **Check for newer versions** by querying the GitHub Releases API
+2. **Show what changed** — displays a changelog covering every version between your current version and the latest, with install boilerplate stripped out
+3. **Ask for confirmation** before proceeding
+4. **Download and replace** the running binary atomically
+5. **Request sudo** if the binary is installed in a system directory (e.g. `/usr/local/bin`) — you'll be prompted for your password
+
+To check for updates without installing:
+
+```bash
+switchboard update --check
+```
+
+**Supported platforms:** macOS ARM64 (Apple Silicon) and Linux x86_64. The update command downloads the correct archive for your platform automatically.
+
 ## Built-in Documentation
 
 The CLI includes detailed built-in guides on every topic:
@@ -438,6 +462,7 @@ switchboard-cli/
 │   │   ├── sync.rs              Sync channels
 │   │   ├── interactive.rs       REPL mode (rustyline, full CLI parity via clap dispatch)
 │   │   ├── guide.rs             Built-in documentation
+│   │   ├── update.rs            Self-update (GitHub Releases + binary swap)
 │   │   ├── completions.rs       Shell completions
 │   │   └── helpers.rs           Shared utilities
 │   ├── graphql/

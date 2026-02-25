@@ -657,7 +657,9 @@ REAL-TIME & ADVANCED
 TOOLS
   query '<graphql>'             Run raw GraphQL
   interactive (or -i)           Launch REPL mode
-  update [--check]              Self-update to latest release
+  update                        Self-update to latest release (shows changelog,
+                                  asks for confirmation, requests sudo if needed)
+  update --check                Check for updates without installing
   schema                        Dump GraphQL schema
   completions [shell]           Generate shell completions
   completions --install          Auto-install completions into shell config
