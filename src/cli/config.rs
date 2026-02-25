@@ -3,7 +3,7 @@ use clap::Subcommand;
 use colored::Colorize;
 
 use crate::config::{load_config, save_config};
-use crate::output::{OutputFormat, print_table, print_json};
+use crate::output::{OutputFormat, print_json, print_table};
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {

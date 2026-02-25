@@ -54,7 +54,8 @@ pub fn run(topic: GuideCommand) -> Result<()> {
 }
 
 fn print_overview() {
-    println!(r#"SWITCHBOARD CLI — OVERVIEW
+    println!(
+        r#"SWITCHBOARD CLI — OVERVIEW
 
 A standalone CLI for interacting with remote Switchboard GraphQL instances.
 Fast, single-binary, zero runtime dependencies.
@@ -94,11 +95,13 @@ KEY CONCEPTS
 
 Use `switchboard guide <topic>` for detailed help on any area.
 Available topics: config, drives, docs, import-export, auth, permissions,
-                  watch, jobs, sync, interactive, output, graphql, commands"#);
+                  watch, jobs, sync, interactive, output, graphql, commands"#
+    );
 }
 
 fn print_config() {
-    println!(r#"CONFIGURATION & PROFILES
+    println!(
+        r#"CONFIGURATION & PROFILES
 
 Switchboard CLI supports multiple named profiles, each pointing to a different
 Switchboard instance. Profiles are stored in ~/.switchboard/profiles.toml.
@@ -136,11 +139,13 @@ PROFILE FILE FORMAT
 SCHEMA CACHE
 
   Each profile has a cached schema at ~/.switchboard/cache/<profile>.json.
-  Refresh it with: switchboard introspect"#);
+  Refresh it with: switchboard introspect"#
+    );
 }
 
 fn print_drives() {
-    println!(r#"DRIVES
+    println!(
+        r#"DRIVES
 
 Drives are the top-level containers in Switchboard. Each drive holds documents
 and folders.
@@ -170,11 +175,13 @@ EXAMPLES
 
   switchboard drives list --format json | jq '.[].slug'
   switchboard drives create --name "test" --slug "test-drive"
-  switchboard drives delete test-drive -y"#);
+  switchboard drives delete test-drive -y"#
+    );
 }
 
 fn print_docs() {
-    println!(r#"DOCUMENTS
+    println!(
+        r#"DOCUMENTS
 
 Documents are typed data objects that live inside drives. Each document has
 a type (e.g. powerhouse/invoice), state, and operation history.
@@ -213,11 +220,13 @@ EXAMPLES
 
   switchboard docs list --drive builders --type powerhouse/builder-profile
   switchboard docs get abc123 --drive builders --format json | jq '.stateJSON'
-  switchboard docs mutate abc123 updateProfile --input '{{"name":"New"}}' --drive builders"#);
+  switchboard docs mutate abc123 updateProfile --input '{{"name":"New"}}' --drive builders"#
+    );
 }
 
 fn print_import_export() {
-    println!(r#"IMPORT / EXPORT (.phd FILES)
+    println!(
+        r#"IMPORT / EXPORT (.phd FILES)
 
 The .phd format is a ZIP archive containing document data. The CLI supports
 full round-trip: export from one instance, import into another.
@@ -256,11 +265,13 @@ EXAMPLES
 
   # Move a single doc between instances
   switchboard -p staging export doc abc123 --drive builders --out doc.phd
-  switchboard -p local import doc.phd --drive local-drive"#);
+  switchboard -p local import doc.phd --drive local-drive"#
+    );
 }
 
 fn print_auth() {
-    println!(r#"AUTHENTICATION
+    println!(
+        r#"AUTHENTICATION
 
 Auth is optional. Without a token, the CLI sends plain GraphQL requests.
 When configured, every request includes an Authorization: Bearer header.
@@ -287,11 +298,13 @@ EXAMPLES
 
   switchboard auth login --token "eyJhbG..."
   switchboard auth status
-  switchboard -p staging auth login"#);
+  switchboard -p staging auth login"#
+    );
 }
 
 fn print_permissions() {
-    println!(r#"PERMISSIONS
+    println!(
+        r#"PERMISSIONS
 
 Switchboard supports fine-grained permissions at document and operation level,
 with both user-level and group-level grants.
@@ -324,11 +337,13 @@ GROUPS
   switchboard groups user-groups <addr>            List groups for a user
 
 NOTE: Permission commands use the /graphql/auth subgraph when available,
-falling back to the main /graphql endpoint."#);
+falling back to the main /graphql endpoint."#
+    );
 }
 
 fn print_watch() {
-    println!(r#"REAL-TIME SUBSCRIPTIONS
+    println!(
+        r#"REAL-TIME SUBSCRIPTIONS
 
 Watch for live changes via WebSocket (connects to /graphql/r reactor subgraph).
 
@@ -354,11 +369,13 @@ EXAMPLES
 
   switchboard watch docs --drive builders
   switchboard watch docs --type powerhouse/invoice --format json
-  switchboard watch job abc123-job-id"#);
+  switchboard watch job abc123-job-id"#
+    );
 }
 
 fn print_jobs() {
-    println!(r#"ASYNC JOB TRACKING
+    println!(
+        r#"ASYNC JOB TRACKING
 
 For long-running mutations dispatched via mutateDocumentAsync.
 
@@ -377,11 +394,13 @@ EXAMPLES
 
   switchboard jobs status abc123
   switchboard jobs wait abc123 --timeout 60
-  switchboard jobs watch abc123 --format json"#);
+  switchboard jobs watch abc123 --format json"#
+    );
 }
 
 fn print_sync() {
-    println!(r#"SYNC CHANNELS
+    println!(
+        r#"SYNC CHANNELS
 
 Push and pull operations via sync channels for document synchronization.
 
@@ -403,11 +422,13 @@ EXAMPLES
 
   switchboard sync touch '{{"name": "my-channel", "type": "pull"}}'
   switchboard sync push @envelopes.json
-  switchboard sync poll channel-123 --ack 5 --latest 10"#);
+  switchboard sync poll channel-123 --ack 5 --latest 10"#
+    );
 }
 
 fn print_interactive() {
-    println!(r#"INTERACTIVE REPL MODE
+    println!(
+        r#"INTERACTIVE REPL MODE
 
 Launch a persistent interactive session with tab completion and history.
 
@@ -444,11 +465,13 @@ EXAMPLES
   local> docs tree liberuum-drive
   local> docs list lib<TAB>          # completes to liberuum-drive
   local> query {{ drives }}
-  local> exit"#);
+  local> exit"#
+    );
 }
 
 fn print_output() {
-    println!(r#"OUTPUT FORMATTING & SCRIPTING
+    println!(
+        r#"OUTPUT FORMATTING & SCRIPTING
 
 Every command supports output format flags for both human and machine use.
 
@@ -485,11 +508,13 @@ SCRIPTING EXAMPLES
 ENVIRONMENT VARIABLES
 
   NO_COLOR=1               Disable colors (same as --no-color)
-  SWITCHBOARD_TOKEN=<jwt>  Override auth token for all requests"#);
+  SWITCHBOARD_TOKEN=<jwt>  Override auth token for all requests"#
+    );
 }
 
 fn print_graphql() {
-    println!(r#"GRAPHQL PATTERNS
+    println!(
+        r#"GRAPHQL PATTERNS
 
 The CLI is a thin wrapper around Switchboard's GraphQL API. You can always
 drop down to raw queries for anything not covered by dedicated commands.
@@ -533,11 +558,13 @@ KEY QUIRKS
   - deleteDrive requires UUID (not slug) — CLI auto-resolves
   - _createDocument requires driveId as UUID — CLI auto-resolves
   - Document state is always via stateJSON field (raw JSON)
-  - Model queries use namespace pattern: {{ ModelName {{ getDocument(...) }} }}"#);
+  - Model queries use namespace pattern: {{ ModelName {{ getDocument(...) }} }}"#
+    );
 }
 
 fn print_commands() {
-    println!(r#"ALL COMMANDS
+    println!(
+        r#"ALL COMMANDS
 
 SETUP & CONFIG
   init                          First-run connection wizard
@@ -608,5 +635,6 @@ GLOBAL FLAGS
   --quiet                       Suppress extra output
   --no-color                    Disable colors
   -p, --profile <name>          Use specific profile
-  -i                            Launch interactive REPL"#);
+  -i                            Launch interactive REPL"#
+    );
 }

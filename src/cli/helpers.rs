@@ -1,15 +1,17 @@
 use anyhow::{Result, bail};
 
 use crate::config::{Config, Profile, load_config};
-use crate::graphql::{GraphQLClient, IntrospectionCache};
 use crate::graphql::introspection::load_cache;
+use crate::graphql::{GraphQLClient, IntrospectionCache};
 
 /// Resolve the active profile from CLI args or config default
 pub fn resolve_profile(config: &Config, profile_name: Option<&str>) -> Result<(String, Profile)> {
     if let Some(name) = profile_name {
         match config.get_profile(name) {
             Some(p) => Ok((name.to_string(), p.clone())),
-            None => bail!("Profile '{name}' not found. Run `switchboard config list` to see available profiles."),
+            None => bail!(
+                "Profile '{name}' not found. Run `switchboard config list` to see available profiles."
+            ),
         }
     } else {
         match config.default_profile() {
@@ -37,10 +39,11 @@ pub fn setup_with_cache(
     profile_name: Option<&str>,
 ) -> Result<(String, Profile, GraphQLClient, IntrospectionCache)> {
     let (name, profile, client) = setup(profile_name)?;
-    let cache = load_cache(&name)?
-        .ok_or_else(|| anyhow::anyhow!(
+    let cache = load_cache(&name)?.ok_or_else(|| {
+        anyhow::anyhow!(
             "No introspection cache found for profile '{name}'. Run `switchboard introspect` first."
-        ))?;
+        )
+    })?;
     Ok((name, profile, client, cache))
 }
 

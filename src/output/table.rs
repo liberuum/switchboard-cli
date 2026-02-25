@@ -1,4 +1,4 @@
-use comfy_table::{Table, ContentArrangement, presets::UTF8_FULL};
+use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL};
 
 /// Print a table from column headers and rows of strings
 pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {

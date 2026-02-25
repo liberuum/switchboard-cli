@@ -168,9 +168,8 @@ pub async fn run_introspection(client: &GraphQLClient) -> Result<IntrospectionCa
             for model in models.values_mut() {
                 if name == model.prefix {
                     // Extract sub-fields like getDocuments, getDocument
-                    if let Some(sub_fields) = field
-                        .pointer("/type/fields")
-                        .and_then(|v| v.as_array())
+                    if let Some(sub_fields) =
+                        field.pointer("/type/fields").and_then(|v| v.as_array())
                     {
                         for sub_field in sub_fields {
                             if let Some(sub_name) = sub_field["name"].as_str() {
@@ -220,10 +219,7 @@ fn extract_type_info(type_val: &Value) -> (String, bool) {
         let (name, _) = extract_type_info(inner);
         (format!("[{name}]"), false)
     } else {
-        let name = type_val["name"]
-            .as_str()
-            .unwrap_or("Unknown")
-            .to_string();
+        let name = type_val["name"].as_str().unwrap_or("Unknown").to_string();
         (name, false)
     }
 }

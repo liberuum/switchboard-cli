@@ -1,28 +1,28 @@
-pub mod init;
+pub mod access;
+pub mod auth;
+pub mod completions;
 pub mod config;
-pub mod introspect;
-pub mod drives;
 pub mod docs;
-pub mod models;
-pub mod ops;
-pub mod mutate;
-pub mod query;
+pub mod drives;
+pub mod groups;
+pub mod guide;
 pub mod helpers;
 pub mod import_export;
-pub mod auth;
-pub mod access;
-pub mod groups;
-pub mod completions;
-pub mod schema;
-pub mod watch;
-pub mod jobs;
-pub mod sync;
+pub mod init;
 pub mod interactive;
-pub mod guide;
+pub mod introspect;
+pub mod jobs;
+pub mod models;
+pub mod mutate;
+pub mod ops;
+pub mod query;
+pub mod schema;
+pub mod sync;
+pub mod watch;
 
+use crate::output::OutputFormat;
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
-use crate::output::OutputFormat;
 
 #[derive(Parser)]
 #[command(name = "switchboard", about = "CLI for Switchboard GraphQL instances")]

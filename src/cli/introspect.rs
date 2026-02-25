@@ -24,10 +24,7 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
         // Show a summary
         for (doc_type, model) in &cache.models {
             let op_count = model.operations.len().saturating_sub(1); // exclude createDocument
-            println!(
-                "  {} ({} operations)",
-                doc_type, op_count
-            );
+            println!("  {} ({} operations)", doc_type, op_count);
         }
     }
 

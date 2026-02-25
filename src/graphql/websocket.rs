@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use futures_util::{SinkExt, StreamExt};
 
 /// Subscribe to a GraphQL subscription via the graphql-ws protocol.
 ///
@@ -41,7 +41,9 @@ where
 
     // Step 1: Send connection_init with optional auth payload
     let init_payload = match token {
-        Some(t) => json!({ "type": "connection_init", "payload": { "Authorization": format!("Bearer {t}") } }),
+        Some(t) => {
+            json!({ "type": "connection_init", "payload": { "Authorization": format!("Bearer {t}") } })
+        }
         None => json!({ "type": "connection_init" }),
     };
     write
@@ -61,10 +63,7 @@ where
                     break;
                 }
                 Some("connection_error") => {
-                    bail!(
-                        "WebSocket connection error: {}",
-                        val["payload"].to_string()
-                    );
+                    bail!("WebSocket connection error: {}", val["payload"]);
                 }
                 _ => {} // Ignore other messages during handshake
             }

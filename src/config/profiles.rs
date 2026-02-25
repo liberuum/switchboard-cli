@@ -58,18 +58,15 @@ impl Config {
     }
 
     pub fn remove_profile(&mut self, name: &str) -> bool {
-        let was_default = self
-            .profiles
-            .get(name)
-            .map(|p| p.default)
-            .unwrap_or(false);
+        let was_default = self.profiles.get(name).map(|p| p.default).unwrap_or(false);
         let removed = self.profiles.remove(name).is_some();
 
         // If we removed the default, promote the first remaining profile
-        if removed && was_default {
-            if let Some((_, profile)) = self.profiles.iter_mut().next() {
-                profile.default = true;
-            }
+        if removed
+            && was_default
+            && let Some((_, profile)) = self.profiles.iter_mut().next()
+        {
+            profile.default = true;
         }
         removed
     }
@@ -96,8 +93,8 @@ pub fn load_config() -> Result<Config> {
     if !path.exists() {
         return Ok(Config::default());
     }
-    let contents =
-        std::fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let contents = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
     let config: Config =
         toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))?;
     Ok(config)

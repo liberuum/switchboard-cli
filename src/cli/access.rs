@@ -114,18 +114,26 @@ pub enum OpsCommand {
     },
 }
 
-pub async fn run(cmd: AccessCommand, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
+pub async fn run(
+    cmd: AccessCommand,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+) -> Result<()> {
     match cmd {
         AccessCommand::Show { document_id } => show(&document_id, format, profile_name).await,
-        AccessCommand::Grant { document_id, user, level } => {
-            grant(&document_id, &user, &level, format, profile_name).await
-        }
+        AccessCommand::Grant {
+            document_id,
+            user,
+            level,
+        } => grant(&document_id, &user, &level, format, profile_name).await,
         AccessCommand::Revoke { document_id, user } => {
             revoke(&document_id, &user, format, profile_name).await
         }
-        AccessCommand::GrantGroup { document_id, group, level } => {
-            grant_group(&document_id, &group, &level, format, profile_name).await
-        }
+        AccessCommand::GrantGroup {
+            document_id,
+            group,
+            level,
+        } => grant_group(&document_id, &group, &level, format, profile_name).await,
         AccessCommand::RevokeGroup { document_id, group } => {
             revoke_group(&document_id, &group, format, profile_name).await
         }
@@ -135,35 +143,40 @@ pub async fn run(cmd: AccessCommand, format: OutputFormat, profile_name: Option<
 
 async fn run_ops(cmd: OpsCommand, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     match cmd {
-        OpsCommand::Show { document_id, operation_type } => {
-            ops_show(&document_id, &operation_type, format, profile_name).await
-        }
-        OpsCommand::CanExecute { document_id, operation_type } => {
-            ops_can_execute(&document_id, &operation_type, format, profile_name).await
-        }
-        OpsCommand::Grant { document_id, operation_type, user } => {
-            ops_grant(&document_id, &operation_type, &user, format, profile_name).await
-        }
-        OpsCommand::Revoke { document_id, operation_type, user } => {
-            ops_revoke(&document_id, &operation_type, &user, format, profile_name).await
-        }
-        OpsCommand::GrantGroup { document_id, operation_type, group } => {
-            ops_grant_group(&document_id, &operation_type, &group, format, profile_name).await
-        }
-        OpsCommand::RevokeGroup { document_id, operation_type, group } => {
-            ops_revoke_group(&document_id, &operation_type, &group, format, profile_name).await
-        }
+        OpsCommand::Show {
+            document_id,
+            operation_type,
+        } => ops_show(&document_id, &operation_type, format, profile_name).await,
+        OpsCommand::CanExecute {
+            document_id,
+            operation_type,
+        } => ops_can_execute(&document_id, &operation_type, format, profile_name).await,
+        OpsCommand::Grant {
+            document_id,
+            operation_type,
+            user,
+        } => ops_grant(&document_id, &operation_type, &user, format, profile_name).await,
+        OpsCommand::Revoke {
+            document_id,
+            operation_type,
+            user,
+        } => ops_revoke(&document_id, &operation_type, &user, format, profile_name).await,
+        OpsCommand::GrantGroup {
+            document_id,
+            operation_type,
+            group,
+        } => ops_grant_group(&document_id, &operation_type, &group, format, profile_name).await,
+        OpsCommand::RevokeGroup {
+            document_id,
+            operation_type,
+            group,
+        } => ops_revoke_group(&document_id, &operation_type, &group, format, profile_name).await,
     }
 }
 
 /// Build a client pointing at the auth subgraph
 fn auth_url(base_url: &str) -> String {
-    // Base URL is like https://host/graphql — auth subgraph is at /graphql/auth
-    if base_url.ends_with("/graphql") {
-        format!("{base_url}/auth")
-    } else {
-        format!("{base_url}/auth")
-    }
+    format!("{base_url}/auth")
 }
 
 async fn show(document_id: &str, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
@@ -175,10 +188,8 @@ async fn show(document_id: &str, format: OutputFormat, profile_name: Option<&str
     );
 
     // Try auth subgraph first, fall back to main endpoint
-    let auth_client = crate::graphql::GraphQLClient::new(
-        auth_url(&profile.url),
-        profile.token.clone(),
-    );
+    let auth_client =
+        crate::graphql::GraphQLClient::new(auth_url(&profile.url), profile.token.clone());
 
     let data = match auth_client.query(&query, None).await {
         Ok(d) => d,
@@ -230,10 +241,8 @@ async fn grant(
         level = level.to_uppercase(),
     );
 
-    let auth_client = crate::graphql::GraphQLClient::new(
-        auth_url(&profile.url),
-        profile.token.clone(),
-    );
+    let auth_client =
+        crate::graphql::GraphQLClient::new(auth_url(&profile.url), profile.token.clone());
 
     let data = match auth_client.query(&mutation, None).await {
         Ok(d) => d,
@@ -243,7 +252,13 @@ async fn grant(
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
         OutputFormat::Table => {
-            println!("{} Permission '{}' granted to {} on {}", "✓".green(), level, user, document_id);
+            println!(
+                "{} Permission '{}' granted to {} on {}",
+                "✓".green(),
+                level,
+                user,
+                document_id
+            );
         }
     }
 
@@ -264,10 +279,8 @@ async fn revoke(
         user = user.replace('"', r#"\""#),
     );
 
-    let auth_client = crate::graphql::GraphQLClient::new(
-        auth_url(&profile.url),
-        profile.token.clone(),
-    );
+    let auth_client =
+        crate::graphql::GraphQLClient::new(auth_url(&profile.url), profile.token.clone());
 
     let data = match auth_client.query(&mutation, None).await {
         Ok(d) => d,
@@ -277,7 +290,12 @@ async fn revoke(
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
         OutputFormat::Table => {
-            println!("{} Permission revoked for {} on {}", "✓".green(), user, document_id);
+            println!(
+                "{} Permission revoked for {} on {}",
+                "✓".green(),
+                user,
+                document_id
+            );
         }
     }
 
@@ -300,10 +318,8 @@ async fn grant_group(
         level = level.to_uppercase(),
     );
 
-    let auth_client = crate::graphql::GraphQLClient::new(
-        auth_url(&profile.url),
-        profile.token.clone(),
-    );
+    let auth_client =
+        crate::graphql::GraphQLClient::new(auth_url(&profile.url), profile.token.clone());
 
     let data = match auth_client.query(&mutation, None).await {
         Ok(d) => d,
@@ -313,7 +329,13 @@ async fn grant_group(
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
         OutputFormat::Table => {
-            println!("{} Permission '{}' granted to group {} on {}", "✓".green(), level, group, document_id);
+            println!(
+                "{} Permission '{}' granted to group {} on {}",
+                "✓".green(),
+                level,
+                group,
+                document_id
+            );
         }
     }
 
@@ -334,10 +356,8 @@ async fn revoke_group(
         group = group.replace('"', r#"\""#),
     );
 
-    let auth_client = crate::graphql::GraphQLClient::new(
-        auth_url(&profile.url),
-        profile.token.clone(),
-    );
+    let auth_client =
+        crate::graphql::GraphQLClient::new(auth_url(&profile.url), profile.token.clone());
 
     let data = match auth_client.query(&mutation, None).await {
         Ok(d) => d,
@@ -347,7 +367,12 @@ async fn revoke_group(
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
         OutputFormat::Table => {
-            println!("{} Group permission revoked for group {} on {}", "✓".green(), group, document_id);
+            println!(
+                "{} Group permission revoked for group {} on {}",
+                "✓".green(),
+                group,
+                document_id
+            );
         }
     }
 
@@ -404,7 +429,10 @@ async fn ops_show(
         OutputFormat::Json | OutputFormat::Raw => print_json(&Value::Array(access)),
         OutputFormat::Table => {
             if access.is_empty() {
-                println!("No operation permissions for '{}' on '{}'.", operation_type, document_id);
+                println!(
+                    "No operation permissions for '{}' on '{}'.",
+                    operation_type, document_id
+                );
                 return Ok(());
             }
             let rows: Vec<Vec<String>> = access
@@ -448,9 +476,19 @@ async fn ops_can_execute(
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
         OutputFormat::Table => {
             if allowed {
-                println!("{} You can execute '{}' on '{}'", "✓".green(), operation_type, document_id);
+                println!(
+                    "{} You can execute '{}' on '{}'",
+                    "✓".green(),
+                    operation_type,
+                    document_id
+                );
             } else {
-                println!("{} You cannot execute '{}' on '{}'", "✗".red(), operation_type, document_id);
+                println!(
+                    "{} You cannot execute '{}' on '{}'",
+                    "✗".red(),
+                    operation_type,
+                    document_id
+                );
             }
         }
     }
@@ -481,7 +519,10 @@ async fn ops_grant(
         OutputFormat::Table => {
             println!(
                 "{} Operation '{}' permission granted to {} on {}",
-                "✓".green(), operation_type, user, document_id
+                "✓".green(),
+                operation_type,
+                user,
+                document_id
             );
         }
     }
@@ -512,7 +553,10 @@ async fn ops_revoke(
         OutputFormat::Table => {
             println!(
                 "{} Operation '{}' permission revoked for {} on {}",
-                "✓".green(), operation_type, user, document_id
+                "✓".green(),
+                operation_type,
+                user,
+                document_id
             );
         }
     }
@@ -543,7 +587,10 @@ async fn ops_grant_group(
         OutputFormat::Table => {
             println!(
                 "{} Operation '{}' permission granted to group {} on {}",
-                "✓".green(), operation_type, group, document_id
+                "✓".green(),
+                operation_type,
+                group,
+                document_id
             );
         }
     }
@@ -574,7 +621,10 @@ async fn ops_revoke_group(
         OutputFormat::Table => {
             println!(
                 "{} Operation '{}' group permission revoked for group {} on {}",
-                "✓".green(), operation_type, group, document_id
+                "✓".green(),
+                operation_type,
+                group,
+                document_id
             );
         }
     }

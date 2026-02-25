@@ -14,8 +14,8 @@ pub struct PhdContents {
 
 /// Read a .phd ZIP archive from the given path
 pub fn read_phd(path: &Path) -> Result<PhdContents> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
 
     let mut archive = zip::ZipArchive::new(file)
         .with_context(|| format!("Not a valid ZIP file: {}", path.display()))?;
@@ -23,11 +23,10 @@ pub fn read_phd(path: &Path) -> Result<PhdContents> {
     let header: PhdHeader = read_json_entry(&mut archive, "header.json")
         .with_context(|| format!("Missing or invalid header.json in {}", path.display()))?;
 
-    let initial_state: PhdState = read_json_entry(&mut archive, "state.json")
-        .unwrap_or_default();
+    let initial_state: PhdState = read_json_entry(&mut archive, "state.json").unwrap_or_default();
 
-    let current_state: PhdState = read_json_entry(&mut archive, "current-state.json")
-        .unwrap_or_default();
+    let current_state: PhdState =
+        read_json_entry(&mut archive, "current-state.json").unwrap_or_default();
 
     let operations: PhdOperations = read_json_entry(&mut archive, "operations.json")
         .unwrap_or(PhdOperations { global: vec![] });
@@ -53,6 +52,5 @@ fn read_json_entry<T: serde::de::DeserializeOwned>(
         .read_to_string(&mut contents)
         .with_context(|| format!("Failed to read '{name}'"))?;
 
-    serde_json::from_str(&contents)
-        .with_context(|| format!("Failed to parse '{name}' as JSON"))
+    serde_json::from_str(&contents).with_context(|| format!("Failed to parse '{name}' as JSON"))
 }

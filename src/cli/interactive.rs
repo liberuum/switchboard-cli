@@ -139,10 +139,7 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
         .unwrap_or_default();
 
     // Fetch drive slugs for tab completion
-    let drive_slugs: Vec<String> = match client
-        .query("{ driveDocuments { slug } }", None)
-        .await
-    {
+    let drive_slugs: Vec<String> = match client.query("{ driveDocuments { slug } }", None).await {
         Ok(data) => data
             .get("driveDocuments")
             .and_then(|v| v.as_array())
@@ -184,8 +181,7 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
     rl.set_helper(Some(helper));
 
     // Load history from ~/.switchboard/history
-    let history_path = dirs::home_dir()
-        .map(|h| h.join(".switchboard").join("history"));
+    let history_path = dirs::home_dir().map(|h| h.join(".switchboard").join("history"));
     if let Some(ref path) = history_path {
         let _ = rl.load_history(path);
     }
@@ -327,14 +323,13 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                         let cache = crate::graphql::introspection::load_cache(&name);
                         let mut found = false;
                         if let Ok(Some(ref cache)) = cache {
-                            let drive_id =
-                                match helpers::resolve_drive_id(&client, drive).await {
-                                    Ok(id) => id,
-                                    Err(e) => {
-                                        eprintln!("Error resolving drive: {e:#}");
-                                        continue;
-                                    }
-                                };
+                            let drive_id = match helpers::resolve_drive_id(&client, drive).await {
+                                Ok(id) => id,
+                                Err(e) => {
+                                    eprintln!("Error resolving drive: {e:#}");
+                                    continue;
+                                }
+                            };
                             for model in cache.models.values() {
                                 if !model.query_fields.contains(&"getDocument".to_string()) {
                                     continue;
@@ -344,22 +339,22 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                                     prefix = model.prefix,
                                     doc_id = doc_id.replace('"', r#"\""#),
                                 );
-                                if let Ok(data) = client.query(&query, None).await {
-                                    if let Some(doc) = data
+                                if let Ok(data) = client.query(&query, None).await
+                                    && let Some(doc) = data
                                         .get(&model.prefix)
                                         .and_then(|v| v.get("getDocument"))
-                                    {
-                                        if !doc.is_null() {
-                                            print_json(doc);
-                                            found = true;
-                                            break;
-                                        }
-                                    }
+                                        .filter(|doc| !doc.is_null())
+                                {
+                                    print_json(doc);
+                                    found = true;
+                                    break;
                                 }
                             }
                         }
                         if !found {
-                            eprintln!("Document not found. Run `switchboard introspect` if cache is stale.");
+                            eprintln!(
+                                "Document not found. Run `switchboard introspect` if cache is stale."
+                            );
                         }
                     }
                     ["models", "list"] => {
@@ -396,9 +391,7 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                         }
                     }
                     _ => {
-                        eprintln!(
-                            "Unknown command: '{line}'. Type 'help' for available commands."
-                        );
+                        eprintln!("Unknown command: '{line}'. Type 'help' for available commands.");
                     }
                 }
             }

@@ -24,16 +24,23 @@ pub enum WatchCommand {
     },
 }
 
-pub async fn run(cmd: WatchCommand, format: OutputFormat, profile_name: Option<&str>, quiet: bool) -> Result<()> {
+pub async fn run(
+    cmd: WatchCommand,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+    quiet: bool,
+) -> Result<()> {
     let (_name, profile, _client) = helpers::setup(profile_name)?;
 
     // Derive WebSocket URL from the profile's HTTP URL
     // /graphql -> /graphql/r for the reactor subgraph which supports subscriptions
     let http_url = &profile.url;
-    let base = http_url
-        .trim_end_matches("/graphql")
-        .trim_end_matches('/');
-    let ws_scheme = if base.starts_with("https") { "wss" } else { "ws" };
+    let base = http_url.trim_end_matches("/graphql").trim_end_matches('/');
+    let ws_scheme = if base.starts_with("https") {
+        "wss"
+    } else {
+        "ws"
+    };
     let host = base
         .trim_start_matches("https://")
         .trim_start_matches("http://");
@@ -41,7 +48,15 @@ pub async fn run(cmd: WatchCommand, format: OutputFormat, profile_name: Option<&
 
     match cmd {
         WatchCommand::Docs { r#type, drive } => {
-            watch_docs(&ws_url, profile.token.as_deref(), r#type, drive, format, quiet).await
+            watch_docs(
+                &ws_url,
+                profile.token.as_deref(),
+                r#type,
+                drive,
+                format,
+                quiet,
+            )
+            .await
         }
         WatchCommand::Job { job_id } => {
             watch_job(&ws_url, profile.token.as_deref(), &job_id, format, quiet).await
@@ -124,7 +139,9 @@ async fn watch_job(
                 }
                 OutputFormat::Table => {
                     let status = job["status"].as_str().unwrap_or("?");
-                    let progress = job["progress"].as_f64().map(|p| format!("{:.0}%", p * 100.0));
+                    let progress = job["progress"]
+                        .as_f64()
+                        .map(|p| format!("{:.0}%", p * 100.0));
                     let message = job["message"].as_str().unwrap_or("");
                     match progress {
                         Some(p) => println!("[{status}] {p} {message}"),

@@ -44,7 +44,11 @@ pub enum DrivesCommand {
     },
 }
 
-pub async fn run(cmd: DrivesCommand, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
+pub async fn run(
+    cmd: DrivesCommand,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+) -> Result<()> {
     match cmd {
         DrivesCommand::List => list(format, profile_name).await,
         DrivesCommand::Get { id } => get(&id, format, profile_name).await,
@@ -128,14 +132,17 @@ async fn get(id: &str, format: OutputFormat, profile_name: Option<&str>) -> Resu
             println!("Name:     {}", drive["name"].as_str().unwrap_or("-"));
             println!("Slug:     {}", drive["slug"].as_str().unwrap_or("-"));
             println!("Revision: {}", drive["revision"]);
-            println!("Type:     {}", drive["documentType"].as_str().unwrap_or("-"));
+            println!(
+                "Type:     {}",
+                drive["documentType"].as_str().unwrap_or("-")
+            );
 
             // Show nodes summary
-            if let Some(nodes) = drive
-                .pointer("/state/nodes")
-                .and_then(|v| v.as_array())
-            {
-                let files = nodes.iter().filter(|n| n["kind"].as_str() == Some("file")).count();
+            if let Some(nodes) = drive.pointer("/state/nodes").and_then(|v| v.as_array()) {
+                let files = nodes
+                    .iter()
+                    .filter(|n| n["kind"].as_str() == Some("file"))
+                    .count();
                 let folders = nodes
                     .iter()
                     .filter(|n| n["kind"].as_str() == Some("folder"))
@@ -164,9 +171,7 @@ async fn create(
 
     let name = match name {
         Some(n) => n,
-        None => Input::new()
-            .with_prompt("Drive name")
-            .interact_text()?,
+        None => Input::new().with_prompt("Drive name").interact_text()?,
     };
 
     let default_slug = name
@@ -239,9 +244,8 @@ async fn create(
         args.push_str(&format!(r#", preferredEditor: "{editor}""#));
     }
 
-    let mutation = format!(
-        r#"mutation {{ addDrive({args}) {{ id slug name icon preferredEditor }} }}"#
-    );
+    let mutation =
+        format!(r#"mutation {{ addDrive({args}) {{ id slug name icon preferredEditor }} }}"#);
 
     let data = client.query(&mutation, None).await?;
     let drive = &data["addDrive"];

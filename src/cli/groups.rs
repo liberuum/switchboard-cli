@@ -55,7 +55,11 @@ pub enum GroupsCommand {
     },
 }
 
-pub async fn run(cmd: GroupsCommand, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
+pub async fn run(
+    cmd: GroupsCommand,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+) -> Result<()> {
     match cmd {
         GroupsCommand::List => list(format, profile_name).await,
         GroupsCommand::Get { id } => get(&id, format, profile_name).await,
@@ -69,26 +73,17 @@ pub async fn run(cmd: GroupsCommand, format: OutputFormat, profile_name: Option<
         GroupsCommand::RemoveUser { group_id, user } => {
             remove_user(&group_id, &user, format, profile_name).await
         }
-        GroupsCommand::UserGroups { address } => {
-            user_groups(&address, format, profile_name).await
-        }
+        GroupsCommand::UserGroups { address } => user_groups(&address, format, profile_name).await,
     }
 }
 
 /// Build a client pointing at the auth subgraph
 fn auth_url(base_url: &str) -> String {
-    if base_url.ends_with("/graphql") {
-        format!("{base_url}/auth")
-    } else {
-        format!("{base_url}/auth")
-    }
+    format!("{base_url}/auth")
 }
 
 fn make_auth_client(profile: &crate::config::Profile) -> crate::graphql::GraphQLClient {
-    crate::graphql::GraphQLClient::new(
-        auth_url(&profile.url),
-        profile.token.clone(),
-    )
+    crate::graphql::GraphQLClient::new(auth_url(&profile.url), profile.token.clone())
 }
 
 async fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
@@ -153,7 +148,10 @@ async fn get(id: &str, format: OutputFormat, profile_name: Option<&str>) -> Resu
         OutputFormat::Table => {
             println!("ID:          {}", group["id"].as_str().unwrap_or("-"));
             println!("Name:        {}", group["name"].as_str().unwrap_or("-"));
-            println!("Description: {}", group["description"].as_str().unwrap_or(""));
+            println!(
+                "Description: {}",
+                group["description"].as_str().unwrap_or("")
+            );
 
             if let Some(members) = group.get("members").and_then(|v| v.as_array()) {
                 println!("\nMembers ({}):", members.len());
@@ -227,7 +225,9 @@ async fn delete(id: &str, skip_confirm: bool, profile_name: Option<&str>) -> Res
 
     match auth_client.query(&mutation, None).await {
         Ok(_) => {}
-        Err(_) => { client.query(&mutation, None).await?; }
+        Err(_) => {
+            client.query(&mutation, None).await?;
+        }
     }
 
     println!("{} Group deleted.", "✓".green());
@@ -287,7 +287,10 @@ async fn remove_user(
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
         OutputFormat::Table => {
-            println!("{} User '{user}' removed from group '{group_id}'", "✓".green());
+            println!(
+                "{} User '{user}' removed from group '{group_id}'",
+                "✓".green()
+            );
         }
     }
 

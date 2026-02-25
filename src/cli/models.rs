@@ -15,7 +15,11 @@ pub enum ModelsCommand {
     },
 }
 
-pub async fn run(cmd: ModelsCommand, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
+pub async fn run(
+    cmd: ModelsCommand,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+) -> Result<()> {
     match cmd {
         ModelsCommand::List => list(format, profile_name),
         ModelsCommand::Get { r#type } => get(&r#type, format, profile_name),
@@ -51,11 +55,7 @@ fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
                 .iter()
                 .map(|(doc_type, model)| {
                     let op_count = model.operations.len().saturating_sub(1);
-                    vec![
-                        doc_type.clone(),
-                        model.prefix.clone(),
-                        op_count.to_string(),
-                    ]
+                    vec![doc_type.clone(), model.prefix.clone(), op_count.to_string()]
                 })
                 .collect();
             print_table(&["Type", "Prefix", "Operations"], &rows);

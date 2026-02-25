@@ -28,11 +28,7 @@ pub struct MutateArgs {
     pub interactive: bool,
 }
 
-pub async fn run(
-    args: MutateArgs,
-    format: OutputFormat,
-    profile_name: Option<&str>,
-) -> Result<()> {
+pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
 
     // Resolve slug to UUID — model-specific queries require the actual drive UUID
@@ -53,21 +49,20 @@ pub async fn run(
             doc_id = args.doc_id.replace('"', r#"\""#),
         );
 
-        if let Ok(data) = client.query(&query, None).await {
-            if let Some(dt) = data
+        if let Ok(data) = client.query(&query, None).await
+            && let Some(dt) = data
                 .get(&model.prefix)
                 .and_then(|v| v.get("getDocument"))
                 .and_then(|v| v.get("documentType"))
                 .and_then(|v| v.as_str())
-            {
-                doc_type = Some(dt.to_string());
-                break;
-            }
+        {
+            doc_type = Some(dt.to_string());
+            break;
         }
     }
 
-    let doc_type =
-        doc_type.ok_or_else(|| anyhow::anyhow!("Could not determine document type for {}", args.doc_id))?;
+    let doc_type = doc_type
+        .ok_or_else(|| anyhow::anyhow!("Could not determine document type for {}", args.doc_id))?;
 
     let model = cache.find_model(&doc_type).ok_or_else(|| {
         anyhow::anyhow!("No model found for type {doc_type}. Run `switchboard introspect`.")
@@ -85,19 +80,18 @@ pub async fn run(
     }
 
     // Select operation
-    let operation = if args.interactive || args.operation.is_none() {
+    let operation = if let Some(ref op_name) = args.operation.filter(|_| !args.interactive) {
+        operations
+            .iter()
+            .find(|op| op.operation == *op_name)
+            .ok_or_else(|| anyhow::anyhow!("Unknown operation '{op_name}' for type {doc_type}"))?
+    } else {
         let op_names: Vec<&str> = operations.iter().map(|op| op.operation.as_str()).collect();
         let selection = Select::new()
             .with_prompt("Select operation")
             .items(&op_names)
             .interact()?;
         &operations[selection]
-    } else {
-        let op_name = args.operation.as_ref().unwrap();
-        operations
-            .iter()
-            .find(|op| op.operation == *op_name)
-            .ok_or_else(|| anyhow::anyhow!("Unknown operation '{op_name}' for type {doc_type}"))?
     };
 
     // Get input JSON

@@ -65,11 +65,9 @@ impl GraphQLClient {
             .await
             .context("Failed to parse GraphQL response")?;
 
-        if let Some(errors) = gql_response.errors {
-            if !errors.is_empty() {
-                let messages: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
-                bail!("GraphQL errors:\n  {}", messages.join("\n  "));
-            }
+        if let Some(errors) = gql_response.errors.filter(|e| !e.is_empty()) {
+            let messages: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
+            bail!("GraphQL errors:\n  {}", messages.join("\n  "));
         }
 
         gql_response.data.context("No data in GraphQL response")

@@ -78,9 +78,8 @@ async fn touch(input: &str, format: OutputFormat, profile_name: Option<&str>) ->
     let input_val = load_json_arg(input)?;
     let gql_input = json_to_gql(&input_val);
 
-    let mutation = format!(
-        r#"mutation {{ touchChannel(input: {gql_input}) {{ id name status }} }}"#
-    );
+    let mutation =
+        format!(r#"mutation {{ touchChannel(input: {gql_input}) {{ id name status }} }}"#);
 
     let data = client.query(&mutation, None).await?;
     let channel = &data["touchChannel"];
@@ -97,7 +96,11 @@ async fn touch(input: &str, format: OutputFormat, profile_name: Option<&str>) ->
     Ok(())
 }
 
-async fn push(envelopes_input: &str, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
+async fn push(
+    envelopes_input: &str,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
     let envelopes_val = load_json_arg(envelopes_input)?;
@@ -141,9 +144,8 @@ async fn poll(
         args.push_str(&format!(", outboxLatest: {l}"));
     }
 
-    let query = format!(
-        r#"{{ pollSyncEnvelopes({args}) {{ channelId envelopes {{ id data }} }} }}"#
-    );
+    let query =
+        format!(r#"{{ pollSyncEnvelopes({args}) {{ channelId envelopes {{ id data }} }} }}"#);
 
     let data = client.query(&query, None).await?;
     let result = &data["pollSyncEnvelopes"];
@@ -152,10 +154,7 @@ async fn poll(
         OutputFormat::Json | OutputFormat::Raw => print_json(result),
         OutputFormat::Table => {
             let channel = result["channelId"].as_str().unwrap_or("-");
-            let envelopes = result["envelopes"]
-                .as_array()
-                .map(|a| a.len())
-                .unwrap_or(0);
+            let envelopes = result["envelopes"].as_array().map(|a| a.len()).unwrap_or(0);
             println!("Channel:   {channel}");
             println!("Envelopes: {envelopes}");
             if envelopes > 0 {

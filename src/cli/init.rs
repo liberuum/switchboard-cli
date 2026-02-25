@@ -1,6 +1,6 @@
 use anyhow::Result;
 use colored::Colorize;
-use dialoguer::{Input, Confirm};
+use dialoguer::{Confirm, Input};
 
 use crate::config::{Profile, load_config, save_config};
 use crate::graphql::GraphQLClient;
@@ -75,10 +75,7 @@ pub async fn run() -> Result<()> {
         Ok(cache) => {
             let model_count = cache.models.len();
             save_cache(&name, &cache)?;
-            println!(
-                "{} {model_count} document models discovered.",
-                "✓".green()
-            );
+            println!("{} {model_count} document models discovered.", "✓".green());
         }
         Err(e) => {
             eprintln!(
@@ -101,7 +98,11 @@ pub async fn run() -> Result<()> {
         "{} Profile \"{}\" saved{}.",
         "✓".green(),
         name,
-        if config.get_profile(&name).map(|p| p.default).unwrap_or(false) {
+        if config
+            .get_profile(&name)
+            .map(|p| p.default)
+            .unwrap_or(false)
+        {
             " as default"
         } else {
             ""

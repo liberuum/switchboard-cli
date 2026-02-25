@@ -1,8 +1,8 @@
-mod table;
 mod json;
+mod table;
 
-pub use table::print_table;
 pub use json::print_json;
+pub use table::print_table;
 
 use clap::ValueEnum;
 

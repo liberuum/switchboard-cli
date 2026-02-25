@@ -57,13 +57,11 @@ pub enum DocsCommand {
     Mutate(mutate::MutateArgs),
 }
 
-pub async fn run(
-    cmd: DocsCommand,
-    format: OutputFormat,
-    profile_name: Option<&str>,
-) -> Result<()> {
+pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     match cmd {
-        DocsCommand::List { drive, r#type } => list(&drive, r#type.as_deref(), format, profile_name).await,
+        DocsCommand::List { drive, r#type } => {
+            list(&drive, r#type.as_deref(), format, profile_name).await
+        }
         DocsCommand::Get { id, drive } => get(&id, &drive, format, profile_name).await,
         DocsCommand::Tree { drive } => tree(&drive, format, profile_name).await,
         DocsCommand::Create {
@@ -153,11 +151,7 @@ async fn list(
             if !folders.is_empty() {
                 println!("\nFolders:");
                 for folder in &folders {
-                    println!(
-                        "  {} {}/",
-                        "\u{1F4C1}",
-                        folder["name"].as_str().unwrap_or("-")
-                    );
+                    println!("  \u{1F4C1} {}/", folder["name"].as_str().unwrap_or("-"));
                 }
             }
         }
@@ -197,18 +191,18 @@ async fn get(
                 if let Some(d) = data
                     .get(&model.prefix)
                     .and_then(|v| v.get("getDocument"))
+                    .filter(|d| !d.is_null())
                 {
-                    if !d.is_null() {
-                        doc = Some(d.clone());
-                        break;
-                    }
+                    doc = Some(d.clone());
+                    break;
                 }
             }
             Err(_) => continue,
         }
     }
 
-    let doc = doc.ok_or_else(|| anyhow::anyhow!("Document '{id}' not found in any model namespace"))?;
+    let doc =
+        doc.ok_or_else(|| anyhow::anyhow!("Document '{id}' not found in any model namespace"))?;
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&doc),
@@ -356,9 +350,7 @@ async fn create(
     // Get document name
     let name = match name {
         Some(n) => n,
-        None => Input::new()
-            .with_prompt("Document name")
-            .interact_text()?,
+        None => Input::new().with_prompt("Document name").interact_text()?,
     };
 
     // Get drive

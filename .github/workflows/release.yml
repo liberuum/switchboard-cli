@@ -2,8 +2,7 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
 
 permissions:
   contents: write
@@ -13,8 +12,56 @@ env:
   BINARY_NAME: switchboard
 
 jobs:
+  check:
+    name: Pre-release checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy -- -D warnings
+      - run: cargo test
+
+  version:
+    name: Resolve version
+    needs: check
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      tag: ${{ steps.get_version.outputs.tag }}
+      should_release: ${{ steps.check_tag.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version from Cargo.toml
+        id: get_version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Detected version: ${VERSION}"
+
+      - name: Check if tag already exists
+        id: check_tag
+        run: |
+          TAG="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists — skipping release"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag $TAG is new — will release"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -67,14 +114,14 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.archive }}.tar.gz ${{ env.BINARY_NAME }}
+          tar czf ../../../${{ env.BINARY_NAME }}-${{ needs.version.outputs.tag }}-${{ matrix.archive }}.tar.gz ${{ env.BINARY_NAME }}
         shell: bash
 
       - name: Package (windows)
         if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.archive }}.zip ${{ env.BINARY_NAME }}.exe
+          7z a ../../../${{ env.BINARY_NAME }}-${{ needs.version.outputs.tag }}-${{ matrix.archive }}.zip ${{ env.BINARY_NAME }}.exe
         shell: bash
 
       - name: Upload artifact
@@ -82,17 +129,20 @@ jobs:
         with:
           name: ${{ matrix.archive }}
           path: |
-            ${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.archive }}.tar.gz
-            ${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.archive }}.zip
+            ${{ env.BINARY_NAME }}-${{ needs.version.outputs.tag }}-${{ matrix.archive }}.tar.gz
+            ${{ env.BINARY_NAME }}-${{ needs.version.outputs.tag }}-${{ matrix.archive }}.zip
           if-no-files-found: ignore
 
   release:
     name: Create Release
-    needs: build
+    needs: [version, build]
+    if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -104,11 +154,30 @@ jobs:
         run: |
           cd artifacts
           sha256sum * > checksums-sha256.txt
-        shell: bash
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
           generate_release_notes: true
           files: |
             artifacts/*
+
+      - name: Bump patch version for next release
+        run: |
+          CURRENT="${{ needs.version.outputs.version }}"
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          PATCH=$(echo "$CURRENT" | cut -d. -f3)
+          NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          sed -i "s/^version = \"${CURRENT}\"/version = \"${NEXT}\"/" Cargo.toml
+          echo "Bumped version: ${CURRENT} → ${NEXT}"
+
+      - name: Push version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml
+          git commit -m "chore: bump version to $(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          git push

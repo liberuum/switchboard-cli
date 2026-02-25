@@ -31,7 +31,12 @@ pub enum JobsCommand {
     },
 }
 
-pub async fn run(cmd: JobsCommand, format: OutputFormat, profile_name: Option<&str>, quiet: bool) -> Result<()> {
+pub async fn run(
+    cmd: JobsCommand,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+    quiet: bool,
+) -> Result<()> {
     match cmd {
         JobsCommand::Status { job_id } => status(&job_id, format, profile_name).await,
         JobsCommand::Wait {
@@ -62,10 +67,8 @@ async fn status(job_id: &str, format: OutputFormat, profile_name: Option<&str>) 
             if let Some(p) = job["progress"].as_f64() {
                 println!("Progress: {:.0}%", p * 100.0);
             }
-            if let Some(msg) = job["message"].as_str() {
-                if !msg.is_empty() {
-                    println!("Message:  {msg}");
-                }
+            if let Some(msg) = job["message"].as_str().filter(|msg| !msg.is_empty()) {
+                println!("Message:  {msg}");
             }
             if let Some(created) = job["createdAt"].as_str() {
                 println!("Created:  {created}");
@@ -107,10 +110,8 @@ async fn wait(
                     OutputFormat::Json | OutputFormat::Raw => print_json(job),
                     OutputFormat::Table => {
                         println!("Job {} finished: {}", job_id, status_str);
-                        if let Some(msg) = job["message"].as_str() {
-                            if !msg.is_empty() {
-                                println!("Message: {msg}");
-                            }
+                        if let Some(msg) = job["message"].as_str().filter(|msg| !msg.is_empty()) {
+                            println!("Message: {msg}");
                         }
                     }
                 }
@@ -135,14 +136,21 @@ async fn wait(
     }
 }
 
-async fn watch(job_id: &str, format: OutputFormat, profile_name: Option<&str>, quiet: bool) -> Result<()> {
+async fn watch(
+    job_id: &str,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+    quiet: bool,
+) -> Result<()> {
     let (_name, profile, _client) = helpers::setup(profile_name)?;
 
     let http_url = &profile.url;
-    let base = http_url
-        .trim_end_matches("/graphql")
-        .trim_end_matches('/');
-    let ws_scheme = if base.starts_with("https") { "wss" } else { "ws" };
+    let base = http_url.trim_end_matches("/graphql").trim_end_matches('/');
+    let ws_scheme = if base.starts_with("https") {
+        "wss"
+    } else {
+        "ws"
+    };
     let host = base
         .trim_start_matches("https://")
         .trim_start_matches("http://");
@@ -158,23 +166,28 @@ async fn watch(job_id: &str, format: OutputFormat, profile_name: Option<&str>, q
         eprintln!("Press Ctrl+C to stop.\n");
     }
 
-    websocket::subscribe(&ws_url, profile.token.as_deref(), &subscription, |data: Value| {
-        if let Some(job) = data.get("jobChanges") {
-            match format {
-                OutputFormat::Json | OutputFormat::Raw => {
-                    println!("{}", serde_json::to_string(job).unwrap_or_default());
-                }
-                OutputFormat::Table => {
-                    let s = job["status"].as_str().unwrap_or("?");
-                    let msg = job["message"].as_str().unwrap_or("");
-                    if let Some(p) = job["progress"].as_f64() {
-                        println!("[{s}] {:.0}% {msg}", p * 100.0);
-                    } else {
-                        println!("[{s}] {msg}");
+    websocket::subscribe(
+        &ws_url,
+        profile.token.as_deref(),
+        &subscription,
+        |data: Value| {
+            if let Some(job) = data.get("jobChanges") {
+                match format {
+                    OutputFormat::Json | OutputFormat::Raw => {
+                        println!("{}", serde_json::to_string(job).unwrap_or_default());
+                    }
+                    OutputFormat::Table => {
+                        let s = job["status"].as_str().unwrap_or("?");
+                        let msg = job["message"].as_str().unwrap_or("");
+                        if let Some(p) = job["progress"].as_f64() {
+                            println!("[{s}] {:.0}% {msg}", p * 100.0);
+                        } else {
+                            println!("[{s}] {msg}");
+                        }
                     }
                 }
             }
-        }
-    })
+        },
+    )
     .await
 }

@@ -56,10 +56,7 @@ pub async fn run(format: OutputFormat, profile_name: Option<&str>) -> Result<()>
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
         OutputFormat::Table => {
             // For table mode, show a summary instead of the massive schema
-            if let Some(types) = data
-                .pointer("/__schema/types")
-                .and_then(|v| v.as_array())
-            {
+            if let Some(types) = data.pointer("/__schema/types").and_then(|v| v.as_array()) {
                 let user_types: Vec<_> = types
                     .iter()
                     .filter(|t| {
@@ -68,12 +65,30 @@ pub async fn run(format: OutputFormat, profile_name: Option<&str>) -> Result<()>
                     })
                     .collect();
 
-                let objects = user_types.iter().filter(|t| t["kind"].as_str() == Some("OBJECT")).count();
-                let inputs = user_types.iter().filter(|t| t["kind"].as_str() == Some("INPUT_OBJECT")).count();
-                let enums = user_types.iter().filter(|t| t["kind"].as_str() == Some("ENUM")).count();
-                let scalars = user_types.iter().filter(|t| t["kind"].as_str() == Some("SCALAR")).count();
-                let unions = user_types.iter().filter(|t| t["kind"].as_str() == Some("UNION")).count();
-                let interfaces = user_types.iter().filter(|t| t["kind"].as_str() == Some("INTERFACE")).count();
+                let objects = user_types
+                    .iter()
+                    .filter(|t| t["kind"].as_str() == Some("OBJECT"))
+                    .count();
+                let inputs = user_types
+                    .iter()
+                    .filter(|t| t["kind"].as_str() == Some("INPUT_OBJECT"))
+                    .count();
+                let enums = user_types
+                    .iter()
+                    .filter(|t| t["kind"].as_str() == Some("ENUM"))
+                    .count();
+                let scalars = user_types
+                    .iter()
+                    .filter(|t| t["kind"].as_str() == Some("SCALAR"))
+                    .count();
+                let unions = user_types
+                    .iter()
+                    .filter(|t| t["kind"].as_str() == Some("UNION"))
+                    .count();
+                let interfaces = user_types
+                    .iter()
+                    .filter(|t| t["kind"].as_str() == Some("INTERFACE"))
+                    .count();
 
                 println!("Schema Summary:");
                 println!("  Objects:    {objects}");

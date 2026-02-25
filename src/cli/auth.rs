@@ -32,7 +32,11 @@ pub async fn run(cmd: AuthCommand, format: OutputFormat, profile_name: Option<&s
     }
 }
 
-async fn login(token: Option<String>, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
+async fn login(
+    token: Option<String>,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+) -> Result<()> {
     let mut config = load_config()?;
     let (name, _profile) = helpers::resolve_profile(&config, profile_name)?;
 

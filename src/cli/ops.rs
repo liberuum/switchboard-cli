@@ -43,31 +43,24 @@ pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>
             doc_id = args.doc_id.replace('"', r#"\""#),
         );
 
-        if let Ok(data) = client.query(&query, None).await {
-            if let Some(operations) = data
+        if let Ok(data) = client.query(&query, None).await
+            && let Some(operations) = data
                 .get(&model.prefix)
                 .and_then(|v| v.get("getDocument"))
                 .and_then(|v| v.get("operations"))
                 .and_then(|v| v.as_array())
-            {
-                if !operations.is_empty() {
-                    ops = Some(operations.clone());
-                    break;
-                }
-            }
+                .filter(|operations| !operations.is_empty())
+        {
+            ops = Some(operations.clone());
+            break;
         }
     }
 
-    let all_ops = ops.ok_or_else(|| {
-        anyhow::anyhow!("No operations found for document {}", args.doc_id)
-    })?;
+    let all_ops =
+        ops.ok_or_else(|| anyhow::anyhow!("No operations found for document {}", args.doc_id))?;
 
     let total = all_ops.len();
-    let displayed: Vec<&Value> = all_ops
-        .iter()
-        .skip(args.skip)
-        .take(args.first)
-        .collect();
+    let displayed: Vec<&Value> = all_ops.iter().skip(args.skip).take(args.first).collect();
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => {
@@ -93,10 +86,7 @@ pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>
                         .or_else(|| op["timestampUtcMs"].as_u64().map(|_| ""))
                         .unwrap_or("-")
                         .to_string();
-                    let hash = helpers::truncate(
-                        op["hash"].as_str().unwrap_or("-"),
-                        10,
-                    );
+                    let hash = helpers::truncate(op["hash"].as_str().unwrap_or("-"), 10);
                     vec![index, op_type, timestamp, hash]
                 })
                 .collect();

@@ -82,8 +82,6 @@ async fn run() -> Result<()> {
     }
 }
 
-
-
 async fn ping(profile_name: Option<&str>, quiet: bool) -> Result<()> {
     let (_name, _profile, client) = cli::helpers::setup(profile_name)?;
 
@@ -131,9 +129,23 @@ async fn info(profile_name: Option<&str>, format: output::OutputFormat) -> Resul
         output::OutputFormat::Table => {
             println!("Profile:  {}", name.green());
             println!("URL:      {}", client.url);
-            println!("Auth:     {}", if client.has_token() { "configured" } else { "none" });
+            println!(
+                "Auth:     {}",
+                if client.has_token() {
+                    "configured"
+                } else {
+                    "none"
+                }
+            );
             println!("Drives:   {drives}");
-            println!("Models:   {models}{}", if models == 0 { " (run `switchboard introspect`)" } else { "" });
+            println!(
+                "Models:   {models}{}",
+                if models == 0 {
+                    " (run `switchboard introspect`)"
+                } else {
+                    ""
+                }
+            );
         }
     }
 
