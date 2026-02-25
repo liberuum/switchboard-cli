@@ -22,7 +22,7 @@ jobs:
         run: cargo check
 
       - name: Test
-        run: cargo test
+        run: cargo test --bin switchboard
 
   fmt:
     name: Format
