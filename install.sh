@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+#
+# Switchboard CLI installer
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/main/install.sh | bash
+#
+# Environment variables:
+#   INSTALL_DIR   — where to place the binary (default: /usr/local/bin)
+#   VERSION       — specific version to install (default: latest)
+
+set -euo pipefail
+
+REPO="liberuum/switchboard-cli"
+BINARY_NAME="switchboard"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+
+# --- helpers ----------------------------------------------------------------
+
+info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+ok()    { printf '\033[1;32m ✓\033[0m  %s\n' "$*"; }
+err()   { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+need_cmd() {
+  command -v "$1" > /dev/null 2>&1 || err "Required command not found: $1"
+}
+
+# --- detect platform --------------------------------------------------------
+
+detect_platform() {
+  local os arch
+
+  os="$(uname -s)"
+  arch="$(uname -m)"
+
+  case "$os" in
+    Linux*)  os="linux" ;;
+    Darwin*) os="darwin" ;;
+    MINGW*|MSYS*|CYGWIN*) os="windows" ;;
+    *) err "Unsupported OS: $os" ;;
+  esac
+
+  case "$arch" in
+    x86_64|amd64)  arch="x86_64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    *) err "Unsupported architecture: $arch" ;;
+  esac
+
+  echo "${os}-${arch}"
+}
+
+# --- resolve version --------------------------------------------------------
+
+resolve_version() {
+  if [ -n "${VERSION:-}" ]; then
+    echo "$VERSION"
+    return
+  fi
+
+  need_cmd curl
+
+  local latest
+  latest="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+    | grep '"tag_name"' \
+    | head -1 \
+    | sed -E 's/.*"tag_name":\s*"([^"]+)".*/\1/')"
+
+  [ -n "$latest" ] || err "Could not determine latest version. Set VERSION= explicitly."
+  echo "$latest"
+}
+
+# --- download and install ---------------------------------------------------
+
+install() {
+  need_cmd curl
+  need_cmd tar
+
+  local platform version archive_name url tmpdir
+
+  platform="$(detect_platform)"
+  version="$(resolve_version)"
+  archive_name="${BINARY_NAME}-${version}-${platform}.tar.gz"
+  url="https://github.com/${REPO}/releases/download/${version}/${archive_name}"
+
+  info "Installing ${BINARY_NAME} ${version} (${platform})"
+
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  info "Downloading ${url}"
+  curl -fsSL "$url" -o "${tmpdir}/${archive_name}" \
+    || err "Download failed. Check that version '${version}' exists and has a release for ${platform}."
+
+  info "Extracting archive"
+  tar -xzf "${tmpdir}/${archive_name}" -C "$tmpdir"
+
+  # The archive should contain the binary at the top level
+  if [ ! -f "${tmpdir}/${BINARY_NAME}" ]; then
+    # Try to find it nested
+    local found
+    found="$(find "$tmpdir" -name "$BINARY_NAME" -type f | head -1)"
+    [ -n "$found" ] || err "Binary '${BINARY_NAME}' not found in archive"
+    mv "$found" "${tmpdir}/${BINARY_NAME}"
+  fi
+
+  info "Installing to ${INSTALL_DIR}/${BINARY_NAME}"
+  if [ -w "$INSTALL_DIR" ]; then
+    mv "${tmpdir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+  else
+    sudo mv "${tmpdir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+  fi
+  chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
+
+  ok "Installed ${BINARY_NAME} ${version} to ${INSTALL_DIR}/${BINARY_NAME}"
+
+  # Check if INSTALL_DIR is in PATH
+  case ":${PATH}:" in
+    *":${INSTALL_DIR}:"*) ;;
+    *)
+      echo ""
+      info "${INSTALL_DIR} is not in your PATH. Add it with:"
+      echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+      ;;
+  esac
+
+  echo ""
+  info "Get started with:"
+  echo "  ${BINARY_NAME} init"
+}
+
+install
