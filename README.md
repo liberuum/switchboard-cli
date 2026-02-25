@@ -220,7 +220,8 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard interactive` | Launch interactive REPL mode |
 | `switchboard update` | Self-update to the latest release (shows changelog) |
 | `switchboard update --check` | Check for updates without installing |
-| `switchboard completions <shell>` | Generate shell completions (bash/zsh/fish) |
+| `switchboard completions [shell]` | Generate shell completions (auto-detects shell) |
+| `switchboard completions --install` | Auto-install completions into your shell config |
 | `switchboard guide <topic>` | Built-in documentation |
 
 ## Global Flags
@@ -361,17 +362,18 @@ Features:
 
 ## Shell Completions
 
-Generate completions for your shell and add them to your shell config:
+The easiest way to set up tab-completion is:
 
 ```bash
-# Bash
-switchboard completions bash >> ~/.bashrc
+switchboard completions --install
+```
 
-# Zsh
-switchboard completions zsh >> ~/.zshrc
+This auto-detects your shell and adds completions to your config file (`~/.zshrc`, `~/.bashrc`, or fish completions dir). The installer also runs this automatically.
 
-# Fish
-switchboard completions fish >> ~/.config/fish/completions/switchboard.fish
+For manual setup, you can output raw completions:
+
+```bash
+switchboard completions bash   # or zsh, fish
 ```
 
 ## Built-in Documentation

@@ -131,6 +131,11 @@ install() {
       ;;
   esac
 
+  # --- setup shell completions -----------------------------------------------
+
+  info "Setting up shell completions"
+  "${INSTALL_DIR}/${BINARY_NAME}" completions --install 2>/dev/null || true
+
   # --- welcome message -------------------------------------------------------
 
   echo ""

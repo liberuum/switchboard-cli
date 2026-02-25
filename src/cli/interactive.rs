@@ -92,6 +92,7 @@ impl ReplHelper {
             "introspect".into(),
             "update".into(),
             "update --check".into(),
+            "completions --install".into(),
             "guide ".into(),
             // REPL-only
             "help".into(),

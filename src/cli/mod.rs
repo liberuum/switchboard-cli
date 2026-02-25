@@ -26,7 +26,6 @@ use colored::Colorize;
 
 use crate::output::OutputFormat;
 use clap::{Parser, Subcommand};
-use clap_complete::Shell;
 
 #[derive(Parser)]
 #[command(name = "switchboard", about = "CLI for Switchboard GraphQL instances")]
@@ -142,11 +141,8 @@ pub enum Commands {
     #[command(subcommand)]
     Guide(guide::GuideCommand),
 
-    /// Generate shell completions
-    Completions {
-        /// Shell to generate completions for
-        shell: Shell,
-    },
+    /// Generate shell completions (auto-detects shell, or specify explicitly)
+    Completions(completions::CompletionsArgs),
 }
 
 /// Central dispatcher shared by both the CLI entry point and the interactive REPL.
@@ -181,7 +177,7 @@ pub async fn dispatch(
         Commands::Update(args) => update::run(args.check, quiet).await,
         Commands::Interactive => anyhow::bail!("Already in interactive mode"),
         Commands::Guide(topic) => guide::run(topic),
-        Commands::Completions { shell } => completions::run(shell),
+        Commands::Completions(args) => completions::run(args),
     }
 }
 

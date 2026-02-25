@@ -659,7 +659,8 @@ TOOLS
   interactive (or -i)           Launch REPL mode
   update [--check]              Self-update to latest release
   schema                        Dump GraphQL schema
-  completions <shell>           Generate shell completions
+  completions [shell]           Generate shell completions
+  completions --install          Auto-install completions into shell config
   guide <topic>                 Built-in documentation
 
 GLOBAL FLAGS
