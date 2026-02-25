@@ -236,10 +236,7 @@ pub async fn run(check: bool, quiet: bool) -> Result<()> {
 
     // Try direct replacement first; fall back to sudo if permission denied
     if self_replace::self_replace(&temp_path).is_err() {
-        eprintln!(
-            "Need elevated permissions to update {}",
-            exe_path.display()
-        );
+        eprintln!("Need elevated permissions to update {}", exe_path.display());
         let status = std::process::Command::new("sudo")
             .args(["cp", "-f"])
             .arg(&temp_path)
