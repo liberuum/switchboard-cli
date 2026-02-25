@@ -51,9 +51,9 @@ This CLI is a standalone tool — it doesn't share code with the TypeScript mono
 | **Single static binary** | One file, no dependencies. Download it, run it. Works offline. |
 | **No runtime required** | No Node.js, no Python, no Java. Just the binary on your PATH |
 | **Tiny footprint** | ~8–12 MB binary, minimal memory usage even with large result sets |
-| **Cross-platform** | Compiles to Linux (x64/arm64), macOS (Intel/Apple Silicon), and Windows |
+| **Cross-platform** | Compiles to Linux x86_64 and macOS Apple Silicon — the two platforms that matter |
 | **Reliable concurrency** | Tokio async runtime for WebSocket subscriptions and parallel operations |
-| **Battle-tested ecosystem** | clap (CLI parsing), reqwest (HTTP), serde (JSON), tokio-tungstenite (WebSocket) |
+| **Battle-tested ecosystem** | clap (CLI parsing), reqwest + rustls (HTTP/TLS), serde (JSON), tokio-tungstenite (WebSocket) |
 
 ## Installation
 
@@ -77,7 +77,12 @@ See [How the install script works](#how-the-install-script-works) for details.
 
 ### From GitHub Releases (manual)
 
-Download the prebuilt binary for your platform from the [Releases](https://github.com/liberuum/switchboard-cli/releases) page, extract it, and add it to your PATH.
+Download the prebuilt binary for your platform from the [Releases](https://github.com/liberuum/switchboard-cli/releases) page, extract it, and add it to your PATH. On macOS, clear the quarantine flag first:
+
+```bash
+xattr -d com.apple.quarantine ./switchboard
+sudo mv switchboard /usr/local/bin/
+```
 
 ### Homebrew (macOS/Linux, when published)
 
@@ -487,19 +492,7 @@ cargo build --release
 
 ### Cross-compilation
 
-To build for a different platform, add the target and build:
-
-```bash
-# Linux x86_64 (from macOS)
-rustup target add x86_64-unknown-linux-gnu
-cargo build --release --target x86_64-unknown-linux-gnu
-
-# Linux ARM64
-rustup target add aarch64-unknown-linux-gnu
-cargo build --release --target aarch64-unknown-linux-gnu
-```
-
-For Linux targets from macOS, you may need a cross-linker. [cross](https://github.com/cross-rs/cross) handles this automatically:
+To build for Linux from macOS, you'll need a cross-linker. [cross](https://github.com/cross-rs/cross) handles this automatically:
 
 ```bash
 cargo install cross
@@ -516,7 +509,7 @@ curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/main/insta
 
 Here's what it does, step by step:
 
-1. **Detects your platform** — runs `uname -s` (OS) and `uname -m` (architecture) to determine the correct binary. Supports Linux/macOS on x86_64 and ARM64.
+1. **Detects your platform** — runs `uname -s` (OS) and `uname -m` (architecture) to determine the correct binary. Supports Linux x86_64 and macOS ARM64 (Apple Silicon).
 
 2. **Resolves the version** — if `VERSION` is not set, it queries the GitHub API (`/repos/.../releases/latest`) to find the most recent release tag.
 
@@ -524,9 +517,11 @@ Here's what it does, step by step:
 
 4. **Extracts the binary** — unpacks the `.tar.gz` archive and locates the `switchboard` binary inside.
 
-5. **Installs to your PATH** — moves the binary to `/usr/local/bin` (or your custom `INSTALL_DIR`). Uses `sudo` only if the directory isn't writable by the current user.
+5. **Clears macOS quarantine** — on macOS, removes the `com.apple.quarantine` extended attribute so Gatekeeper doesn't block the binary.
 
-6. **Verifies PATH** — checks if the install directory is in your `$PATH` and prints a hint if it isn't.
+6. **Installs to your PATH** — moves the binary to `/usr/local/bin` (or your custom `INSTALL_DIR`). Uses `sudo` only if the directory isn't writable by the current user.
+
+7. **Verifies PATH** — checks if the install directory is in your `$PATH` and prints a hint if it isn't.
 
 The script requires only `curl` and `tar`, which are available by default on macOS and most Linux distributions. It cleans up the temporary directory on exit regardless of success or failure.
 
@@ -543,7 +538,7 @@ Two GitHub Actions workflows are included in `.github/workflows/`:
 
 ### CI (`ci.yml`)
 
-Runs on every push to `main` and on pull requests. Three parallel jobs:
+Runs on pull requests to `main`. Three parallel jobs:
 
 - **Check & Test** — `cargo check` and `cargo test`
 - **Format** — `cargo fmt --check` (fails if code isn't formatted)
@@ -551,36 +546,36 @@ Runs on every push to `main` and on pull requests. Three parallel jobs:
 
 ### Release (`release.yml`)
 
-Triggered when you push a version tag. Builds binaries for 5 targets, creates a GitHub Release, and attaches all archives with checksums.
+**Every push to `main` automatically creates a new release.** No manual tagging required.
 
-**To cut a release:**
+The workflow:
+
+1. Runs pre-release checks (fmt, clippy, test)
+2. Computes the next version by incrementing the patch from the latest `v*` tag (e.g. `v0.1.2` → `v0.1.3`). If no tags exist, starts at `v0.1.0`
+3. Builds in parallel across 2 targets:
+
+   | Target                     | Runner        | Archive name            |
+   |----------------------------|---------------|-------------------------|
+   | `x86_64-unknown-linux-gnu` | ubuntu-latest | `linux-x86_64.tar.gz`   |
+   | `aarch64-apple-darwin`     | macos-14      | `darwin-aarch64.tar.gz` |
+
+4. Strips binaries and ad-hoc codesigns the macOS binary
+5. Generates `checksums-sha256.txt` covering all archives
+6. Creates a GitHub Release with auto-generated release notes and all artifacts attached
+7. Updates `Cargo.toml` to reflect the released version and pushes back to `main`
+
+A `concurrency` group ensures only one release runs at a time. If multiple pushes arrive quickly, the queued run waits and then correctly computes the next version.
+
+For **major or minor version bumps** (e.g. `v1.0.0`), create the tag manually:
 
 ```bash
-# Update version in Cargo.toml, then:
-git add Cargo.toml Cargo.lock
-git commit -m "release: v0.2.0"
-git tag v0.2.0
-git push origin main --tags
+git tag v1.0.0
+git push --tags
 ```
 
-The workflow will:
+The next auto-release will increment from that tag.
 
-1. Build in parallel across 5 targets:
-
-   | Target                        | Runner        | Archive name             |
-   |-------------------------------|---------------|--------------------------|
-   | `x86_64-unknown-linux-gnu`    | ubuntu-latest | `linux-x86_64.tar.gz`    |
-   | `aarch64-unknown-linux-gnu`   | ubuntu-latest | `linux-aarch64.tar.gz`   |
-   | `x86_64-apple-darwin`         | macos-13      | `darwin-x86_64.tar.gz`   |
-   | `aarch64-apple-darwin`        | macos-14      | `darwin-aarch64.tar.gz`  |
-   | `x86_64-pc-windows-msvc`      | windows-latest| `windows-x86_64.zip`     |
-
-2. Generate `checksums-sha256.txt` covering all archives
-3. Create a GitHub Release with auto-generated release notes and all artifacts attached
-
-The Linux ARM64 build uses [cross](https://github.com/cross-rs/cross) for cross-compilation. All other targets build natively on their respective runners.
-
-Once the release is published, the `install.sh` script will automatically pick it up — it queries `/releases/latest` from the GitHub API.
+Once a release is published, the `install.sh` script will automatically pick it up — it queries `/releases/latest` from the GitHub API.
 
 ## Environment Variables
 
