@@ -36,8 +36,7 @@ detect_platform() {
   case "$os" in
     Linux*)  os="linux" ;;
     Darwin*) os="darwin" ;;
-    MINGW*|MSYS*|CYGWIN*) os="windows" ;;
-    *) err "Unsupported OS: $os" ;;
+    *) err "Unsupported OS: $os (only Linux and macOS are supported)" ;;
   esac
 
   case "$arch" in
@@ -101,6 +100,11 @@ install() {
     found="$(find "$tmpdir" -name "$BINARY_NAME" -type f | head -1)"
     [ -n "$found" ] || err "Binary '${BINARY_NAME}' not found in archive"
     mv "$found" "${tmpdir}/${BINARY_NAME}"
+  fi
+
+  # macOS: remove quarantine flag so Gatekeeper doesn't block the binary
+  if [ "$(uname -s)" = "Darwin" ]; then
+    xattr -d com.apple.quarantine "${tmpdir}/${BINARY_NAME}" 2>/dev/null || true
   fi
 
   info "Installing to ${INSTALL_DIR}/${BINARY_NAME}"

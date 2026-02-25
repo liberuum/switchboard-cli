@@ -1,6 +1,6 @@
 [package]
 name = "switchboard-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A standalone CLI for interacting with Switchboard GraphQL instances"
 license = "MIT"
@@ -17,7 +17,7 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -45,7 +45,7 @@ zip = "2"
 clap_complete = "4"
 
 # WebSocket support (subscriptions)
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 url = "2"
 
