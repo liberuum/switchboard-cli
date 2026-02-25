@@ -222,10 +222,7 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                                         .iter()
                                         .map(|d| {
                                             vec![
-                                                helpers::truncate(
-                                                    d["id"].as_str().unwrap_or("-"),
-                                                    24,
-                                                ),
+                                                d["id"].as_str().unwrap_or("-").to_string(),
                                                 d["name"].as_str().unwrap_or("-").to_string(),
                                                 d["slug"].as_str().unwrap_or("-").to_string(),
                                             ]
@@ -269,10 +266,7 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                                         .iter()
                                         .map(|d| {
                                             vec![
-                                                helpers::truncate(
-                                                    d["id"].as_str().unwrap_or("-"),
-                                                    24,
-                                                ),
+                                                d["id"].as_str().unwrap_or("-").to_string(),
                                                 d["name"].as_str().unwrap_or("-").to_string(),
                                                 d["documentType"]
                                                     .as_str()

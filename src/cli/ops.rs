@@ -86,7 +86,7 @@ pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>
                         .or_else(|| op["timestampUtcMs"].as_u64().map(|_| ""))
                         .unwrap_or("-")
                         .to_string();
-                    let hash = helpers::truncate(op["hash"].as_str().unwrap_or("-"), 10);
+                    let hash = op["hash"].as_str().unwrap_or("-").to_string();
                     vec![index, op_type, timestamp, hash]
                 })
                 .collect();

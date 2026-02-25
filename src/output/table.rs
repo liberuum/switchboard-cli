@@ -5,7 +5,7 @@ pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let mut table = Table::new();
     table
         .load_preset(UTF8_FULL)
-        .set_content_arrangement(ContentArrangement::Dynamic);
+        .set_content_arrangement(ContentArrangement::Disabled);
 
     table.set_header(headers);
 

@@ -4,7 +4,7 @@ use colored::Colorize;
 use dialoguer::{Confirm, Input};
 use serde_json::Value;
 
-use crate::cli::helpers::{self, resolve_drive_id, truncate};
+use crate::cli::helpers::{self, resolve_drive_id};
 use crate::output::{OutputFormat, print_json, print_table};
 
 #[derive(Subcommand)]
@@ -90,7 +90,7 @@ async fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
                 .iter()
                 .map(|d| {
                     vec![
-                        truncate(d["id"].as_str().unwrap_or("-"), 24),
+                        d["id"].as_str().unwrap_or("-").to_string(),
                         d["name"].as_str().unwrap_or("-").to_string(),
                         d["slug"].as_str().unwrap_or("-").to_string(),
                     ]
