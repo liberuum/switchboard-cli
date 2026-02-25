@@ -18,7 +18,11 @@ pub mod ops;
 pub mod query;
 pub mod schema;
 pub mod sync;
+pub mod update;
 pub mod watch;
+
+use anyhow::Result;
+use colored::Colorize;
 
 use crate::output::OutputFormat;
 use clap::{Parser, Subcommand};
@@ -128,6 +132,9 @@ pub enum Commands {
     #[command(subcommand)]
     Sync(sync::SyncCommand),
 
+    /// Update the CLI to the latest version
+    Update(update::UpdateArgs),
+
     /// Launch interactive REPL mode
     Interactive,
 
@@ -140,4 +147,110 @@ pub enum Commands {
         /// Shell to generate completions for
         shell: Shell,
     },
+}
+
+/// Central dispatcher shared by both the CLI entry point and the interactive REPL.
+pub async fn dispatch(
+    command: Commands,
+    format: OutputFormat,
+    profile: Option<&str>,
+    quiet: bool,
+) -> Result<()> {
+    match command {
+        Commands::Init => init::run().await,
+        Commands::Config(cmd) => config::run(cmd, format).await,
+        Commands::Introspect => introspect::run(profile, quiet).await,
+        Commands::Ping => ping(profile, quiet).await,
+        Commands::Info => info(profile, format).await,
+        Commands::Schema => schema::run(format, profile).await,
+        Commands::Drives(cmd) => drives::run(cmd, format, profile).await,
+        Commands::Docs(cmd) => docs::run(cmd, format, profile).await,
+        Commands::Models(cmd) => models::run(cmd, format, profile).await,
+        Commands::Ops(args) => ops::run(args, format, profile).await,
+        Commands::Query(args) => query::run(args, format, profile).await,
+        Commands::Export(cmd) => import_export::run_export(cmd, format, profile, quiet).await,
+        Commands::Import { files, drive } => {
+            import_export::run_import(files, drive, format, profile, quiet).await
+        }
+        Commands::Auth(cmd) => auth::run(cmd, format, profile).await,
+        Commands::Access(cmd) => access::run(cmd, format, profile).await,
+        Commands::Groups(cmd) => groups::run(cmd, format, profile).await,
+        Commands::Watch(cmd) => watch::run(cmd, format, profile, quiet).await,
+        Commands::Jobs(cmd) => jobs::run(cmd, format, profile, quiet).await,
+        Commands::Sync(cmd) => sync::run(cmd, format, profile).await,
+        Commands::Update(args) => update::run(args.check, quiet).await,
+        Commands::Interactive => anyhow::bail!("Already in interactive mode"),
+        Commands::Guide(topic) => guide::run(topic),
+        Commands::Completions { shell } => completions::run(shell),
+    }
+}
+
+async fn ping(profile_name: Option<&str>, quiet: bool) -> Result<()> {
+    let (_name, _profile, client) = helpers::setup(profile_name)?;
+
+    let start = std::time::Instant::now();
+    client.query("{ drives }", None).await?;
+    let elapsed = start.elapsed();
+
+    if !quiet {
+        println!(
+            "{} {} responded in {:.0?}",
+            "✓".green(),
+            client.url,
+            elapsed
+        );
+    }
+    Ok(())
+}
+
+async fn info(profile_name: Option<&str>, format: OutputFormat) -> Result<()> {
+    let (name, _profile, client) = helpers::setup(profile_name)?;
+
+    let data = client
+        .query("{ driveDocuments { id name slug } }", None)
+        .await?;
+
+    let drives = data
+        .get("driveDocuments")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    let cache = crate::graphql::introspection::load_cache(&name)?;
+    let models = cache.as_ref().map(|c| c.models.len()).unwrap_or(0);
+
+    match format {
+        OutputFormat::Json | OutputFormat::Raw => {
+            crate::output::print_json(&serde_json::json!({
+                "profile": name,
+                "url": client.url,
+                "drives": drives,
+                "models": models,
+                "has_token": client.has_token(),
+            }));
+        }
+        OutputFormat::Table => {
+            println!("Profile:  {}", name.green());
+            println!("URL:      {}", client.url);
+            println!(
+                "Auth:     {}",
+                if client.has_token() {
+                    "configured"
+                } else {
+                    "none"
+                }
+            );
+            println!("Drives:   {drives}");
+            println!(
+                "Models:   {models}{}",
+                if models == 0 {
+                    " (run `switchboard introspect`)"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+
+    Ok(())
 }

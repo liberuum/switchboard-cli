@@ -51,3 +51,8 @@ url = "2"
 
 # Interactive REPL (readline, history, tab completion)
 rustyline = "15"
+
+# Self-update (download + extract + replace binary)
+self-replace = "1"
+flate2 = "1"
+tar = "0.4"

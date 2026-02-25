@@ -45,10 +45,10 @@ pub enum DocsCommand {
         #[arg(long)]
         drive: Option<String>,
     },
-    /// Delete a document
+    /// Delete one or more documents
     Delete {
-        /// Document ID
-        id: String,
+        /// Document IDs
+        ids: Vec<String>,
         /// Skip confirmation
         #[arg(long, short = 'y')]
         yes: bool,
@@ -69,7 +69,7 @@ pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&s
             name,
             drive,
         } => create(r#type, name, drive, format, profile_name).await,
-        DocsCommand::Delete { id, yes } => delete(&id, yes, profile_name).await,
+        DocsCommand::Delete { ids, yes } => delete(&ids, yes, profile_name).await,
         DocsCommand::Mutate(args) => mutate::run(args, format, profile_name).await,
     }
 }
@@ -400,12 +400,17 @@ async fn create(
     Ok(())
 }
 
-async fn delete(id: &str, skip_confirm: bool, profile_name: Option<&str>) -> Result<()> {
+async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
     if !skip_confirm {
+        let label = if ids.len() == 1 {
+            format!("Delete document {}?", ids[0])
+        } else {
+            format!("Delete {} documents?", ids.len())
+        };
         let confirm = dialoguer::Confirm::new()
-            .with_prompt(format!("Delete document {id}?"))
+            .with_prompt(label)
             .default(false)
             .interact()?;
         if !confirm {
@@ -414,12 +419,23 @@ async fn delete(id: &str, skip_confirm: bool, profile_name: Option<&str>) -> Res
         }
     }
 
-    let mutation = format!(
-        r#"mutation {{ deleteDocument(id: "{id}") }}"#,
-        id = id.replace('"', r#"\""#)
-    );
-    client.query(&mutation, None).await?;
+    let mut failed = 0u32;
+    for id in ids {
+        let mutation = format!(
+            r#"mutation {{ deleteDocument(id: "{id}") }}"#,
+            id = id.replace('"', r#"\""#)
+        );
+        match client.query(&mutation, None).await {
+            Ok(_) => println!("{} Deleted document {id}", "✓".green()),
+            Err(e) => {
+                eprintln!("{} Failed to delete {id}: {e}", "✗".red());
+                failed += 1;
+            }
+        }
+    }
 
-    println!("{} Document deleted.", "✓".green());
+    if failed > 0 {
+        bail!("{failed} of {} deletes failed", ids.len());
+    }
     Ok(())
 }

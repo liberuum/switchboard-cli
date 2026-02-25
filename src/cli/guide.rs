@@ -156,7 +156,7 @@ COMMANDS
   switchboard drives get <id-or-slug>              Get drive details + file tree
   switchboard drives create                        Interactive drive creation
   switchboard drives create --name "My Drive"      Scripted creation
-  switchboard drives delete <id-or-slug> [-y]      Delete a drive
+  switchboard drives delete <ids...> [-y]          Delete one or more drives
 
 DRIVE CREATION (all flags)
 
@@ -175,7 +175,8 @@ EXAMPLES
 
   switchboard drives list --format json | jq '.[].slug'
   switchboard drives create --name "test" --slug "test-drive"
-  switchboard drives delete test-drive -y"#
+  switchboard drives delete test-drive -y
+  switchboard drives delete drive-1 drive-2 drive-3 -y"#
     );
 }
 
@@ -197,7 +198,7 @@ COMMANDS
   switchboard docs create              Interactive document creation
   switchboard docs create --type <type> --name <name> --drive <slug>
                                        Scripted creation
-  switchboard docs delete <id> [-y]    Delete a document
+  switchboard docs delete <ids...> [-y] Delete one or more documents
 
 MUTATIONS
 
@@ -431,26 +432,55 @@ fn print_interactive() {
         r#"INTERACTIVE REPL MODE
 
 Launch a persistent interactive session with tab completion and history.
+The REPL supports every CLI command — the same syntax you use on the command
+line works inside the REPL, parsed through the same clap-based parser.
 
 COMMAND
 
   switchboard interactive       Full subcommand
   switchboard -i                Shorthand flag
 
-REPL COMMANDS
+USING THE REPL
 
-  drives list                   List all drives
-  docs list <drive>             List documents in a drive
-  docs get <drive> <doc-id>     Get document details
-  docs tree <drive>             Show hierarchical tree view
-  models list                   List document models
-  query <graphql>               Run a raw GraphQL query
-  help                          Show available commands
-  exit / quit / q               Exit
+  Every CLI command works inside the REPL with the same syntax:
+
+  local> drives list
+  local> drives create --name "test" --slug test-drive
+  local> drives delete drive-1 drive-2 -y
+  local> docs list --drive my-drive --type powerhouse/invoice
+  local> docs tree --drive my-drive
+  local> docs create --type powerhouse/invoice --name "Q1" --drive my-drive
+  local> auth status
+  local> access show <doc-id>
+  local> export drive my-drive --out ./backup/
+  local> ping
+  local> info --format json
+  local> config list
+
+  Append --help to any command for its usage:
+
+  local> drives delete --help
+  local> docs mutate --help
+
+  Override --format or --profile per command:
+
+  local> drives list --format json
+  local> --profile staging drives list
+
+REPL-ONLY COMMANDS
+
+  help / ?                      Show available commands
+  exit / quit / q               Exit the REPL
+  query {{ ... }}                Run raw GraphQL without quotes
 
 FEATURES
 
-  - Tab completion for commands, drive slugs, and model types
+  - Full CLI parity — all commands work (drives, docs, models, auth,
+    access, groups, export, import, watch, jobs, sync, etc.)
+  - Tab completion for commands, drive slugs, model types, and guide topics
+  - Shell-like quoting — single quotes, double quotes, backslash escapes
+  - Per-command --format, --profile, --quiet overrides
+  - --help passthrough on any command
   - Persistent history across sessions (~/.switchboard/history)
   - Arrow keys for history navigation
   - Persistent HTTP connection (reuses client)
@@ -462,9 +492,10 @@ EXAMPLES
 
   $ switchboard -i
   local> drives list
-  local> docs tree liberuum-drive
-  local> docs list lib<TAB>          # completes to liberuum-drive
+  local> docs tree --drive lib<TAB>  # completes to liberuum-drive
+  local> drives delete old-1 old-2 -y
   local> query {{ drives }}
+  local> drives create --help
   local> exit"#
     );
 }
@@ -581,14 +612,14 @@ DRIVES
   drives list                   List all drives
   drives get <id>               Get drive details
   drives create                 Create a drive
-  drives delete <id> [-y]       Delete a drive
+  drives delete <ids...> [-y]   Delete one or more drives
 
 DOCUMENTS
   docs list --drive <id>        List documents
   docs get <id> --drive <id>    Get document state
   docs tree --drive <id>        Hierarchical tree view
   docs create                   Create a document
-  docs delete <id> [-y]         Delete a document
+  docs delete <ids...> [-y]     Delete one or more documents
   docs mutate <id> <op>         Apply an operation
 
 MODELS & OPERATIONS
@@ -626,6 +657,7 @@ REAL-TIME & ADVANCED
 TOOLS
   query '<graphql>'             Run raw GraphQL
   interactive (or -i)           Launch REPL mode
+  update [--check]              Self-update to latest release
   schema                        Dump GraphQL schema
   completions <shell>           Generate shell completions
   guide <topic>                 Built-in documentation

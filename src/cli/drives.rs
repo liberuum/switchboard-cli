@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Subcommand;
 use colored::Colorize;
 use dialoguer::{Confirm, Input};
@@ -34,10 +34,10 @@ pub enum DrivesCommand {
         #[arg(long)]
         preferred_editor: Option<String>,
     },
-    /// Delete a drive
+    /// Delete one or more drives
     Delete {
-        /// Drive ID or slug
-        id: String,
+        /// Drive IDs or slugs
+        ids: Vec<String>,
         /// Skip confirmation prompt
         #[arg(long, short = 'y')]
         yes: bool,
@@ -59,7 +59,7 @@ pub async fn run(
             icon,
             preferred_editor,
         } => create(name, slug, id, icon, preferred_editor, format, profile_name).await,
-        DrivesCommand::Delete { id, yes } => delete(&id, yes, profile_name).await,
+        DrivesCommand::Delete { ids, yes } => delete(&ids, yes, profile_name).await,
     }
 }
 
@@ -263,19 +263,27 @@ async fn create(
     Ok(())
 }
 
-async fn delete(id: &str, skip_confirm: bool, profile_name: Option<&str>) -> Result<()> {
+async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    // Must resolve to UUID — deleteDrive silently fails with slugs
-    let uuid = resolve_drive_id(&client, id).await?;
-
-    if id != uuid {
-        println!("Resolved slug \"{}\" → UUID {}", id, &uuid[..12]);
+    // Resolve all slugs to UUIDs up front
+    let mut uuids = Vec::with_capacity(ids.len());
+    for id in ids {
+        let uuid = resolve_drive_id(&client, id).await?;
+        if id != &uuid {
+            println!("Resolved slug \"{}\" → UUID {}", id, &uuid[..12]);
+        }
+        uuids.push(uuid);
     }
 
     if !skip_confirm {
+        let label = if uuids.len() == 1 {
+            format!("Delete drive {}?", uuids[0])
+        } else {
+            format!("Delete {} drives?", uuids.len())
+        };
         let confirm = Confirm::new()
-            .with_prompt(format!("Delete drive {uuid}?"))
+            .with_prompt(label)
             .default(false)
             .interact()?;
         if !confirm {
@@ -284,9 +292,20 @@ async fn delete(id: &str, skip_confirm: bool, profile_name: Option<&str>) -> Res
         }
     }
 
-    let mutation = format!(r#"mutation {{ deleteDrive(id: "{uuid}") }}"#);
-    client.query(&mutation, None).await?;
+    let mut failed = 0u32;
+    for uuid in &uuids {
+        let mutation = format!(r#"mutation {{ deleteDrive(id: "{uuid}") }}"#);
+        match client.query(&mutation, None).await {
+            Ok(_) => println!("{} Deleted drive {uuid}", "✓".green()),
+            Err(e) => {
+                eprintln!("{} Failed to delete {uuid}: {e}", "✗".red());
+                failed += 1;
+            }
+        }
+    }
 
-    println!("{} Drive deleted.", "✓".green());
+    if failed > 0 {
+        bail!("{failed} of {} deletes failed", uuids.len());
+    }
     Ok(())
 }

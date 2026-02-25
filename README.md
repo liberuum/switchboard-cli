@@ -155,7 +155,7 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard drives list` | List all drives |
 | `switchboard drives get <id-or-slug>` | Get drive details and file tree |
 | `switchboard drives create` | Interactive drive creation (or pass `--name`, `--slug`, etc.) |
-| `switchboard drives delete <id-or-slug>` | Delete a drive (use `-y` to skip confirmation) |
+| `switchboard drives delete <ids...>` | Delete one or more drives (use `-y` to skip confirmation) |
 
 ### Documents
 
@@ -165,7 +165,7 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard docs get <id> --drive <slug>` | Get document details and state |
 | `switchboard docs tree --drive <slug>` | Hierarchical folder/file view |
 | `switchboard docs create` | Interactive creation (or pass `--type`, `--name`, `--drive`) |
-| `switchboard docs delete <id>` | Delete a document |
+| `switchboard docs delete <ids...>` | Delete one or more documents (use `-y` to skip confirmation) |
 | `switchboard docs mutate <id> <op> --input '<json>' --drive <slug>` | Apply a model-specific operation |
 
 ### Models & Operations
@@ -218,6 +218,8 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard query --file query.graphql` | Run query from a file |
 | `switchboard schema` | Dump the full GraphQL schema |
 | `switchboard interactive` | Launch interactive REPL mode |
+| `switchboard update` | Self-update to the latest release (shows changelog) |
+| `switchboard update --check` | Check for updates without installing |
 | `switchboard completions <shell>` | Generate shell completions (bash/zsh/fish) |
 | `switchboard guide <topic>` | Built-in documentation |
 
@@ -315,6 +317,8 @@ Launch an interactive session with tab completion and persistent history:
 switchboard interactive    # or: switchboard -i
 ```
 
+The REPL supports **every CLI command** — the same syntax you use on the command line works inside the REPL. Commands are parsed through the same clap-based parser, so `--help`, `--format`, and all flags work as expected.
+
 ```
 staging> drives list
 ┌──────────────────┬──────────────┬──────────────┐
@@ -324,7 +328,7 @@ staging> drives list
 │ e5f6g7h8-...     │ Vetra        │ vetra        │
 └──────────────────┴──────────────┴──────────────┘
 
-staging> docs tree liberuum
+staging> docs tree --drive liberuum
 liberum-drive/
 ├── liberuum (powerhouse/builder-profile)
 ├── 📁 Expense Reports/
@@ -332,12 +336,25 @@ liberum-drive/
     ├── new service (powerhouse/resource-template)
     └── offering (powerhouse/service-offering)
 
+staging> drives delete old-drive-1 old-drive-2 -y
+✓ Deleted drive abc123...
+✓ Deleted drive def456...
+
+staging> docs create --type powerhouse/invoice --name "Q2" --drive liberuum
 staging> query { drives }
+staging> ping
+staging> drives create --help
 staging> exit
 ```
 
 Features:
-- **Tab completion** for commands, drive slugs, and model types
+
+- **Full CLI parity** — every command works inside the REPL (drives, docs, models, auth, access, groups, export, import, watch, jobs, sync, etc.)
+- **Tab completion** for commands, drive slugs, model types, and guide topics
+- **Shell-like quoting** — single quotes, double quotes, and backslash escapes work as expected
+- **Per-command flags** — override `--format`, `--profile`, `--quiet` on any command within the REPL
+- **`--help` passthrough** — append `--help` to any command to see its usage
+- **Raw GraphQL shorthand** — type `query { ... }` directly without quotes
 - **Persistent history** across sessions (`~/.switchboard/history`)
 - **Arrow keys** for history navigation
 - **Ctrl+C** to cancel current line, **Ctrl+D** to exit
@@ -396,44 +413,46 @@ This cache powers tab completion, `models list`, `docs create` type selection, a
 ```
 switchboard-cli/
 ├── Cargo.toml
-└── src/
-    ├── main.rs                  Entry point and command routing
-    ├── cli/
-    │   ├── mod.rs               CLI struct and Commands enum (clap)
-    │   ├── init.rs              First-run wizard + introspection
-    │   ├── config.rs            Profile management
-    │   ├── introspect.rs        Schema discovery
-    │   ├── drives.rs            Drive commands
-    │   ├── docs.rs              Document commands
-    │   ├── models.rs            Model inspection (from cache)
-    │   ├── ops.rs               Operations history
-    │   ├── mutate.rs            Model-specific mutations
-    │   ├── import_export.rs     .phd file import/export
-    │   ├── auth.rs              Authentication
-    │   ├── access.rs            Permission commands
-    │   ├── groups.rs            Group management
-    │   ├── query.rs             Raw GraphQL
-    │   ├── schema.rs            Schema dump
-    │   ├── watch.rs             WebSocket subscriptions
-    │   ├── jobs.rs              Async job tracking
-    │   ├── sync.rs              Sync channels
-    │   ├── interactive.rs       REPL mode (rustyline)
-    │   ├── guide.rs             Built-in documentation
-    │   ├── completions.rs       Shell completions
-    │   └── helpers.rs           Shared utilities
-    ├── graphql/
-    │   ├── client.rs            HTTP client + auth header injection
-    │   ├── introspection.rs     Schema introspection + caching
-    │   └── websocket.rs         WebSocket client (graphql-transport-ws)
-    ├── config/
-    │   └── profiles.rs          Profile TOML management
-    ├── phd/
-    │   ├── reader.rs            Read .phd ZIP archives
-    │   ├── writer.rs            Create .phd ZIP archives
-    │   └── types.rs             PhdHeader, PhdOperations, etc.
-    └── output/
-        ├── table.rs             Table formatter (comfy-table)
-        └── json.rs              JSON formatter
+├── src/
+│   ├── main.rs                  Entry point and command routing
+│   ├── cli/
+│   │   ├── mod.rs               CLI struct, Commands enum, and shared dispatch
+│   │   ├── init.rs              First-run wizard + introspection
+│   │   ├── config.rs            Profile management
+│   │   ├── introspect.rs        Schema discovery
+│   │   ├── drives.rs            Drive commands (list, get, create, multi-delete)
+│   │   ├── docs.rs              Document commands (list, get, tree, create, multi-delete, mutate)
+│   │   ├── models.rs            Model inspection (from cache)
+│   │   ├── ops.rs               Operations history
+│   │   ├── mutate.rs            Model-specific mutations
+│   │   ├── import_export.rs     .phd file import/export
+│   │   ├── auth.rs              Authentication
+│   │   ├── access.rs            Permission commands
+│   │   ├── groups.rs            Group management
+│   │   ├── query.rs             Raw GraphQL
+│   │   ├── schema.rs            Schema dump
+│   │   ├── watch.rs             WebSocket subscriptions
+│   │   ├── jobs.rs              Async job tracking
+│   │   ├── sync.rs              Sync channels
+│   │   ├── interactive.rs       REPL mode (rustyline, full CLI parity via clap dispatch)
+│   │   ├── guide.rs             Built-in documentation
+│   │   ├── completions.rs       Shell completions
+│   │   └── helpers.rs           Shared utilities
+│   ├── graphql/
+│   │   ├── client.rs            HTTP client + auth header injection
+│   │   ├── introspection.rs     Schema introspection + caching
+│   │   └── websocket.rs         WebSocket client (graphql-transport-ws)
+│   ├── config/
+│   │   └── profiles.rs          Profile TOML management
+│   ├── phd/
+│   │   ├── reader.rs            Read .phd ZIP archives
+│   │   ├── writer.rs            Create .phd ZIP archives
+│   │   └── types.rs             PhdHeader, PhdOperations, etc.
+│   └── output/
+│       ├── table.rs             Table formatter (comfy-table)
+│       └── json.rs              JSON formatter
+└── tests/
+    └── cli_integration.rs       Integration tests (requires running GraphQL API)
 ```
 
 ## Building from Source
@@ -480,11 +499,21 @@ switchboard init
 # Run without installing (debug build, faster compilation)
 cargo run -- drives list
 
-# Run tests
+# Run unit tests (no external dependencies)
+cargo test --lib
+
+# Run integration tests (requires a running Switchboard GraphQL API)
+# By default tests hit http://localhost:4001/graphql via the "local" profile
+cargo test --test cli_integration
+
+# Run all tests
 cargo test
 
 # Check for compilation errors without building
 cargo check
+
+# Lint
+cargo clippy -- -D warnings
 
 # Build in release mode (optimized, slower to compile)
 cargo build --release
