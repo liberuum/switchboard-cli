@@ -346,11 +346,11 @@ fn print_watch() {
     println!(
         r#"REAL-TIME SUBSCRIPTIONS
 
-Watch for live changes via WebSocket (connects to /graphql/r reactor subgraph).
+Watch for live changes via WebSocket (connects to /graphql/subscriptions).
 
 COMMANDS
 
-  switchboard watch docs [--type <type>] [--drive <drive-id>]
+  switchboard watch docs [--type <type>] [--drive <id>] [--doc <id>]
                                        Stream document change events
   switchboard watch job <job-id>       Stream job status updates
 
@@ -366,9 +366,17 @@ EVENT TYPES
   Document changes: CREATED, UPDATED, DELETED, CHILD_ADDED, CHILD_REMOVED
   Job changes: PENDING, RUNNING, COMPLETED, FAILED
 
+FILTERS
+
+  --type <type>     Watch only documents of a specific type
+  --drive <id>      Watch only documents in a specific drive
+  --doc <id>        Watch a specific document by ID
+
 EXAMPLES
 
-  switchboard watch docs --drive builders
+  switchboard watch docs                                     Watch all changes
+  switchboard watch docs --drive builders                    Watch a drive
+  switchboard watch docs --doc abc123-uuid                   Watch one document
   switchboard watch docs --type powerhouse/invoice --format json
   switchboard watch job abc123-job-id"#
     );
@@ -559,7 +567,7 @@ RAW QUERY
 API ENDPOINTS
 
   /graphql          Main Apollo Gateway (all standard queries/mutations)
-  /graphql/r        Reactor subgraph (subscriptions, document operations)
+  /graphql/subscriptions  WebSocket endpoint for GraphQL subscriptions
   /graphql/auth     Auth subgraph (permissions, groups)
 
 QUERY PATTERNS

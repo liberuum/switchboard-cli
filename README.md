@@ -202,7 +202,7 @@ switchboard import ./backup/*.phd --drive another-drive
 
 | Command | Description |
 |---------|-------------|
-| `switchboard watch docs [--type <type>] [--drive <id>]` | Stream document change events via WebSocket |
+| `switchboard watch docs [--type <type>] [--drive <id>] [--doc <id>]` | Stream document change events via WebSocket |
 | `switchboard watch job <job-id>` | Stream job status updates |
 | `switchboard jobs status <job-id>` | Get current job status |
 | `switchboard jobs wait <job-id>` | Block until a job completes |

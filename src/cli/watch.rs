@@ -16,6 +16,9 @@ pub enum WatchCommand {
         /// Filter by drive ID or slug
         #[arg(long)]
         drive: Option<String>,
+        /// Filter by document ID
+        #[arg(long)]
+        doc: Option<String>,
     },
     /// Watch a job's status updates
     Job {
@@ -33,7 +36,7 @@ pub async fn run(
     let (_name, profile, _client) = helpers::setup(profile_name)?;
 
     // Derive WebSocket URL from the profile's HTTP URL
-    // /graphql -> /graphql/r for the reactor subgraph which supports subscriptions
+    // /graphql -> /graphql/subscriptions for the graphql-ws WebSocket endpoint
     let http_url = &profile.url;
     let base = http_url.trim_end_matches("/graphql").trim_end_matches('/');
     let ws_scheme = if base.starts_with("https") {
@@ -44,15 +47,16 @@ pub async fn run(
     let host = base
         .trim_start_matches("https://")
         .trim_start_matches("http://");
-    let ws_url = format!("{ws_scheme}://{host}/graphql/r");
+    let ws_url = format!("{ws_scheme}://{host}/graphql/subscriptions");
 
     match cmd {
-        WatchCommand::Docs { r#type, drive } => {
+        WatchCommand::Docs { r#type, drive, doc } => {
             watch_docs(
                 &ws_url,
                 profile.token.as_deref(),
                 r#type,
                 drive,
+                doc,
                 format,
                 quiet,
             )
@@ -69,26 +73,26 @@ async fn watch_docs(
     token: Option<&str>,
     doc_type: Option<String>,
     drive: Option<String>,
+    doc: Option<String>,
     format: OutputFormat,
     quiet: bool,
 ) -> Result<()> {
-    // Build the subscription query with optional filters
+    // Build the search filter (required by the API)
+    // SearchFilterInput: { type?: String, parentId?: String, identifiers?: [String!] }
     let mut search_parts = Vec::new();
     if let Some(ref t) = doc_type {
-        search_parts.push(format!(r#"documentType: "{t}""#));
+        search_parts.push(format!(r#"type: "{t}""#));
     }
     if let Some(ref d) = drive {
-        search_parts.push(format!(r#"driveId: "{d}""#));
+        search_parts.push(format!(r#"parentId: "{d}""#));
+    }
+    if let Some(ref id) = doc {
+        search_parts.push(format!(r#"identifiers: ["{id}"]"#));
     }
 
-    let search_arg = if search_parts.is_empty() {
-        String::new()
-    } else {
-        format!("(search: {{ {} }})", search_parts.join(", "))
-    };
-
+    let search_inner = search_parts.join(", ");
     let subscription = format!(
-        r#"subscription {{ documentChanges{search_arg} {{ type documentId driveId documentType }} }}"#
+        r#"subscription {{ documentChanges(search: {{ {search_inner} }}) {{ type documents {{ id name documentType }} context {{ parentId childId }} }} }}"#
     );
 
     if !quiet && matches!(format, OutputFormat::Table) {
@@ -104,9 +108,17 @@ async fn watch_docs(
                 }
                 OutputFormat::Table => {
                     let event = change["type"].as_str().unwrap_or("?");
-                    let doc_id = change["documentId"].as_str().unwrap_or("?");
-                    let doc_type = change["documentType"].as_str().unwrap_or("?");
-                    println!("[{event}] {doc_id} ({doc_type})");
+                    let docs = change["documents"].as_array();
+                    if let Some(docs) = docs {
+                        for doc in docs {
+                            let id = doc["id"].as_str().unwrap_or("?");
+                            let name = doc["name"].as_str().unwrap_or("?");
+                            let dtype = doc["documentType"].as_str().unwrap_or("?");
+                            println!("[{event}] {name} ({dtype}) {id}");
+                        }
+                    } else {
+                        println!("[{event}]");
+                    }
                 }
             }
         }
@@ -122,8 +134,8 @@ async fn watch_job(
     quiet: bool,
 ) -> Result<()> {
     let subscription = format!(
-        r#"subscription {{ jobChanges(jobId: "{job_id}") {{ jobId status progress message }} }}"#,
-        job_id = job_id.replace('"', r#"\""#)
+        r#"subscription {{ jobChanges(jobId: "{id}") {{ jobId status result error }} }}"#,
+        id = job_id.replace('"', r#"\""#)
     );
 
     if !quiet && matches!(format, OutputFormat::Table) {
@@ -139,13 +151,11 @@ async fn watch_job(
                 }
                 OutputFormat::Table => {
                     let status = job["status"].as_str().unwrap_or("?");
-                    let progress = job["progress"]
-                        .as_f64()
-                        .map(|p| format!("{:.0}%", p * 100.0));
-                    let message = job["message"].as_str().unwrap_or("");
-                    match progress {
-                        Some(p) => println!("[{status}] {p} {message}"),
-                        None => println!("[{status}] {message}"),
+                    let error = job["error"].as_str();
+                    if let Some(err) = error {
+                        println!("[{status}] Error: {err}");
+                    } else {
+                        println!("[{status}]");
                     }
                     if status == "COMPLETED" || status == "FAILED" {
                         eprintln!("Job finished with status: {status}");

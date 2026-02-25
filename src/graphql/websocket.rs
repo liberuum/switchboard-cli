@@ -30,6 +30,8 @@ where
             "Sec-WebSocket-Key",
             tokio_tungstenite::tungstenite::handshake::client::generate_key(),
         )
+        // Required by Apollo Server 4 CSRF protection
+        .header("apollo-require-preflight", "true")
         .body(())
         .context("Failed to build WebSocket request")?;
 

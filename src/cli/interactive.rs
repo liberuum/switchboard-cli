@@ -75,6 +75,9 @@ impl ReplHelper {
             "import ".into(),
             // Watch
             "watch docs".into(),
+            "watch docs --drive ".into(),
+            "watch docs --doc ".into(),
+            "watch docs --type ".into(),
             "watch job ".into(),
             // Jobs
             "jobs status ".into(),

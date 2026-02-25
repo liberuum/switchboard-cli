@@ -154,10 +154,10 @@ async fn watch(
     let host = base
         .trim_start_matches("https://")
         .trim_start_matches("http://");
-    let ws_url = format!("{ws_scheme}://{host}/graphql/r");
+    let ws_url = format!("{ws_scheme}://{host}/graphql/subscriptions");
 
     let subscription = format!(
-        r#"subscription {{ jobChanges(jobId: "{id}") {{ jobId status progress message }} }}"#,
+        r#"subscription {{ jobChanges(jobId: "{id}") {{ jobId status result error }} }}"#,
         id = job_id.replace('"', r#"\""#)
     );
 
@@ -178,11 +178,11 @@ async fn watch(
                     }
                     OutputFormat::Table => {
                         let s = job["status"].as_str().unwrap_or("?");
-                        let msg = job["message"].as_str().unwrap_or("");
-                        if let Some(p) = job["progress"].as_f64() {
-                            println!("[{s}] {:.0}% {msg}", p * 100.0);
+                        let error = job["error"].as_str();
+                        if let Some(err) = error {
+                            println!("[{s}] Error: {err}");
                         } else {
-                            println!("[{s}] {msg}");
+                            println!("[{s}]");
                         }
                     }
                 }
