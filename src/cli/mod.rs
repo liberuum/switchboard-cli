@@ -4,6 +4,7 @@ pub mod completions;
 pub mod config;
 pub mod docs;
 pub mod drives;
+pub mod field_editor;
 pub mod groups;
 pub mod guide;
 pub mod helpers;

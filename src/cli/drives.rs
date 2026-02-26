@@ -70,7 +70,7 @@ async fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
 
     let data = client
         .query(
-            "{ driveDocuments { id name slug documentType revision } }",
+            "{ driveDocuments { id name slug documentType revision meta { preferredEditor } } }",
             None,
         )
         .await?;
@@ -91,14 +91,20 @@ async fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
             let rows: Vec<Vec<String>> = drives
                 .iter()
                 .map(|d| {
+                    let editor = d
+                        .pointer("/meta/preferredEditor")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("-");
                     vec![
                         d["id"].as_str().unwrap_or("-").to_string(),
                         d["name"].as_str().unwrap_or("-").to_string(),
                         d["slug"].as_str().unwrap_or("-").to_string(),
+                        editor.to_string(),
                     ]
                 })
                 .collect();
-            print_table(&["ID", "Name", "Slug"], &rows);
+            print_table(&["ID", "Name", "Slug", "Editor"], &rows);
         }
     }
 
@@ -112,6 +118,7 @@ async fn get(id: &str, format: OutputFormat, profile_name: Option<&str>) -> Resu
         r#"{{
   driveDocument(idOrSlug: "{id}") {{
     id name slug revision documentType
+    meta {{ preferredEditor }}
     state {{
       name icon
       nodes {{
@@ -138,6 +145,12 @@ async fn get(id: &str, format: OutputFormat, profile_name: Option<&str>) -> Resu
                 "Type:     {}",
                 drive["documentType"].as_str().unwrap_or("-")
             );
+            let editor = drive
+                .pointer("/meta/preferredEditor")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("-");
+            println!("Editor:   {}", editor);
 
             // Show contents as a tree with metadata
             if let Some(nodes) = drive.pointer("/state/nodes").and_then(|v| v.as_array()) {
@@ -226,13 +239,7 @@ async fn create(
     let preferred_editor = match preferred_editor {
         Some(e) if !e.is_empty() => Some(e),
         Some(_) => None,
-        None if interactive => {
-            let e: String = Input::new()
-                .with_prompt("Preferred editor (optional, press Enter to skip)")
-                .default(String::new())
-                .interact_text()?;
-            if e.is_empty() { None } else { Some(e) }
-        }
+        None if interactive => pick_preferred_editor(&client).await?,
         None => None,
     };
 
@@ -268,6 +275,57 @@ async fn create(
     }
 
     Ok(())
+}
+
+/// Discover available drive editors by querying existing drives for their
+/// `meta.preferredEditor` values, then present a picker.
+async fn pick_preferred_editor(client: &crate::graphql::GraphQLClient) -> Result<Option<String>> {
+    // Query existing drives for their preferredEditor metadata
+    let mut editors: Vec<String> = Vec::new();
+
+    if let Ok(data) = client
+        .query("{ driveDocuments { meta { preferredEditor } } }", None)
+        .await
+    {
+        if let Some(drives) = data.get("driveDocuments").and_then(|v| v.as_array()) {
+            for d in drives {
+                if let Some(editor) = d
+                    .pointer("/meta/preferredEditor")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    if !editors.contains(&editor.to_string()) {
+                        editors.push(editor.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut options = vec!["None (general purpose drive)".to_string()];
+    for editor in &editors {
+        options.push(editor.clone());
+    }
+    options.push("Custom (enter manually)".to_string());
+
+    let selection = dialoguer::Select::new()
+        .with_prompt("Drive type")
+        .items(&options)
+        .default(0)
+        .interact()?;
+
+    if selection == 0 {
+        // None
+        Ok(None)
+    } else if selection == options.len() - 1 {
+        // Custom — free text input
+        let e: String = Input::new()
+            .with_prompt("Editor ID")
+            .interact_text()?;
+        if e.is_empty() { Ok(None) } else { Ok(Some(e)) }
+    } else {
+        Ok(Some(editors[selection - 1].clone()))
+    }
 }
 
 async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) -> Result<()> {

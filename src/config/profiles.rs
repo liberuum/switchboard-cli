@@ -57,6 +57,10 @@ impl Config {
         }
     }
 
+    pub fn profile_names(&self) -> Vec<String> {
+        self.profiles.keys().cloned().collect()
+    }
+
     pub fn remove_profile(&mut self, name: &str) -> bool {
         let was_default = self.profiles.get(name).map(|p| p.default).unwrap_or(false);
         let removed = self.profiles.remove(name).is_some();

@@ -122,7 +122,8 @@ switchboard models list                    # List discovered document types
 
 ```bash
 switchboard docs create --type powerhouse/invoice --name "Q1 Invoice" --drive my-drive
-switchboard docs get <doc-id> --drive my-drive
+switchboard docs get <doc-id-or-name>             # Auto-detects drive
+switchboard docs mutate <doc-id-or-name>         # Interactive field-by-field editor
 switchboard docs mutate <doc-id> editInvoice --input '{"amount": 2000}' --drive my-drive
 ```
 
@@ -162,12 +163,12 @@ switchboard import ./backup/*.phd --drive another-drive
 
 | Command | Description |
 |---------|-------------|
-| `switchboard docs list --drive <slug>` | List documents (add `--type <type>` to filter) |
-| `switchboard docs get <id> --drive <slug>` | Get document details and state |
-| `switchboard docs tree --drive <slug>` | Hierarchical folder/file view |
-| `switchboard docs create` | Interactive creation (or pass `--type`, `--name`, `--drive`) |
-| `switchboard docs delete <ids...>` | Delete one or more documents (use `-y` to skip confirmation) |
-| `switchboard docs mutate <id> <op> --input '<json>' --drive <slug>` | Apply a model-specific operation |
+| `switchboard docs list [--drive <slug>]` | List documents (all drives, or filtered by `--drive`; add `--type` to filter) |
+| `switchboard docs get <id-or-name>` | Get document details (auto-detects drive, or pass `--drive`) |
+| `switchboard docs tree [--drive <slug>]` | Hierarchical folder/file view (interactive drive picker if omitted) |
+| `switchboard docs create` | Interactive creation with drive picker (or pass `--type`, `--name`, `--drive`) |
+| `switchboard docs delete <ids-or-names...>` | Delete one or more documents (use `-y` to skip confirmation) |
+| `switchboard docs mutate <id-or-name> [<op>] [--input '<json>']` | Apply a mutation with field-by-field editor (or pass `--input` for raw JSON) |
 
 ### Models & Operations
 
@@ -175,7 +176,7 @@ switchboard import ./backup/*.phd --drive another-drive
 |---------|-------------|
 | `switchboard models list` | List all discovered document types |
 | `switchboard models get <type>` | Show available operations for a type |
-| `switchboard ops <doc-id> --drive <slug>` | View operation history |
+| `switchboard ops <doc-id-or-name>` | View operation history (auto-detects drive, or pass `--drive`) |
 
 ### Import / Export
 
@@ -324,14 +325,17 @@ The REPL supports **every CLI command** — the same syntax you use on the comma
 
 ```
 staging> drives list
-┌──────────────────┬──────────────┬──────────────┐
-│ ID               │ Name         │ Slug         │
-├──────────────────┼──────────────┼──────────────┤
-│ 47cda535-...     │ liberum      │ liberuum     │
-│ e5f6g7h8-...     │ Vetra        │ vetra        │
-└──────────────────┴──────────────┴──────────────┘
 
-staging> docs tree --drive liberuum
+──── drives list ────────────────────────────────────────────
+┌──────────────────┬──────────────┬──────────────┬───────────────────┐
+│ ID               │ Name         │ Slug         │ Editor            │
+├──────────────────┼──────────────┼──────────────┼───────────────────┤
+│ 47cda535-...     │ liberum      │ liberuum     │ builder-team-admin│
+│ e5f6g7h8-...     │ Vetra        │ vetra        │ -                 │
+└──────────────────┴──────────────┴──────────────┴───────────────────┘
+
+staging> docs tree
+Select drive: liberuum
 liberum-drive/
 ├── liberuum (powerhouse/builder-profile)
 ├── 📁 Expense Reports/
@@ -339,21 +343,21 @@ liberum-drive/
     ├── new service (powerhouse/resource-template)
     └── offering (powerhouse/service-offering)
 
-staging> drives delete old-drive-1 old-drive-2 -y
-✓ Deleted drive abc123...
-✓ Deleted drive def456...
+staging> overview                  # Guide topics work without "guide" prefix
+staging> config use local          # Profile switch auto-refreshes client and completions
+Switched to profile: local (http://localhost:4001/graphql)
 
-staging> docs create --type powerhouse/invoice --name "Q2" --drive liberuum
-staging> query { drives }
-staging> ping
-staging> drives create --help
-staging> exit
+local> exit
 ```
 
 Features:
 
 - **Full CLI parity** — every command works inside the REPL (drives, docs, models, auth, access, groups, export, import, watch, jobs, sync, etc.)
-- **Tab completion** for commands, drive slugs, model types, and guide topics
+- **Tab completion** for commands, drive slugs, document names, profile names, model types, and guide topics
+- **Visual command separators** — dimmed header lines before each command's output
+- **Loading spinners** — animated feedback during API queries
+- **Profile switching** — `config use <name>` rebuilds the client and refreshes all completions
+- **Guide topic shortcuts** — type `overview` instead of `guide overview`
 - **Shell-like quoting** — single quotes, double quotes, and backslash escapes work as expected
 - **Per-command flags** — override `--format`, `--profile`, `--quiet` on any command within the REPL
 - **`--help` passthrough** — append `--help` to any command to see its usage
@@ -449,10 +453,11 @@ switchboard-cli/
 │   │   ├── config.rs            Profile management
 │   │   ├── introspect.rs        Schema discovery
 │   │   ├── drives.rs            Drive commands (list, get, create, multi-delete)
-│   │   ├── docs.rs              Document commands (list, get, tree, create, multi-delete, mutate)
+│   │   ├── docs.rs              Document commands (list, get, tree, create, multi-delete)
 │   │   ├── models.rs            Model inspection (from cache)
-│   │   ├── ops.rs               Operations history
-│   │   ├── mutate.rs            Model-specific mutations
+│   │   ├── ops.rs               Operations history (with input display)
+│   │   ├── mutate.rs            Model-specific mutations (interactive field editor)
+│   │   ├── field_editor.rs      Field-by-field mutation editor (introspection + prompting)
 │   │   ├── import_export.rs     .phd file import/export
 │   │   ├── auth.rs              Authentication
 │   │   ├── access.rs            Permission commands

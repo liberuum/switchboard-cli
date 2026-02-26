@@ -10,18 +10,18 @@ use crate::output::{OutputFormat, print_json, print_table};
 
 #[derive(Subcommand)]
 pub enum DocsCommand {
-    /// List documents in a drive
+    /// List documents (all drives, or filtered by --drive)
     List {
-        /// Drive ID or slug
+        /// Drive ID or slug (omit to list all)
         #[arg(long)]
-        drive: String,
+        drive: Option<String>,
         /// Filter by document type
         #[arg(long, short = 't')]
         r#type: Option<String>,
     },
-    /// Get a document by ID (searches across all drives if --drive is omitted)
+    /// Get a document by ID or name (searches across all drives if --drive is omitted)
     Get {
-        /// Document ID
+        /// Document ID or name
         id: String,
         /// Drive ID or slug (narrows search to a single drive)
         #[arg(long)]
@@ -32,9 +32,9 @@ pub enum DocsCommand {
     },
     /// Show hierarchical file tree of a drive
     Tree {
-        /// Drive ID or slug
+        /// Drive ID or slug (omit for interactive selection)
         #[arg(long)]
-        drive: String,
+        drive: Option<String>,
     },
     /// Create a new document (interactive)
     Create {
@@ -50,7 +50,7 @@ pub enum DocsCommand {
     },
     /// Delete one or more documents
     Delete {
-        /// Document IDs
+        /// Document IDs or names
         ids: Vec<String>,
         /// Skip confirmation
         #[arg(long, short = 'y')]
@@ -63,12 +63,12 @@ pub enum DocsCommand {
 pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     match cmd {
         DocsCommand::List { drive, r#type } => {
-            list(&drive, r#type.as_deref(), format, profile_name).await
+            list(drive.as_deref(), r#type.as_deref(), format, profile_name).await
         }
         DocsCommand::Get { id, drive, state } => {
             get(&id, drive.as_deref(), state, format, profile_name).await
         }
-        DocsCommand::Tree { drive } => tree(&drive, format, profile_name).await,
+        DocsCommand::Tree { drive } => tree(drive, format, profile_name).await,
         DocsCommand::Create {
             r#type,
             name,
@@ -80,67 +80,124 @@ pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&s
 }
 
 async fn list(
-    drive: &str,
+    drive: Option<&str>,
     doc_type: Option<&str>,
     format: OutputFormat,
     profile_name: Option<&str>,
 ) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    // Get the drive's node tree to list all documents
-    let drive_query = format!(
-        r#"{{
-  driveDocument(idOrSlug: "{drive}") {{
-    id name
-    state {{
-      nodes {{
-        ... on DocumentDrive_FileNode {{ id name kind documentType parentFolder }}
-        ... on DocumentDrive_FolderNode {{ id name kind parentFolder }}
-      }}
-    }}
-  }}
-}}"#,
-        drive = drive.replace('"', r#"\""#)
-    );
+    // Collect drive IDs to query
+    let drive_ids: Vec<(String, String)> = match drive {
+        Some(d) => {
+            // Single drive — resolve and use it
+            let query = format!(
+                r#"{{ driveDocument(idOrSlug: "{d}") {{ id name }} }}"#,
+                d = d.replace('"', r#"\""#)
+            );
+            let data = client.query(&query, None).await?;
+            let id = data
+                .pointer("/driveDocument/id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(d)
+                .to_string();
+            let name = data
+                .pointer("/driveDocument/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(d)
+                .to_string();
+            vec![(id, name)]
+        }
+        None => {
+            // All drives
+            let data = client
+                .query("{ driveDocuments { id name } }", None)
+                .await?;
+            data.get("driveDocuments")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|d| {
+                            let id = d["id"].as_str().unwrap_or("").to_string();
+                            let name = d["name"].as_str().unwrap_or("").to_string();
+                            (id, name)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    };
 
-    let data = client.query(&drive_query, None).await?;
-    let nodes = data
-        .pointer("/driveDocument/state/nodes")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let mut all_files: Vec<Value> = Vec::new();
+    let multiple_drives = drive_ids.len() > 1;
 
-    // Filter to files (optionally by type)
-    let files: Vec<&Value> = nodes
-        .iter()
-        .filter(|n| n["kind"].as_str() == Some("file"))
-        .filter(|n| {
-            if let Some(dt) = doc_type {
-                n["documentType"].as_str() == Some(dt)
-            } else {
-                true
+    for (drive_id, drive_name) in &drive_ids {
+        let query = format!(
+            r#"{{ driveDocument(idOrSlug: "{drive_id}") {{
+                state {{
+                    nodes {{
+                        ... on DocumentDrive_FileNode {{ id name kind documentType parentFolder }}
+                        ... on DocumentDrive_FolderNode {{ id name kind parentFolder }}
+                    }}
+                }}
+            }} }}"#,
+            drive_id = drive_id.replace('"', r#"\""#)
+        );
+
+        let data = client.query(&query, None).await?;
+        let nodes = data
+            .pointer("/driveDocument/state/nodes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for node in nodes {
+            if node["kind"].as_str() != Some("file") {
+                continue;
             }
-        })
-        .collect();
-
-    let folders: Vec<&Value> = nodes
-        .iter()
-        .filter(|n| n["kind"].as_str() == Some("folder"))
-        .collect();
+            if let Some(dt) = doc_type
+                && node["documentType"].as_str() != Some(dt)
+            {
+                continue;
+            }
+            // Attach drive info for multi-drive display
+            let mut file = node.clone();
+            if multiple_drives {
+                file["_driveName"] = Value::String(drive_name.clone());
+            }
+            all_files.push(file);
+        }
+    }
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => {
-            let all: Vec<&Value> = nodes.iter().collect();
-            print_json(&serde_json::to_value(all)?);
+            print_json(&serde_json::to_value(&all_files)?);
         }
         OutputFormat::Table => {
-            if files.is_empty() && folders.is_empty() {
-                println!("No documents found in drive '{drive}'.");
+            if all_files.is_empty() {
+                if let Some(d) = drive {
+                    println!("No documents found in drive '{d}'.");
+                } else {
+                    println!("No documents found.");
+                }
                 return Ok(());
             }
 
-            if !files.is_empty() {
-                let rows: Vec<Vec<String>> = files
+            if multiple_drives {
+                let rows: Vec<Vec<String>> = all_files
+                    .iter()
+                    .map(|f| {
+                        vec![
+                            f["id"].as_str().unwrap_or("-").to_string(),
+                            f["name"].as_str().unwrap_or("-").to_string(),
+                            f["documentType"].as_str().unwrap_or("-").to_string(),
+                            f["_driveName"].as_str().unwrap_or("-").to_string(),
+                        ]
+                    })
+                    .collect();
+                print_table(&["ID", "Name", "Type", "Drive"], &rows);
+            } else {
+                let rows: Vec<Vec<String>> = all_files
                     .iter()
                     .map(|f| {
                         vec![
@@ -151,13 +208,6 @@ async fn list(
                     })
                     .collect();
                 print_table(&["ID", "Name", "Type"], &rows);
-            }
-
-            if !folders.is_empty() {
-                println!("\nFolders:");
-                for folder in &folders {
-                    println!("  \u{1F4C1} {}/", folder["name"].as_str().unwrap_or("-"));
-                }
             }
         }
     }
@@ -174,42 +224,12 @@ async fn get(
 ) -> Result<()> {
     let (_name, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
 
-    // Resolve drive UUID — either from the flag or by searching all drives
-    let drive_id = match drive {
-        Some(d) => resolve_drive_id(&client, d).await?,
-        None => {
-            // Search all drives for this document ID
-            let data = client
-                .query(
-                    r#"{ driveDocuments { id state { nodes { ... on DocumentDrive_FileNode { id } } } } }"#,
-                    None,
-                )
-                .await?;
-
-            let drives = data
-                .get("driveDocuments")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-
-            let mut found_drive: Option<String> = None;
-            for drv in &drives {
-                if let Some(nodes) = drv.pointer("/state/nodes").and_then(|v| v.as_array())
-                    && nodes.iter().any(|n| n["id"].as_str() == Some(id))
-                {
-                    found_drive = Some(
-                        drv["id"]
-                            .as_str()
-                            .ok_or_else(|| anyhow::anyhow!("Drive missing id"))?
-                            .to_string(),
-                    );
-                    break;
-                }
-            }
-
-            found_drive.ok_or_else(|| anyhow::anyhow!("Document '{id}' not found in any drive"))?
-        }
+    // Resolve doc (accepts name or UUID) and drive
+    let (doc_id, drive_id) = match drive {
+        Some(d) => (id.to_string(), resolve_drive_id(&client, d).await?),
+        None => helpers::resolve_doc(&client, id).await?,
     };
+    let id = &doc_id;
 
     // Build field list — only include stateJSON when --state is passed
     let fields = if include_state {
@@ -284,8 +304,16 @@ async fn get(
     Ok(())
 }
 
-async fn tree(drive: &str, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
+async fn tree(drive: Option<String>, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
+
+    let drive = match drive {
+        Some(d) => d,
+        None => {
+            let (id, _slug, _name) = helpers::select_drive(&client).await?;
+            id
+        }
+    };
 
     let query = format!(
         r#"{{
@@ -312,7 +340,7 @@ async fn tree(drive: &str, format: OutputFormat, profile_name: Option<&str>) -> 
             let drive_name = data
                 .pointer("/driveDocument/name")
                 .and_then(|v| v.as_str())
-                .unwrap_or(drive);
+                .unwrap_or(&drive);
 
             let nodes = data
                 .pointer("/driveDocument/state/nodes")
@@ -399,19 +427,20 @@ async fn create(
         None => Input::new().with_prompt("Document name").interact_text()?,
     };
 
-    // Get drive
-    let drive = match drive {
-        Some(d) => d,
-        None => Input::new()
-            .with_prompt("Drive (slug or ID)")
-            .interact_text()?,
+    // Get drive — show a picker if not provided
+    let drive_uuid = match drive {
+        Some(d) => {
+            let uuid = resolve_drive_id(&client, &d).await?;
+            if d != uuid {
+                println!("Resolved slug → UUID {}", &uuid[..12]);
+            }
+            uuid
+        }
+        None => {
+            let (id, _slug, _name) = helpers::select_drive(&client).await?;
+            id
+        }
     };
-
-    // Resolve drive slug to UUID
-    let drive_uuid = resolve_drive_id(&client, &drive).await?;
-    if drive != drive_uuid {
-        println!("Resolved slug → UUID {}", &drive_uuid[..12]);
-    }
 
     // Build create mutation
     let mutation = format!(
@@ -466,15 +495,24 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
     }
 
     let mut failed = 0u32;
-    for id in ids {
+    for id_or_name in ids {
+        // Resolve name to UUID if needed
+        let doc_id = match helpers::resolve_doc(&client, id_or_name).await {
+            Ok((id, _drive)) => id,
+            Err(e) => {
+                eprintln!("{} Could not resolve '{id_or_name}': {e}", "✗".red());
+                failed += 1;
+                continue;
+            }
+        };
         let mutation = format!(
-            r#"mutation {{ deleteDocument(id: "{id}") }}"#,
-            id = id.replace('"', r#"\""#)
+            r#"mutation {{ deleteDocument(id: "{doc_id}") }}"#,
+            doc_id = doc_id.replace('"', r#"\""#)
         );
         match client.query(&mutation, None).await {
-            Ok(_) => println!("{} Deleted document {id}", "✓".green()),
+            Ok(_) => println!("{} Deleted document {id_or_name}", "✓".green()),
             Err(e) => {
-                eprintln!("{} Failed to delete {id}: {e}", "✗".red());
+                eprintln!("{} Failed to delete {id_or_name}: {e}", "✗".red());
                 failed += 1;
             }
         }

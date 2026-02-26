@@ -1,11 +1,14 @@
+use std::io::Write;
+
 use anyhow::Result;
 use clap::Parser;
+use colored::Colorize;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
-use rustyline::{Config, Editor, Helper};
+use rustyline::{CompletionType, Config, Editor, Helper};
 
 use crate::cli::helpers;
 use crate::cli::{Cli, Commands};
@@ -22,10 +25,30 @@ struct ReplHelper {
     model_types: Vec<String>,
     /// Guide topic names
     guide_topics: Vec<String>,
+    /// Profile names from config
+    profile_names: Vec<String>,
+    /// Document IDs for completion (the raw UUID)
+    doc_ids: Vec<String>,
+    /// Document display labels for completion ("uuid  name  (type)")
+    doc_labels: Vec<String>,
+}
+
+/// A document entry for tab-completion.
+struct DocEntry {
+    id: String,
+    name: String,
+    doc_type: String,
 }
 
 impl ReplHelper {
-    fn new(drive_slugs: Vec<String>, model_types: Vec<String>) -> Self {
+    fn new(
+        drive_slugs: Vec<String>,
+        model_types: Vec<String>,
+        profile_names: Vec<String>,
+        docs: Vec<DocEntry>,
+    ) -> Self {
+        let (doc_ids, doc_labels) = Self::build_doc_completions(&docs);
+
         let commands = vec![
             // Drives
             "drives list".into(),
@@ -33,6 +56,7 @@ impl ReplHelper {
             "drives create".into(),
             "drives delete ".into(),
             // Docs
+            "docs list".into(),
             "docs list --drive ".into(),
             "docs get ".into(),
             "docs get --state ".into(),
@@ -128,7 +152,40 @@ impl ReplHelper {
             drive_slugs,
             model_types,
             guide_topics,
+            profile_names,
+            doc_ids,
+            doc_labels,
         }
+    }
+
+    fn build_doc_completions(docs: &[DocEntry]) -> (Vec<String>, Vec<String>) {
+        // replacements: what gets inserted (name, quoted if spaces; fallback to ID)
+        let replacements: Vec<String> = docs
+            .iter()
+            .map(|d| {
+                if d.name.is_empty() {
+                    d.id.clone()
+                } else if d.name.contains(' ') {
+                    format!("\"{}\"", d.name)
+                } else {
+                    d.name.clone()
+                }
+            })
+            .collect();
+        // labels: for matching — include id, name, and type so partial matches work
+        let labels: Vec<String> = docs
+            .iter()
+            .map(|d| {
+                format!("{} {} {}", d.id, d.name, d.doc_type)
+            })
+            .collect();
+        (replacements, labels)
+    }
+
+    fn update_docs(&mut self, docs: Vec<DocEntry>) {
+        let (replacements, labels) = Self::build_doc_completions(&docs);
+        self.doc_ids = replacements;
+        self.doc_labels = labels;
     }
 }
 
@@ -139,6 +196,23 @@ fn filter_pairs(candidates: &[String], partial: &str) -> Vec<Pair> {
         .map(|s| Pair {
             display: s.clone(),
             replacement: s.clone(),
+        })
+        .collect()
+}
+
+/// Build Pairs for document completion: replacement is the name (or ID),
+/// matching is done against a label that contains id + name + type.
+fn filter_doc_pairs(replacements: &[String], labels: &[String], partial: &str) -> Vec<Pair> {
+    let partial_lower = partial.to_lowercase();
+    // Also match against partial without surrounding quotes
+    let partial_unquoted = partial.trim_matches('"').to_lowercase();
+    replacements
+        .iter()
+        .zip(labels.iter())
+        .filter(|(_repl, label)| label.to_lowercase().contains(&partial_lower) || label.to_lowercase().contains(&partial_unquoted))
+        .map(|(repl, _label)| Pair {
+            display: repl.clone(),
+            replacement: repl.clone(),
         })
         .collect()
 }
@@ -158,7 +232,7 @@ impl Completer for ReplHelper {
         let words_before: Vec<&str> = input[..word_start].split_whitespace().collect();
         let prev_word = words_before.last().copied();
 
-        // Drive slug completion: after --drive flag or positional drive args
+        // ── Drive slug completion ────────────────────────────
         if prev_word == Some("--drive")
             || input.starts_with("drives get ")
             || input.starts_with("drives delete ")
@@ -170,7 +244,59 @@ impl Completer for ReplHelper {
             }
         }
 
-        // Model type completion: after --type / -t flag or models get
+        // ── Document ID/name completion ──────────────────────
+        // After commands that take a doc ID as a positional arg
+        if input.starts_with("docs get ")
+            || input.starts_with("docs delete ")
+            || input.starts_with("docs mutate ")
+            || input.starts_with("export doc ")
+            || input.starts_with("access show ")
+            || input.starts_with("access grant ")
+            || input.starts_with("access revoke ")
+            || input.starts_with("access ops ")
+        {
+            // Only complete the first positional arg (the doc ID)
+            let after_cmd = words_before.len();
+            if after_cmd <= 2 {
+                let matches = filter_doc_pairs(&self.doc_ids, &self.doc_labels, partial);
+                if !matches.is_empty() {
+                    return Ok((word_start, matches));
+                }
+            }
+        }
+        // ops takes doc ID as first arg
+        if input.starts_with("ops ") && words_before.len() <= 1 {
+            let matches = filter_doc_pairs(&self.doc_ids, &self.doc_labels, partial);
+            if !matches.is_empty() {
+                return Ok((word_start, matches));
+            }
+        }
+        // after --doc flag
+        if prev_word == Some("--doc") {
+            let matches = filter_doc_pairs(&self.doc_ids, &self.doc_labels, partial);
+            if !matches.is_empty() {
+                return Ok((word_start, matches));
+            }
+        }
+
+        // ── Profile name completion ──────────────────────────
+        if input.starts_with("config use ")
+            || input.starts_with("config remove ")
+        {
+            let matches = filter_pairs(&self.profile_names, partial);
+            if !matches.is_empty() {
+                return Ok((word_start, matches));
+            }
+        }
+        // after --profile / -p flag
+        if prev_word == Some("--profile") || prev_word == Some("-p") {
+            let matches = filter_pairs(&self.profile_names, partial);
+            if !matches.is_empty() {
+                return Ok((word_start, matches));
+            }
+        }
+
+        // ── Model type completion ────────────────────────────
         if prev_word == Some("--type")
             || prev_word == Some("-t")
             || input.starts_with("models get ")
@@ -181,13 +307,13 @@ impl Completer for ReplHelper {
             }
         }
 
-        // Guide topic completion
+        // ── Guide topic completion ───────────────────────────
         if input.starts_with("guide ") {
             let matches = filter_pairs(&self.guide_topics, partial);
             return Ok((word_start, matches));
         }
 
-        // First-level command completion
+        // ── First-level command completion ────────────────────
         let matches: Vec<Pair> = self
             .commands
             .iter()
@@ -208,6 +334,54 @@ impl Hinter for ReplHelper {
 impl Highlighter for ReplHelper {}
 impl Validator for ReplHelper {}
 impl Helper for ReplHelper {}
+
+// ── Terminal helpers ─────────────────────────────────────────────────────────
+
+/// Ensure the terminal cursor is visible (dialoguer widgets may hide it).
+fn show_cursor() {
+    eprint!("\x1b[?25h");
+}
+
+/// Spawn a background task that shows an animated spinner on stderr.
+/// The first frame is printed synchronously so it's visible immediately.
+fn spawn_spinner(message: &str) -> tokio::task::JoinHandle<()> {
+    // Print first frame synchronously so it's visible before any await
+    eprint!("\r\x1b[2K⠋ {message}");
+    let _ = std::io::stderr().flush();
+
+    let msg = message.to_string();
+    tokio::spawn(async move {
+        let frames = ['⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏', '⠋'];
+        let mut i = 0;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            eprint!("\r\x1b[2K{} {msg}", frames[i % frames.len()]);
+            let _ = std::io::stderr().flush();
+            i += 1;
+        }
+    })
+}
+
+/// Stop the spinner and clear its line.
+fn stop_spinner(handle: tokio::task::JoinHandle<()>) {
+    handle.abort();
+    eprint!("\r\x1b[2K");
+    let _ = std::io::stderr().flush();
+}
+
+/// Print a visual separator before command output so it's easy to spot.
+fn print_command_separator(cmd: &str) {
+    let display = if cmd.len() > 40 {
+        format!("{}...", &cmd[..37])
+    } else {
+        cmd.to_string()
+    };
+    let label = format!("──── {display} ");
+    let total_width: usize = 60;
+    let padding_len = total_width.saturating_sub(label.chars().count());
+    eprintln!();
+    eprintln!("{}", format!("{label}{}", "─".repeat(padding_len)).dimmed());
+}
 
 // ── Shell-like tokeniser ────────────────────────────────────────────────────
 
@@ -243,10 +417,74 @@ fn shell_split(input: &str) -> Vec<String> {
     tokens
 }
 
+// ── Doc-fetching for tab completion ──────────────────────────────────────────
+
+async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEntry> {
+    let data = match client
+        .query(
+            r#"{ driveDocuments { id state { nodes { ... on DocumentDrive_FileNode { id name kind documentType } } } } }"#,
+            None,
+        )
+        .await
+    {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+
+    let drives = data
+        .get("driveDocuments")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut docs = Vec::new();
+    for drv in &drives {
+        let nodes = drv
+            .pointer("/state/nodes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        if nodes.is_empty() {
+            let drive_id = drv["id"].as_str().unwrap_or("");
+            if !drive_id.is_empty() {
+                let q = format!(
+                    r#"{{ driveDocument(idOrSlug: "{drive_id}") {{ state {{ nodes {{ ... on DocumentDrive_FileNode {{ id name kind documentType }} }} }} }} }}"#
+                );
+                if let Ok(d) = client.query(&q, None).await
+                    && let Some(n) = d.pointer("/driveDocument/state/nodes").and_then(|v| v.as_array())
+                {
+                    for node in n {
+                        if node["kind"].as_str() == Some("file") {
+                            docs.push(DocEntry {
+                                id: node["id"].as_str().unwrap_or("").to_string(),
+                                name: node["name"].as_str().unwrap_or("").to_string(),
+                                doc_type: node["documentType"].as_str().unwrap_or("").to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        } else {
+            for node in &nodes {
+                if node["kind"].as_str() == Some("file") {
+                    docs.push(DocEntry {
+                        id: node["id"].as_str().unwrap_or("").to_string(),
+                        name: node["name"].as_str().unwrap_or("").to_string(),
+                        doc_type: node["documentType"].as_str().unwrap_or("").to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    docs
+}
+
 // ── REPL entry point ────────────────────────────────────────────────────────
 
 pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
-    let (name, _profile, client) = helpers::setup(profile_name)?;
+    let (name, _profile, mut client) = helpers::setup(profile_name)?;
 
     // Load introspection cache for context
     let cache = crate::graphql::introspection::load_cache(&name)?;
@@ -258,8 +496,14 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
         .map(|c| c.models.values().map(|m| m.document_type.clone()).collect())
         .unwrap_or_default();
 
+    // Fetch completion data with a loading indicator
+    let spinner = spawn_spinner("Loading...");
+
     // Fetch drive slugs for tab completion
-    let drive_slugs: Vec<String> = match client.query("{ driveDocuments { slug } }", None).await {
+    let drive_slugs: Vec<String> = match client
+        .query("{ driveDocuments { slug } }", None)
+        .await
+    {
         Ok(data) => data
             .get("driveDocuments")
             .and_then(|v| v.as_array())
@@ -272,12 +516,22 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
         Err(_) => Vec::new(),
     };
 
+    // Fetch document entries for tab completion
+    let doc_entries = fetch_doc_entries(&client).await;
+
+    stop_spinner(spinner);
+
+    // Fetch profile names for tab completion
+    let profile_names: Vec<String> = crate::config::load_config()
+        .map(|cfg| cfg.profile_names())
+        .unwrap_or_default();
+
     if !quiet {
         eprintln!("Switchboard interactive mode");
         eprintln!("Profile: {} ({})", name, client.url);
         eprintln!("Models:  {model_count}");
         eprintln!();
-        eprintln!("Type 'help' for commands, or append --help to any command.");
+        eprintln!("Type 'help' for commands, or press Tab for auto-completion.");
         eprintln!();
     }
 
@@ -285,9 +539,10 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
     let config = Config::builder()
         .max_history_size(1000)?
         .auto_add_history(true)
+        .completion_type(CompletionType::Circular)
         .build();
 
-    let helper = ReplHelper::new(drive_slugs, model_types);
+    let helper = ReplHelper::new(drive_slugs, model_types, profile_names, doc_entries);
     let mut rl: Editor<ReplHelper, rustyline::history::DefaultHistory> =
         Editor::with_config(config)?;
     rl.set_helper(Some(helper));
@@ -298,9 +553,11 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
         let _ = rl.load_history(path);
     }
 
-    let prompt = format!("{name}> ");
+    let mut current_profile = name;
 
     loop {
+        let prompt = format!("{current_profile}> ");
+        show_cursor();
         match rl.readline(&prompt) {
             Ok(line) => {
                 let line = line.trim();
@@ -311,11 +568,15 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                 // ── REPL-only commands ──────────────────────────────
                 match line {
                     "exit" | "quit" | "q" => break,
-                    "help" | "?" => {
-                        print_repl_help();
-                        continue;
-                    }
                     _ => {}
+                }
+
+                // Visual separator so command output is easy to spot
+                print_command_separator(line);
+
+                if matches!(line, "help" | "?") {
+                    print_repl_help();
+                    continue;
                 }
 
                 // ── Raw GraphQL shorthand: query { ... } ────────────
@@ -355,14 +616,115 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                         let format = parsed.format.unwrap_or(OutputFormat::Table);
                         let cmd_quiet = parsed.quiet || quiet;
 
+                        // Check if this command modifies docs (for refreshing completions)
+                        let modifies_docs = line.starts_with("docs create")
+                            || line.starts_with("docs delete")
+                            || line.starts_with("docs mutate")
+                            || line.starts_with("import ");
+
                         if let Err(e) =
                             crate::cli::dispatch(command, format, cmd_profile, cmd_quiet).await
                         {
                             eprintln!("Error: {e:#}");
                         }
+
+                        // Refresh doc completions after doc-modifying commands
+                        if modifies_docs {
+                            let spinner = spawn_spinner("Refreshing completions...");
+                            let new_docs = fetch_doc_entries(&client).await;
+                            stop_spinner(spinner);
+                            if let Some(helper) = rl.helper_mut() {
+                                helper.update_docs(new_docs);
+                            }
+                        }
+
+                        // Re-resolve default profile in case `config use` changed it
+                        if profile_name.is_none()
+                            && let Ok(cfg) = crate::config::load_config()
+                            && let Some((new_name, _)) = cfg.default_profile()
+                            && new_name != current_profile.as_str()
+                        {
+                            current_profile = new_name.to_string();
+
+                            // Rebuild client and refresh completions for new profile
+                            if let Ok((_n, _p, new_client)) = helpers::setup(None) {
+                                eprintln!(
+                                    "Switched to profile: {} ({})",
+                                    current_profile, new_client.url
+                                );
+                                client = new_client;
+
+                                let spinner = spawn_spinner("Loading profile data...");
+
+                                let new_slugs: Vec<String> = match client
+                                    .query("{ driveDocuments { slug } }", None)
+                                    .await
+                                {
+                                    Ok(data) => data
+                                        .get("driveDocuments")
+                                        .and_then(|v| v.as_array())
+                                        .map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|d| {
+                                                    d["slug"].as_str().map(String::from)
+                                                })
+                                                .collect()
+                                        })
+                                        .unwrap_or_default(),
+                                    Err(_) => Vec::new(),
+                                };
+
+                                let new_docs = fetch_doc_entries(&client).await;
+
+                                let new_model_types: Vec<String> =
+                                    crate::graphql::introspection::load_cache(&current_profile)
+                                        .ok()
+                                        .flatten()
+                                        .map(|c| {
+                                            c.models
+                                                .values()
+                                                .map(|m| m.document_type.clone())
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+
+                                stop_spinner(spinner);
+
+                                if let Some(helper) = rl.helper_mut() {
+                                    helper.drive_slugs = new_slugs;
+                                    helper.model_types = new_model_types;
+                                    helper.update_docs(new_docs);
+                                }
+                            }
+                        }
+
+                        eprintln!(); // blank line between command output and next prompt
                     }
                     Err(e) => {
-                        let _ = e.print();
+                        // Try interpreting as a bare guide topic
+                        // (e.g., "overview" → "guide overview")
+                        let guide_args =
+                            std::iter::once("switchboard".to_string())
+                                .chain(std::iter::once("guide".to_string()))
+                                .chain(shell_split(line));
+                        if let Ok(parsed) = Cli::try_parse_from(guide_args)
+                            && let Some(command) = parsed.command
+                        {
+                            if let Err(ge) = crate::cli::dispatch(
+                                command,
+                                OutputFormat::Table,
+                                profile_name,
+                                quiet,
+                            )
+                            .await
+                            {
+                                eprintln!("Error: {ge:#}");
+                            }
+                            eprintln!();
+                        } else {
+                            let _ = e.print();
+                            eprintln!();
+                        }
                     }
                 }
             }
