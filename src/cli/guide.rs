@@ -192,8 +192,9 @@ COMMANDS
 
   switchboard docs list --drive <slug> [--type <type>]
                                        List documents (optionally filter by type)
-  switchboard docs get <id> --drive <slug>
-                                       Get document details and state
+  switchboard docs get <id> [--drive <slug>] [--state]
+                                       Get document metadata (searches all drives if --drive omitted)
+                                       Use --state to include the full document state
   switchboard docs tree --drive <slug>
                                        Hierarchical folder/file view
   switchboard docs create              Interactive document creation
@@ -221,7 +222,8 @@ MODELS
 EXAMPLES
 
   switchboard docs list --drive builders --type powerhouse/builder-profile
-  switchboard docs get abc123 --drive builders --format json | jq '.stateJSON'
+  switchboard docs get abc123 --state           # fetch metadata + state across all drives
+  switchboard docs get abc123 --drive builders   # fetch metadata from a specific drive
   switchboard docs mutate abc123 updateProfile --input '{{"name":"New"}}' --drive builders"#
     );
 }
@@ -630,7 +632,7 @@ DRIVES
 
 DOCUMENTS
   docs list --drive <id>        List documents
-  docs get <id> --drive <id>    Get document state
+  docs get <id> [--drive] [--state]  Get document metadata
   docs tree --drive <id>        Hierarchical tree view
   docs create                   Create a document
   docs delete <ids...> [-y]     Delete one or more documents

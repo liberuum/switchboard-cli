@@ -35,6 +35,7 @@ impl ReplHelper {
             // Docs
             "docs list --drive ".into(),
             "docs get ".into(),
+            "docs get --state ".into(),
             "docs tree --drive ".into(),
             "docs create".into(),
             "docs delete ".into(),

@@ -19,13 +19,16 @@ pub enum DocsCommand {
         #[arg(long, short = 't')]
         r#type: Option<String>,
     },
-    /// Get a document by ID
+    /// Get a document by ID (searches across all drives if --drive is omitted)
     Get {
         /// Document ID
         id: String,
-        /// Drive ID or slug (required for model-specific query)
+        /// Drive ID or slug (narrows search to a single drive)
         #[arg(long)]
-        drive: String,
+        drive: Option<String>,
+        /// Include full document state in output
+        #[arg(long)]
+        state: bool,
     },
     /// Show hierarchical file tree of a drive
     Tree {
@@ -62,7 +65,9 @@ pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&s
         DocsCommand::List { drive, r#type } => {
             list(&drive, r#type.as_deref(), format, profile_name).await
         }
-        DocsCommand::Get { id, drive } => get(&id, &drive, format, profile_name).await,
+        DocsCommand::Get { id, drive, state } => {
+            get(&id, drive.as_deref(), state, format, profile_name).await
+        }
         DocsCommand::Tree { drive } => tree(&drive, format, profile_name).await,
         DocsCommand::Create {
             r#type,
@@ -162,17 +167,58 @@ async fn list(
 
 async fn get(
     id: &str,
-    drive: &str,
+    drive: Option<&str>,
+    include_state: bool,
     format: OutputFormat,
     profile_name: Option<&str>,
 ) -> Result<()> {
     let (_name, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
 
-    // Resolve slug to UUID — model-specific queries require the actual drive UUID
-    let drive_id = resolve_drive_id(&client, drive).await?;
+    // Resolve drive UUID — either from the flag or by searching all drives
+    let drive_id = match drive {
+        Some(d) => resolve_drive_id(&client, d).await?,
+        None => {
+            // Search all drives for this document ID
+            let data = client
+                .query(
+                    r#"{ driveDocuments { id state { nodes { ... on DocumentDrive_FileNode { id } } } } }"#,
+                    None,
+                )
+                .await?;
+
+            let drives = data
+                .get("driveDocuments")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            let mut found_drive: Option<String> = None;
+            for drv in &drives {
+                if let Some(nodes) = drv.pointer("/state/nodes").and_then(|v| v.as_array())
+                    && nodes.iter().any(|n| n["id"].as_str() == Some(id))
+                {
+                    found_drive = Some(
+                        drv["id"]
+                            .as_str()
+                            .ok_or_else(|| anyhow::anyhow!("Drive missing id"))?
+                            .to_string(),
+                    );
+                    break;
+                }
+            }
+
+            found_drive.ok_or_else(|| anyhow::anyhow!("Document '{id}' not found in any drive"))?
+        }
+    };
+
+    // Build field list — only include stateJSON when --state is passed
+    let fields = if include_state {
+        "id name documentType revision stateJSON"
+    } else {
+        "id name documentType revision"
+    };
 
     // Try each model namespace to find the document
-    // We need to try model-specific queries since that's how the API works
     let mut doc: Option<Value> = None;
 
     for model in cache.models.values() {
@@ -181,7 +227,7 @@ async fn get(
         }
 
         let query = format!(
-            r#"{{ {prefix} {{ getDocument(docId: "{id}", driveId: "{drive_id}") {{ id name documentType revision stateJSON }} }} }}"#,
+            r#"{{ {prefix} {{ getDocument(docId: "{id}", driveId: "{drive_id}") {{ {fields} }} }} }}"#,
             prefix = model.prefix,
             id = id.replace('"', r#"\""#),
         );
