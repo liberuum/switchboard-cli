@@ -137,17 +137,56 @@ async fn get(id: &str, format: OutputFormat, profile_name: Option<&str>) -> Resu
                 drive["documentType"].as_str().unwrap_or("-")
             );
 
-            // Show nodes summary
+            // Show documents table
             if let Some(nodes) = drive.pointer("/state/nodes").and_then(|v| v.as_array()) {
-                let files = nodes
+                let files: Vec<&Value> = nodes
                     .iter()
                     .filter(|n| n["kind"].as_str() == Some("file"))
-                    .count();
+                    .collect();
                 let folders = nodes
                     .iter()
                     .filter(|n| n["kind"].as_str() == Some("folder"))
                     .count();
-                println!("\nContents: {files} files, {folders} folders");
+                println!("\nContents: {} files, {folders} folders", files.len());
+
+                if !files.is_empty() {
+                    // Build folder id -> name lookup for the Folder column
+                    let folder_map: std::collections::HashMap<&str, &str> = nodes
+                        .iter()
+                        .filter(|n| n["kind"].as_str() == Some("folder"))
+                        .filter_map(|n| Some((n["id"].as_str()?, n["name"].as_str()?)))
+                        .collect();
+
+                    println!();
+                    let rows: Vec<Vec<String>> = files
+                        .iter()
+                        .map(|f| {
+                            let folder = f["parentFolder"]
+                                .as_str()
+                                .and_then(|pid| folder_map.get(pid).copied())
+                                .unwrap_or("");
+                            vec![
+                                f["id"].as_str().unwrap_or("-").to_string(),
+                                f["name"].as_str().unwrap_or("-").to_string(),
+                                f["documentType"].as_str().unwrap_or("-").to_string(),
+                                folder.to_string(),
+                            ]
+                        })
+                        .collect();
+                    if folders > 0 {
+                        print_table(&["ID", "Name", "Type", "Folder"], &rows);
+                    } else {
+                        // No folders — skip the Folder column for cleaner output
+                        let rows: Vec<Vec<String>> = rows
+                            .into_iter()
+                            .map(|mut r| {
+                                r.pop();
+                                r
+                            })
+                            .collect();
+                        print_table(&["ID", "Name", "Type"], &rows);
+                    }
+                }
             }
         }
     }
