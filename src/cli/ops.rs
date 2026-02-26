@@ -28,7 +28,10 @@ pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>
 
     // Resolve doc (accepts name or UUID) and drive
     let (args_doc_id, drive_id) = match &args.drive {
-        Some(d) => (args.doc_id.clone(), helpers::resolve_drive_id(&client, d).await?),
+        Some(d) => (
+            args.doc_id.clone(),
+            helpers::resolve_drive_id(&client, d).await?,
+        ),
         None => helpers::resolve_doc(&client, &args.doc_id).await?,
     };
 
@@ -39,7 +42,12 @@ pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>
 
     // Query formats to try, in order of richness
     #[derive(Clone, Copy)]
-    enum QueryFormat { PaginatedAction, FlatAction, FlatInputText, FlatBasic }
+    enum QueryFormat {
+        PaginatedAction,
+        FlatAction,
+        FlatInputText,
+        FlatBasic,
+    }
     let formats = [
         QueryFormat::PaginatedAction,
         QueryFormat::FlatAction,
@@ -56,33 +64,36 @@ pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>
             let query = match fmt {
                 QueryFormat::PaginatedAction => format!(
                     r#"{{ {prefix} {{ getDocument(docId: "{doc_id}", driveId: "{drive_id}") {{ operations {{ items {{ id type index timestampUtcMs hash skip action {{ type input }} }} }} }} }} }}"#,
-                    prefix = model.prefix, doc_id = doc_id_escaped,
+                    prefix = model.prefix,
+                    doc_id = doc_id_escaped,
                 ),
                 QueryFormat::FlatAction => format!(
                     r#"{{ {prefix} {{ getDocument(docId: "{doc_id}", driveId: "{drive_id}") {{ operations {{ id type index timestampUtcMs hash skip action {{ type input }} }} }} }} }}"#,
-                    prefix = model.prefix, doc_id = doc_id_escaped,
+                    prefix = model.prefix,
+                    doc_id = doc_id_escaped,
                 ),
                 QueryFormat::FlatInputText => format!(
                     r#"{{ {prefix} {{ getDocument(docId: "{doc_id}", driveId: "{drive_id}") {{ operations {{ id type index timestampUtcMs hash skip inputText }} }} }} }}"#,
-                    prefix = model.prefix, doc_id = doc_id_escaped,
+                    prefix = model.prefix,
+                    doc_id = doc_id_escaped,
                 ),
                 QueryFormat::FlatBasic => format!(
                     r#"{{ {prefix} {{ getDocument(docId: "{doc_id}", driveId: "{drive_id}") {{ operations {{ id type index timestampUtcMs hash skip }} }} }} }}"#,
-                    prefix = model.prefix, doc_id = doc_id_escaped,
+                    prefix = model.prefix,
+                    doc_id = doc_id_escaped,
                 ),
             };
 
             if let Ok(data) = client.query(&query, None).await {
-                let get_doc = data
-                    .get(&model.prefix)
-                    .and_then(|v| v.get("getDocument"));
+                let get_doc = data.get(&model.prefix).and_then(|v| v.get("getDocument"));
 
                 // Extract operations — paginated format nests under items
                 let operations = get_doc
                     .and_then(|v| v.get("operations"))
                     .and_then(|v| {
                         // Try paginated: operations.items[]
-                        v.get("items").and_then(|i| i.as_array())
+                        v.get("items")
+                            .and_then(|i| i.as_array())
                             // Try flat: operations[]
                             .or_else(|| v.as_array())
                     })

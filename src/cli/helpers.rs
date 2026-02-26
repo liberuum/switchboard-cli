@@ -178,7 +178,11 @@ pub async fn select_drive(client: &GraphQLClient) -> Result<(String, String, Str
     let labels: Vec<String> = drives
         .iter()
         .map(|(id, slug, name)| {
-            let identifier = if !slug.is_empty() { slug.as_str() } else { id.as_str() };
+            let identifier = if !slug.is_empty() {
+                slug.as_str()
+            } else {
+                id.as_str()
+            };
             format!("{name}  ({identifier})")
         })
         .collect();

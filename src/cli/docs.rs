@@ -110,9 +110,7 @@ async fn list(
         }
         None => {
             // All drives
-            let data = client
-                .query("{ driveDocuments { id name } }", None)
-                .await?;
+            let data = client.query("{ driveDocuments { id name } }", None).await?;
             data.get("driveDocuments")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -304,7 +302,11 @@ async fn get(
     Ok(())
 }
 
-async fn tree(drive: Option<String>, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
+async fn tree(
+    drive: Option<String>,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
     let drive = match drive {

@@ -319,9 +319,7 @@ async fn pick_preferred_editor(client: &crate::graphql::GraphQLClient) -> Result
         Ok(None)
     } else if selection == options.len() - 1 {
         // Custom — free text input
-        let e: String = Input::new()
-            .with_prompt("Editor ID")
-            .interact_text()?;
+        let e: String = Input::new().with_prompt("Editor ID").interact_text()?;
         if e.is_empty() { Ok(None) } else { Ok(Some(e)) }
     } else {
         Ok(Some(editors[selection - 1].clone()))

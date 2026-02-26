@@ -118,8 +118,7 @@ fn resolve_field_type<'a>(
 
         match kind {
             "NON_NULL" => {
-                let (ft, _) =
-                    resolve_field_type(client, &type_val["ofType"], cache, depth).await?;
+                let (ft, _) = resolve_field_type(client, &type_val["ofType"], cache, depth).await?;
                 Ok((ft, true))
             }
             "LIST" => {
@@ -141,9 +140,7 @@ fn resolve_field_type<'a>(
 }
 
 async fn fetch_enum_values(client: &GraphQLClient, type_name: &str) -> Result<Vec<String>> {
-    let query = format!(
-        r#"{{ __type(name: "{type_name}") {{ enumValues {{ name }} }} }}"#,
-    );
+    let query = format!(r#"{{ __type(name: "{type_name}") {{ enumValues {{ name }} }} }}"#,);
     let data = client.query(&query, None).await?;
     let values = data
         .pointer("/__type/enumValues")
@@ -199,7 +196,13 @@ fn print_field_summary(fields: &[InputField], state: &Value) {
         let current = state.get(&field.name);
         let type_str = field.field_type.display().dimmed();
         let val_str = format_current_value(current);
-        println!("  {} {} = {} {}", "·".dimmed(), field.name, val_str, type_str);
+        println!(
+            "  {} {} = {} {}",
+            "·".dimmed(),
+            field.name,
+            val_str,
+            type_str
+        );
     }
     println!();
 }
@@ -231,7 +234,10 @@ fn format_current_value(val: Option<&Value>) -> String {
                 let keys: Vec<&String> = m.keys().take(3).collect();
                 format!(
                     "{{ {} }}",
-                    keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
+                    keys.iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
                 .green()
                 .to_string()
@@ -445,12 +451,7 @@ fn prompt_list(
         format!("{} items", current_arr.len())
     };
 
-    println!(
-        "  {} {} [{}]",
-        "▸".dimmed(),
-        label.bold(),
-        preview.dimmed()
-    );
+    println!("  {} {} [{}]", "▸".dimmed(), label.bold(), preview.dimmed());
 
     // Show existing items if any
     if !current_arr.is_empty() {

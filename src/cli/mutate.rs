@@ -35,7 +35,10 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
 
     // Resolve doc (name or UUID) and drive
     let (resolved_doc_id, drive_id) = match &args.drive {
-        Some(d) => (args.doc_id.clone(), helpers::resolve_drive_id(&client, d).await?),
+        Some(d) => (
+            args.doc_id.clone(),
+            helpers::resolve_drive_id(&client, d).await?,
+        ),
         None => helpers::resolve_doc(&client, &args.doc_id).await?,
     };
 
@@ -66,8 +69,9 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
         }
     }
 
-    let doc_type = doc_type
-        .ok_or_else(|| anyhow::anyhow!("Could not determine document type for {}", resolved_doc_id))?;
+    let doc_type = doc_type.ok_or_else(|| {
+        anyhow::anyhow!("Could not determine document type for {}", resolved_doc_id)
+    })?;
 
     let model = cache.find_model(&doc_type).ok_or_else(|| {
         anyhow::anyhow!("No model found for type {doc_type}. Run `switchboard introspect`.")
@@ -100,49 +104,63 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
     };
 
     // Get input JSON + optional schema for enum-aware serialization
-    let (input_value, input_schema): (Value, Option<Vec<field_editor::InputField>>) = match args.input {
-        Some(ref input) => {
-            let v = serde_json::from_str(input).map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?;
-            (v, None)
-        }
-        None => {
-            let input_args: Vec<_> = operation
-                .args
-                .iter()
-                .filter(|a| a.name != "docId" && a.name != "driveId")
-                .collect();
+    let (input_value, input_schema): (Value, Option<Vec<field_editor::InputField>>) =
+        match args.input {
+            Some(ref input) => {
+                let v = serde_json::from_str(input)
+                    .map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?;
+                (v, None)
+            }
+            None => {
+                let input_args: Vec<_> = operation
+                    .args
+                    .iter()
+                    .filter(|a| a.name != "docId" && a.name != "driveId")
+                    .collect();
 
-            if input_args.is_empty() {
-                (Value::Object(serde_json::Map::new()), None)
-            } else {
-                // Try field-by-field editor for the "input" arg
-                let input_arg = input_args.iter().find(|a| a.name == "input");
-                match try_field_editor(&client, input_arg, model.prefix.as_str(), &resolved_doc_id, &drive_id).await {
-                    Ok(Some((val, schema))) => (val, Some(schema)),
-                    Ok(None) => {
-                        // User cancelled or no changes
-                        println!("No changes. Aborted.");
-                        return Ok(());
-                    }
-                    Err(_) => {
-                        // Fallback to raw JSON input
-                        eprintln!("{}", "Could not introspect input type — falling back to raw JSON input.".yellow());
-                        println!("Expected input fields:");
-                        for arg in &input_args {
-                            let req = if arg.required { " (required)" } else { "" };
-                            println!("  {} : {}{}", arg.name, arg.type_name, req);
+                if input_args.is_empty() {
+                    (Value::Object(serde_json::Map::new()), None)
+                } else {
+                    // Try field-by-field editor for the "input" arg
+                    let input_arg = input_args.iter().find(|a| a.name == "input");
+                    match try_field_editor(
+                        &client,
+                        input_arg,
+                        model.prefix.as_str(),
+                        &resolved_doc_id,
+                        &drive_id,
+                    )
+                    .await
+                    {
+                        Ok(Some((val, schema))) => (val, Some(schema)),
+                        Ok(None) => {
+                            // User cancelled or no changes
+                            println!("No changes. Aborted.");
+                            return Ok(());
                         }
-                        let input_json: String = dialoguer::Input::new()
-                            .with_prompt("Input JSON")
-                            .interact_text()?;
-                        let v = serde_json::from_str(&input_json)
-                            .map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?;
-                        (v, None)
+                        Err(_) => {
+                            // Fallback to raw JSON input
+                            eprintln!(
+                                "{}",
+                                "Could not introspect input type — falling back to raw JSON input."
+                                    .yellow()
+                            );
+                            println!("Expected input fields:");
+                            for arg in &input_args {
+                                let req = if arg.required { " (required)" } else { "" };
+                                println!("  {} : {}{}", arg.name, arg.type_name, req);
+                            }
+                            let input_json: String = dialoguer::Input::new()
+                                .with_prompt("Input JSON")
+                                .interact_text()?;
+                            let v = serde_json::from_str(&input_json)
+                                .map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?;
+                            (v, None)
+                        }
                     }
                 }
             }
-        }
-    };
+        };
 
     // Build mutation
     // Check if this operation takes `input` as an argument or uses direct args

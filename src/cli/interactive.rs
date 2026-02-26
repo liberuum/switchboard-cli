@@ -175,9 +175,7 @@ impl ReplHelper {
         // labels: for matching — include id, name, and type so partial matches work
         let labels: Vec<String> = docs
             .iter()
-            .map(|d| {
-                format!("{} {} {}", d.id, d.name, d.doc_type)
-            })
+            .map(|d| format!("{} {} {}", d.id, d.name, d.doc_type))
             .collect();
         (replacements, labels)
     }
@@ -209,7 +207,10 @@ fn filter_doc_pairs(replacements: &[String], labels: &[String], partial: &str) -
     replacements
         .iter()
         .zip(labels.iter())
-        .filter(|(_repl, label)| label.to_lowercase().contains(&partial_lower) || label.to_lowercase().contains(&partial_unquoted))
+        .filter(|(_repl, label)| {
+            label.to_lowercase().contains(&partial_lower)
+                || label.to_lowercase().contains(&partial_unquoted)
+        })
         .map(|(repl, _label)| Pair {
             display: repl.clone(),
             replacement: repl.clone(),
@@ -280,9 +281,7 @@ impl Completer for ReplHelper {
         }
 
         // ── Profile name completion ──────────────────────────
-        if input.starts_with("config use ")
-            || input.starts_with("config remove ")
-        {
+        if input.starts_with("config use ") || input.starts_with("config remove ") {
             let matches = filter_pairs(&self.profile_names, partial);
             if !matches.is_empty() {
                 return Ok((word_start, matches));
@@ -452,7 +451,9 @@ async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEnt
                     r#"{{ driveDocument(idOrSlug: "{drive_id}") {{ state {{ nodes {{ ... on DocumentDrive_FileNode {{ id name kind documentType }} }} }} }} }}"#
                 );
                 if let Ok(d) = client.query(&q, None).await
-                    && let Some(n) = d.pointer("/driveDocument/state/nodes").and_then(|v| v.as_array())
+                    && let Some(n) = d
+                        .pointer("/driveDocument/state/nodes")
+                        .and_then(|v| v.as_array())
                 {
                     for node in n {
                         if node["kind"].as_str() == Some("file") {
@@ -500,10 +501,7 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
     let spinner = spawn_spinner("Loading...");
 
     // Fetch drive slugs for tab completion
-    let drive_slugs: Vec<String> = match client
-        .query("{ driveDocuments { slug } }", None)
-        .await
-    {
+    let drive_slugs: Vec<String> = match client.query("{ driveDocuments { slug } }", None).await {
         Ok(data) => data
             .get("driveDocuments")
             .and_then(|v| v.as_array())
@@ -656,23 +654,21 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
 
                                 let spinner = spawn_spinner("Loading profile data...");
 
-                                let new_slugs: Vec<String> = match client
-                                    .query("{ driveDocuments { slug } }", None)
-                                    .await
-                                {
-                                    Ok(data) => data
-                                        .get("driveDocuments")
-                                        .and_then(|v| v.as_array())
-                                        .map(|arr| {
-                                            arr.iter()
-                                                .filter_map(|d| {
-                                                    d["slug"].as_str().map(String::from)
-                                                })
-                                                .collect()
-                                        })
-                                        .unwrap_or_default(),
-                                    Err(_) => Vec::new(),
-                                };
+                                let new_slugs: Vec<String> =
+                                    match client.query("{ driveDocuments { slug } }", None).await {
+                                        Ok(data) => data
+                                            .get("driveDocuments")
+                                            .and_then(|v| v.as_array())
+                                            .map(|arr| {
+                                                arr.iter()
+                                                    .filter_map(|d| {
+                                                        d["slug"].as_str().map(String::from)
+                                                    })
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default(),
+                                        Err(_) => Vec::new(),
+                                    };
 
                                 let new_docs = fetch_doc_entries(&client).await;
 
@@ -703,10 +699,9 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                     Err(e) => {
                         // Try interpreting as a bare guide topic
                         // (e.g., "overview" → "guide overview")
-                        let guide_args =
-                            std::iter::once("switchboard".to_string())
-                                .chain(std::iter::once("guide".to_string()))
-                                .chain(shell_split(line));
+                        let guide_args = std::iter::once("switchboard".to_string())
+                            .chain(std::iter::once("guide".to_string()))
+                            .chain(shell_split(line));
                         if let Ok(parsed) = Cli::try_parse_from(guide_args)
                             && let Some(command) = parsed.command
                         {
