@@ -11,6 +11,12 @@ use crate::phd::{self, PhdHeader, PhdOperations, PhdState};
 
 #[derive(Subcommand)]
 pub enum ExportCommand {
+    /// Export everything: all drives and their documents
+    All {
+        /// Output directory (defaults to ./switchboard-export/)
+        #[arg(long, short)]
+        out: Option<String>,
+    },
     /// Export a single document as .phd file
     Doc {
         /// Document ID
@@ -39,6 +45,7 @@ pub async fn run_export(
     quiet: bool,
 ) -> Result<()> {
     match cmd {
+        ExportCommand::All { out } => export_all(out.as_deref(), profile_name, quiet).await,
         ExportCommand::Doc { doc_id, drive, out } => {
             export_doc(&doc_id, &drive, out.as_deref(), profile_name, quiet).await
         }
@@ -84,6 +91,206 @@ fn build_current_state(state_json: Value) -> PhdState {
     }
 }
 
+async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bool) -> Result<()> {
+    let (_name, _profile, client, _cache) = helpers::setup_with_cache(profile_name)?;
+
+    // List all drives
+    let data = client
+        .query("{ driveDocuments { id name slug } }", None)
+        .await?;
+
+    let drives = data
+        .get("driveDocuments")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if drives.is_empty() {
+        if !quiet {
+            println!("No drives found.");
+        }
+        return Ok(());
+    }
+
+    let base_dir = out_dir.unwrap_or("./switchboard-export");
+    let base_path = Path::new(base_dir);
+    std::fs::create_dir_all(base_path)?;
+    // Resolve to absolute path so the user sees exactly where files land
+    let base_path = std::fs::canonicalize(base_path)?;
+
+    if !quiet {
+        println!(
+            "Exporting {} drive(s) to {}/",
+            drives.len(),
+            base_path.display()
+        );
+    }
+
+    let base_url = base_url_from(&client.url);
+    let mut total_docs = 0;
+
+    for (drive_idx, drive) in drives.iter().enumerate() {
+        let drive_id = drive["id"].as_str().unwrap_or("");
+        let drive_name = drive["name"].as_str().unwrap_or("drive");
+        let drive_slug = drive["slug"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(drive_name);
+
+        if !quiet {
+            println!(
+                "\n[{}/{}] Drive: {} ({})",
+                drive_idx + 1,
+                drives.len(),
+                drive_name,
+                drive_slug,
+            );
+        }
+
+        // Get nodes for this drive
+        let drive_query = format!(
+            r#"{{
+  driveDocument(idOrSlug: "{}") {{
+    state {{
+      nodes {{
+        ... on DocumentDrive_FileNode {{ id name kind documentType parentFolder }}
+        ... on DocumentDrive_FolderNode {{ id name kind parentFolder }}
+      }}
+    }}
+  }}
+}}"#,
+            drive_id.replace('"', r#"\""#)
+        );
+
+        let drive_data = match client.query(&drive_query, None).await {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("  Failed to query drive {drive_slug}: {e}");
+                continue;
+            }
+        };
+
+        let nodes = drive_data
+            .pointer("/driveDocument/state/nodes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let files: Vec<&Value> = nodes
+            .iter()
+            .filter(|n| n["kind"].as_str() == Some("file"))
+            .collect();
+
+        if files.is_empty() {
+            if !quiet {
+                println!("  No documents, skipping.");
+            }
+            continue;
+        }
+
+        // Build folder hierarchy: id -> name mapping, and parent lookup
+        let folders: std::collections::HashMap<&str, &str> = nodes
+            .iter()
+            .filter(|n| n["kind"].as_str() == Some("folder"))
+            .filter_map(|n| {
+                let id = n["id"].as_str()?;
+                let name = n["name"].as_str()?;
+                Some((id, name))
+            })
+            .collect();
+
+        let drive_dir = base_path.join(sanitize_filename(drive_slug));
+        std::fs::create_dir_all(&drive_dir)?;
+
+        let drive_client =
+            GraphQLClient::new(format!("{base_url}/d/{drive_id}"), _profile.token.clone());
+
+        for (i, file_node) in files.iter().enumerate() {
+            let file_id = file_node["id"].as_str().unwrap_or("");
+            let file_name = file_node["name"].as_str().unwrap_or("document");
+            let file_type = file_node["documentType"].as_str().unwrap_or("unknown");
+
+            // Determine folder path for this file
+            let mut file_dir = drive_dir.clone();
+            if let Some(parent_id) = file_node["parentFolder"].as_str()
+                && let Some(folder_name) = folders.get(parent_id)
+            {
+                let folder_dir = drive_dir.join(sanitize_filename(folder_name));
+                std::fs::create_dir_all(&folder_dir)?;
+                file_dir = folder_dir;
+            }
+
+            match fetch_document_via_drive(&drive_client, file_id).await {
+                Ok((doc, operations)) => {
+                    let header = build_header(&doc);
+                    let state_json = parse_state_json(&doc);
+                    let phd_ops = PhdOperations {
+                        global: operations.clone(),
+                    };
+                    let initial_state = PhdState::default();
+                    let current_state = build_current_state(state_json);
+
+                    let safe_file = sanitize_filename(file_name);
+                    let file_path = file_dir.join(format!("{safe_file}.phd"));
+
+                    match phd::write_phd(
+                        &file_path,
+                        &header,
+                        &initial_state,
+                        &current_state,
+                        &phd_ops,
+                    ) {
+                        Ok(()) => {
+                            if !quiet {
+                                let size =
+                                    std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+                                println!(
+                                    "  [{}/{}] {} ({}) → {} {}",
+                                    i + 1,
+                                    files.len(),
+                                    file_name,
+                                    file_type,
+                                    format_bytes(size),
+                                    "✓".green()
+                                );
+                            }
+                            total_docs += 1;
+                        }
+                        Err(e) => {
+                            println!(
+                                "  [{}/{}] {} → {} {e}",
+                                i + 1,
+                                files.len(),
+                                file_name,
+                                "✗".red()
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!(
+                        "  [{}/{}] {} → {} {e}",
+                        i + 1,
+                        files.len(),
+                        file_name,
+                        "✗".red()
+                    );
+                }
+            }
+        }
+    }
+
+    if !quiet {
+        println!(
+            "\n{} {total_docs} documents exported across {} drive(s) to {}/",
+            "✓".green(),
+            drives.len(),
+            base_path.display()
+        );
+    }
+    Ok(())
+}
+
 async fn export_doc(
     doc_id: &str,
     drive: &str,
@@ -118,11 +325,12 @@ async fn export_doc(
     phd::write_phd(path, &header, &initial_state, &current_state, &phd_ops)?;
 
     if !quiet {
-        let file_size = std::fs::metadata(path)?.len();
+        let abs_path = std::fs::canonicalize(path)?;
+        let file_size = std::fs::metadata(&abs_path)?.len();
         println!(
             "{} Saved {} ({}, {} ops, {})",
             "✓".green(),
-            path.display(),
+            abs_path.display(),
             header.document_type,
             operations.len(),
             format_bytes(file_size),
@@ -205,8 +413,10 @@ async fn export_drive(
     let dir_str = out_dir.unwrap_or(&default_dir);
     let dir = Path::new(dir_str);
     std::fs::create_dir_all(dir)?;
+    let dir = std::fs::canonicalize(dir)?;
 
     if !quiet {
+        println!("  Saving to {}/", dir.display());
         println!("  Downloading {} documents...", files.len());
     }
 

@@ -129,7 +129,8 @@ switchboard docs mutate <doc-id> editInvoice --input '{"amount": 2000}' --drive 
 ### 4. Export and import
 
 ```bash
-switchboard export drive my-drive --out ./backup/
+switchboard export all --out ./backup/            # Export everything
+switchboard export drive my-drive --out ./backup/ # Export one drive
 switchboard import ./backup/*.phd --drive another-drive
 ```
 
@@ -180,8 +181,9 @@ switchboard import ./backup/*.phd --drive another-drive
 
 | Command | Description |
 |---------|-------------|
-| `switchboard export doc <id> --drive <slug> --out file.phd` | Export a single document |
+| `switchboard export all [--out ./dir/]` | Export everything (all drives, organized by folder) |
 | `switchboard export drive <slug> --out ./dir/` | Export all documents in a drive |
+| `switchboard export doc <id> --drive <slug> --out file.phd` | Export a single document |
 | `switchboard import <files> --drive <slug>` | Import `.phd` files into a drive |
 
 ### Authentication & Permissions

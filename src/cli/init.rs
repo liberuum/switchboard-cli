@@ -14,6 +14,10 @@ pub async fn run() -> Result<()> {
         .with_prompt("Paste your Switchboard GraphQL URL")
         .interact_text()?;
 
+    // Strip bracketed-paste escape sequences and other control chars that
+    // terminals inject when the user pastes a URL
+    let url = strip_terminal_escapes(&url);
+
     // Normalize URL: ensure it ends with /graphql
     let url = normalize_url(&url);
 
@@ -41,6 +45,7 @@ pub async fn run() -> Result<()> {
         .with_prompt("Auth token (optional, press Enter to skip)")
         .default(String::new())
         .interact_text()?;
+    let token = strip_terminal_escapes(&token);
     let token = if token.is_empty() { None } else { Some(token) };
 
     // Test connection
@@ -110,6 +115,31 @@ pub async fn run() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Strip ANSI escape sequences (e.g. bracketed-paste `\x1b[200~` / `\x1b[201~`)
+/// and other non-printable control characters that terminals inject on paste.
+fn strip_terminal_escapes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip the ESC and everything up to the end of the sequence
+            if chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                // Consume until we hit a letter (the terminator)
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next.is_ascii_alphabetic() || next == '~' {
+                        break;
+                    }
+                }
+            }
+        } else if !c.is_control() || c == '\n' {
+            result.push(c);
+        }
+    }
+    result
 }
 
 fn normalize_url(url: &str) -> String {

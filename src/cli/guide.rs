@@ -82,6 +82,7 @@ QUICK START
 
   4. Export and import:
 
+     switchboard export all --out ./backup/
      switchboard export drive my-drive --out ./backup/
      switchboard import ./backup/*.phd --drive another-drive
 
@@ -234,10 +235,12 @@ full round-trip: export from one instance, import into another.
 
 EXPORT
 
-  switchboard export doc <doc-id> --drive <slug> --out document.phd
-                                       Export a single document
+  switchboard export all --out ./backup/
+                                       Export everything (all drives, organized by folders)
   switchboard export drive <slug> --out ./downloads/
                                        Export all documents in a drive
+  switchboard export doc <doc-id> --drive <slug> --out document.phd
+                                       Export a single document
 
   The .phd ZIP contains:
     header.json        Document metadata (id, type, name, revision, timestamps)
@@ -258,7 +261,10 @@ IMPORT
 
 EXAMPLES
 
-  # Backup a whole drive
+  # Backup everything
+  switchboard export all --out ./full-backup/
+
+  # Backup a single drive
   switchboard export drive builders --out ./backup/
 
   # Restore into a different drive
@@ -636,8 +642,9 @@ MODELS & OPERATIONS
   ops <doc-id> --drive <id>     View operation history
 
 IMPORT / EXPORT
-  export doc <id> --drive <id>  Export a document as .phd
+  export all [--out <dir>]      Export everything (all drives)
   export drive <id> --out <dir> Export all docs in a drive
+  export doc <id> --drive <id>  Export a document as .phd
   import <files> --drive <id>   Import .phd files
 
 AUTH & PERMISSIONS

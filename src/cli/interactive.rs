@@ -70,6 +70,8 @@ impl ReplHelper {
             "groups remove-user ".into(),
             "groups user-groups ".into(),
             // Export / Import
+            "export all".into(),
+            "export all --out ".into(),
             "export doc ".into(),
             "export drive ".into(),
             "import ".into(),
@@ -406,7 +408,7 @@ fn print_repl_help() {
     eprintln!("    groups   list | get | create | delete | add-user | remove-user");
     eprintln!();
     eprintln!("  Import / Export:");
-    eprintln!("    export   doc | drive");
+    eprintln!("    export   all | drive | doc");
     eprintln!("    import   <files> --drive <drive>");
     eprintln!();
     eprintln!("  Real-time & Jobs:");
