@@ -286,18 +286,16 @@ async fn pick_preferred_editor(client: &crate::graphql::GraphQLClient) -> Result
     if let Ok(data) = client
         .query("{ driveDocuments { meta { preferredEditor } } }", None)
         .await
+        && let Some(drives) = data.get("driveDocuments").and_then(|v| v.as_array())
     {
-        if let Some(drives) = data.get("driveDocuments").and_then(|v| v.as_array()) {
-            for d in drives {
-                if let Some(editor) = d
-                    .pointer("/meta/preferredEditor")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                {
-                    if !editors.contains(&editor.to_string()) {
-                        editors.push(editor.to_string());
-                    }
-                }
+        for d in drives {
+            if let Some(editor) = d
+                .pointer("/meta/preferredEditor")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                && !editors.contains(&editor.to_string())
+            {
+                editors.push(editor.to_string());
             }
         }
     }
