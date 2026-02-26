@@ -137,55 +137,21 @@ async fn get(id: &str, format: OutputFormat, profile_name: Option<&str>) -> Resu
                 drive["documentType"].as_str().unwrap_or("-")
             );
 
-            // Show documents table
+            // Show contents as a tree with metadata
             if let Some(nodes) = drive.pointer("/state/nodes").and_then(|v| v.as_array()) {
-                let files: Vec<&Value> = nodes
+                let files = nodes
                     .iter()
                     .filter(|n| n["kind"].as_str() == Some("file"))
-                    .collect();
+                    .count();
                 let folders = nodes
                     .iter()
                     .filter(|n| n["kind"].as_str() == Some("folder"))
                     .count();
-                println!("\nContents: {} files, {folders} folders", files.len());
+                println!("\nContents: {files} files, {folders} folders");
 
-                if !files.is_empty() {
-                    // Build folder id -> name lookup for the Folder column
-                    let folder_map: std::collections::HashMap<&str, &str> = nodes
-                        .iter()
-                        .filter(|n| n["kind"].as_str() == Some("folder"))
-                        .filter_map(|n| Some((n["id"].as_str()?, n["name"].as_str()?)))
-                        .collect();
-
+                if files > 0 || folders > 0 {
                     println!();
-                    let rows: Vec<Vec<String>> = files
-                        .iter()
-                        .map(|f| {
-                            let folder = f["parentFolder"]
-                                .as_str()
-                                .and_then(|pid| folder_map.get(pid).copied())
-                                .unwrap_or("");
-                            vec![
-                                f["id"].as_str().unwrap_or("-").to_string(),
-                                f["name"].as_str().unwrap_or("-").to_string(),
-                                f["documentType"].as_str().unwrap_or("-").to_string(),
-                                folder.to_string(),
-                            ]
-                        })
-                        .collect();
-                    if folders > 0 {
-                        print_table(&["ID", "Name", "Type", "Folder"], &rows);
-                    } else {
-                        // No folders — skip the Folder column for cleaner output
-                        let rows: Vec<Vec<String>> = rows
-                            .into_iter()
-                            .map(|mut r| {
-                                r.pop();
-                                r
-                            })
-                            .collect();
-                        print_table(&["ID", "Name", "Type"], &rows);
-                    }
+                    print_drive_tree(nodes, None, "");
                 }
             }
         }
@@ -347,4 +313,40 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
         bail!("{failed} of {} deletes failed", uuids.len());
     }
     Ok(())
+}
+
+/// Print drive contents as an indented tree with metadata (Type, ID) on each file line.
+fn print_drive_tree(nodes: &[Value], parent: Option<&str>, indent: &str) {
+    let children: Vec<&Value> = nodes
+        .iter()
+        .filter(|n| {
+            let pf = n["parentFolder"].as_str();
+            match parent {
+                None => pf.is_none() || pf == Some(""),
+                Some(p) => pf == Some(p),
+            }
+        })
+        .collect();
+
+    for (i, child) in children.iter().enumerate() {
+        let is_last = i == children.len() - 1;
+        let connector = if is_last {
+            "\u{2514}\u{2500}\u{2500} "
+        } else {
+            "\u{251c}\u{2500}\u{2500} "
+        };
+        let child_indent = if is_last { "    " } else { "\u{2502}   " };
+
+        let name = child["name"].as_str().unwrap_or("-");
+        let kind = child["kind"].as_str().unwrap_or("file");
+        let id = child["id"].as_str().unwrap_or("-");
+
+        if kind == "folder" {
+            println!("{indent}{connector}\u{1f4c1} {name}/");
+            print_drive_tree(nodes, Some(id), &format!("{indent}{child_indent}"));
+        } else {
+            let doc_type = child["documentType"].as_str().unwrap_or("-");
+            println!("{indent}{connector}{name}  ({doc_type})  [{id}]");
+        }
+    }
 }
