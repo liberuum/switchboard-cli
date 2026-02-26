@@ -4,6 +4,8 @@ use colored::Colorize;
 use dialoguer::{Confirm, Input};
 use serde_json::Value;
 
+use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL};
+
 use crate::cli::helpers::{self, resolve_drive_id};
 use crate::output::{OutputFormat, print_json, print_table};
 
@@ -315,7 +317,9 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
     Ok(())
 }
 
-/// Print drive contents as an indented tree with metadata (Type, ID) on each file line.
+/// Print drive contents as a hybrid tree (folders) + table (documents) view.
+/// Folders are rendered with tree connectors; documents inside each folder are
+/// displayed as a formatted table indented under the folder.
 fn print_drive_tree(nodes: &[Value], parent: Option<&str>, indent: &str) {
     let children: Vec<&Value> = nodes
         .iter()
@@ -328,8 +332,40 @@ fn print_drive_tree(nodes: &[Value], parent: Option<&str>, indent: &str) {
         })
         .collect();
 
-    for (i, child) in children.iter().enumerate() {
-        let is_last = i == children.len() - 1;
+    let folders: Vec<&Value> = children
+        .iter()
+        .filter(|n| n["kind"].as_str() == Some("folder"))
+        .copied()
+        .collect();
+
+    let files: Vec<&Value> = children
+        .iter()
+        .filter(|n| n["kind"].as_str() == Some("file"))
+        .copied()
+        .collect();
+
+    // Render documents as an indented table
+    if !files.is_empty() {
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Disabled);
+        table.set_header(["ID", "Name", "Type"]);
+        for f in &files {
+            table.add_row(vec![
+                f["id"].as_str().unwrap_or("-"),
+                f["name"].as_str().unwrap_or("-"),
+                f["documentType"].as_str().unwrap_or("-"),
+            ]);
+        }
+        for line in table.to_string().lines() {
+            println!("{indent}{line}");
+        }
+    }
+
+    // Render sub-folders as tree entries
+    for (i, folder) in folders.iter().enumerate() {
+        let is_last = i == folders.len() - 1;
         let connector = if is_last {
             "\u{2514}\u{2500}\u{2500} "
         } else {
@@ -337,16 +373,10 @@ fn print_drive_tree(nodes: &[Value], parent: Option<&str>, indent: &str) {
         };
         let child_indent = if is_last { "    " } else { "\u{2502}   " };
 
-        let name = child["name"].as_str().unwrap_or("-");
-        let kind = child["kind"].as_str().unwrap_or("file");
-        let id = child["id"].as_str().unwrap_or("-");
+        let name = folder["name"].as_str().unwrap_or("-");
+        let id = folder["id"].as_str().unwrap_or("");
 
-        if kind == "folder" {
-            println!("{indent}{connector}\u{1f4c1} {name}/");
-            print_drive_tree(nodes, Some(id), &format!("{indent}{child_indent}"));
-        } else {
-            let doc_type = child["documentType"].as_str().unwrap_or("-");
-            println!("{indent}{connector}{name}  ({doc_type})  [{id}]");
-        }
+        println!("{indent}{connector}\u{1f4c1} {name}/");
+        print_drive_tree(nodes, Some(id), &format!("{indent}{child_indent}"));
     }
 }
