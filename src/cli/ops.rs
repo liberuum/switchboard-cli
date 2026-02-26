@@ -18,9 +18,9 @@ pub struct OpsArgs {
     #[arg(long, default_value = "0")]
     pub skip: usize,
 
-    /// Maximum number of operations to show
-    #[arg(long, default_value = "20")]
-    pub first: usize,
+    /// Maximum number of operations to show (default: all)
+    #[arg(long)]
+    pub first: Option<usize>,
 }
 
 pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
@@ -60,7 +60,10 @@ pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>
         ops.ok_or_else(|| anyhow::anyhow!("No operations found for document {}", args.doc_id))?;
 
     let total = all_ops.len();
-    let displayed: Vec<&Value> = all_ops.iter().skip(args.skip).take(args.first).collect();
+    let displayed: Vec<&Value> = match args.first {
+        Some(n) => all_ops.iter().skip(args.skip).take(n).collect(),
+        None => all_ops.iter().skip(args.skip).collect(),
+    };
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => {
@@ -92,7 +95,11 @@ pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>
                 .collect();
 
             print_table(&["Index", "Type", "Timestamp", "Hash"], &rows);
-            println!("Showing {} of {total} operations", rows.len());
+            if rows.len() < total {
+                println!("Showing {} of {total} operations", rows.len());
+            } else {
+                println!("{total} operations");
+            }
         }
     }
 
