@@ -139,6 +139,32 @@ Profiles stored at `~/.switchboard/profiles.toml`. Each profile has `url`, optio
 - GraphQL mutations are built via `format!()` string interpolation (no query builder library)
 - Built-in docs live in `guide.rs` as raw string literals — update them when adding/changing commands
 
+### CRITICAL: Always Build & Install After Changes
+
+After implementing any code change, **always** run the full build and install without waiting to be asked:
+
+```bash
+cargo clippy -- -D warnings && cargo build --release && cp target/release/switchboard ~/.cargo/bin/switchboard && codesign --force --sign - ~/.cargo/bin/switchboard
+```
+
+The codesign step is required on macOS — without it, the OS firewall blocks network access for the copied binary. The user runs the release binary from `~/.cargo/bin/switchboard` — never the debug binary. If you don't build and install, the user can't test your changes.
+
+### CRITICAL: Documentation–Code Synchronization
+
+**When adding, removing, or modifying any CLI command, subcommand, flag, or argument you MUST update all three documentation sources in the same change:**
+
+1. **`README.md`** — Commands table, Quick Start examples, and any section that references the changed command
+2. **`specs.md`** — Corresponding specification section
+3. **`src/cli/guide.rs`** — Built-in guide topics that reference the changed command
+
+**Before submitting any CLI change**, cross-check:
+- Every variant in `Commands`, subcommand enums, and arg structs has a corresponding row in the README Commands table
+- Every `#[arg]` flag/option is reflected in the command signature shown in the README
+- The README command descriptions match the clap `///` doc comments
+- Quick Start examples still parse correctly with the current clap definitions
+
+Failure to keep docs in sync is a bug — treat it with the same severity as a compilation error.
+
 ---
 
 ## SENIOR SOFTWARE ENGINEER

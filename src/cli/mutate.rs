@@ -33,12 +33,10 @@ pub struct MutateArgs {
 pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
 
-    // Resolve doc (name or UUID) and drive
+    // Resolve doc (name or UUID) and drive.
+    // When --drive is given, use "drive/doc" format so name resolution is scoped.
     let (resolved_doc_id, drive_id) = match &args.drive {
-        Some(d) => (
-            args.doc_id.clone(),
-            helpers::resolve_drive_id(&client, d).await?,
-        ),
+        Some(d) => helpers::resolve_doc(&client, &format!("{d}/{}", args.doc_id)).await?,
         None => helpers::resolve_doc(&client, &args.doc_id).await?,
     };
 

@@ -31,6 +31,8 @@ struct ReplHelper {
     doc_ids: Vec<String>,
     /// Document display labels for completion ("uuid  name  (type)")
     doc_labels: Vec<String>,
+    /// Drive slug for each doc entry (parallel to doc_ids/doc_labels)
+    doc_drive_slugs: Vec<String>,
 }
 
 /// A document entry for tab-completion.
@@ -38,6 +40,7 @@ struct DocEntry {
     id: String,
     name: String,
     doc_type: String,
+    drive_slug: String,
 }
 
 impl ReplHelper {
@@ -47,7 +50,7 @@ impl ReplHelper {
         profile_names: Vec<String>,
         docs: Vec<DocEntry>,
     ) -> Self {
-        let (doc_ids, doc_labels) = Self::build_doc_completions(&docs);
+        let (doc_ids, doc_labels, doc_drive_slugs) = Self::build_doc_completions(&docs);
 
         let commands = vec![
             // Drives
@@ -155,10 +158,11 @@ impl ReplHelper {
             profile_names,
             doc_ids,
             doc_labels,
+            doc_drive_slugs,
         }
     }
 
-    fn build_doc_completions(docs: &[DocEntry]) -> (Vec<String>, Vec<String>) {
+    fn build_doc_completions(docs: &[DocEntry]) -> (Vec<String>, Vec<String>, Vec<String>) {
         // replacements: what gets inserted (name, quoted if spaces; fallback to ID)
         let replacements: Vec<String> = docs
             .iter()
@@ -177,14 +181,45 @@ impl ReplHelper {
             .iter()
             .map(|d| format!("{} {} {}", d.id, d.name, d.doc_type))
             .collect();
-        (replacements, labels)
+        // drive slugs: which drive each doc belongs to
+        let drive_slugs: Vec<String> = docs.iter().map(|d| d.drive_slug.clone()).collect();
+        (replacements, labels, drive_slugs)
     }
 
     fn update_docs(&mut self, docs: Vec<DocEntry>) {
-        let (replacements, labels) = Self::build_doc_completions(&docs);
+        let (replacements, labels, drive_slugs) = Self::build_doc_completions(&docs);
         self.doc_ids = replacements;
         self.doc_labels = labels;
+        self.doc_drive_slugs = drive_slugs;
     }
+}
+
+/// Check whether a positional (non-flag) argument has already been consumed.
+/// Skips the first `cmd_prefix_len` words (the command itself, e.g. "docs get"),
+/// then skips `--flag value` pairs and standalone `--flag` boolean flags.
+fn has_positional_arg(words: &[&str], cmd_prefix_len: usize) -> bool {
+    let args = if words.len() > cmd_prefix_len {
+        &words[cmd_prefix_len..]
+    } else {
+        return false;
+    };
+    let value_flags = ["--drive", "--format", "--profile", "-p", "--type", "-t"];
+    let mut skip_next = false;
+    for w in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if value_flags.contains(w) {
+            skip_next = true;
+            continue;
+        }
+        if w.starts_with('-') {
+            continue; // boolean flag like --state, --yes, -y
+        }
+        return true; // non-flag word → positional arg found
+    }
+    false
 }
 
 fn filter_pairs(candidates: &[String], partial: &str) -> Vec<Pair> {
@@ -218,6 +253,50 @@ fn filter_doc_pairs(replacements: &[String], labels: &[String], partial: &str) -
         .collect()
 }
 
+/// Hierarchical drive/doc completion.
+/// Before `/`: shows `drive-slug/` entries plus flat doc matches.
+/// After `/`: shows only docs inside the matched drive as `drive/doc`.
+fn hierarchical_doc_pairs(
+    drive_slugs: &[String],
+    doc_ids: &[String],
+    doc_labels: &[String],
+    doc_drive_slugs: &[String],
+    partial: &str,
+) -> Vec<Pair> {
+    if let Some(slash_pos) = partial.find('/') {
+        // After "/": filter docs belonging to this drive
+        let drive_part = &partial[..slash_pos];
+        let doc_part = partial[slash_pos + 1..].to_lowercase();
+        doc_ids
+            .iter()
+            .zip(doc_labels.iter())
+            .zip(doc_drive_slugs.iter())
+            .filter(|((_id, label), ds)| {
+                ds.eq_ignore_ascii_case(drive_part)
+                    && (doc_part.is_empty()
+                        || label.to_lowercase().contains(doc_part.as_str()))
+            })
+            .map(|((id, _label), ds)| Pair {
+                display: id.clone(),
+                replacement: format!("{ds}/{id}"),
+            })
+            .collect()
+    } else {
+        // Before "/": show drive slugs with trailing "/" plus regular doc matches
+        let partial_lower = partial.to_lowercase();
+        let mut matches: Vec<Pair> = drive_slugs
+            .iter()
+            .filter(|s| s.to_lowercase().starts_with(&partial_lower))
+            .map(|s| Pair {
+                display: format!("{s}/"),
+                replacement: format!("{s}/"),
+            })
+            .collect();
+        matches.extend(filter_doc_pairs(doc_ids, doc_labels, partial));
+        matches
+    }
+}
+
 impl Completer for ReplHelper {
     type Candidate = Pair;
 
@@ -246,7 +325,9 @@ impl Completer for ReplHelper {
         }
 
         // ── Document ID/name completion ──────────────────────
-        // After commands that take a doc ID as a positional arg
+        // After commands that take a doc ID as a positional arg.
+        // If --drive <slug> is present, scope completions to that drive.
+        // Once a doc is selected, offer remaining flags instead.
         if input.starts_with("docs get ")
             || input.starts_with("docs delete ")
             || input.starts_with("docs mutate ")
@@ -256,18 +337,77 @@ impl Completer for ReplHelper {
             || input.starts_with("access revoke ")
             || input.starts_with("access ops ")
         {
-            // Only complete the first positional arg (the doc ID)
-            let after_cmd = words_before.len();
-            if after_cmd <= 2 {
-                let matches = filter_doc_pairs(&self.doc_ids, &self.doc_labels, partial);
+            let drive_filter = words_before
+                .windows(2)
+                .find(|w| w[0] == "--drive")
+                .map(|w| w[1]);
+            let doc_selected = has_positional_arg(&words_before, 2);
+
+            if !doc_selected {
+                // Still need a doc — offer completions
+                if let Some(slug) = drive_filter {
+                    let matches: Vec<Pair> = self
+                        .doc_ids
+                        .iter()
+                        .zip(self.doc_labels.iter())
+                        .zip(self.doc_drive_slugs.iter())
+                        .filter(|((_id, label), ds)| {
+                            ds.eq_ignore_ascii_case(slug)
+                                && (partial.is_empty()
+                                    || label.to_lowercase().contains(&partial.to_lowercase()))
+                        })
+                        .map(|((id, _label), _ds)| Pair {
+                            display: id.clone(),
+                            replacement: id.clone(),
+                        })
+                        .collect();
+                    if !matches.is_empty() {
+                        return Ok((word_start, matches));
+                    }
+                } else {
+                    let matches = filter_doc_pairs(&self.doc_ids, &self.doc_labels, partial);
+                    if !matches.is_empty() {
+                        return Ok((word_start, matches));
+                    }
+                }
+            } else {
+                // Doc already selected — offer remaining flags
+                let flags: &[&str] = if input.starts_with("docs get ") {
+                    &["--state", "--drive", "--format"]
+                } else if input.starts_with("docs delete ") {
+                    &["-y", "--format"]
+                } else if input.starts_with("docs mutate ") {
+                    &["--drive", "--format"]
+                } else if input.starts_with("export doc ") {
+                    &["--out", "--drive", "--format"]
+                } else {
+                    &["--format"]
+                };
+                let matches: Vec<Pair> = flags
+                    .iter()
+                    .filter(|f| {
+                        !input.contains(**f)
+                            && (partial.is_empty() || f.starts_with(partial))
+                    })
+                    .map(|f| Pair {
+                        display: f.to_string(),
+                        replacement: format!("{f} "),
+                    })
+                    .collect();
                 if !matches.is_empty() {
                     return Ok((word_start, matches));
                 }
             }
         }
-        // ops takes doc ID as first arg
+        // ops takes doc ID as first arg — supports hierarchical drive/doc completion
         if input.starts_with("ops ") && words_before.len() <= 1 {
-            let matches = filter_doc_pairs(&self.doc_ids, &self.doc_labels, partial);
+            let matches = hierarchical_doc_pairs(
+                &self.drive_slugs,
+                &self.doc_ids,
+                &self.doc_labels,
+                &self.doc_drive_slugs,
+                partial,
+            );
             if !matches.is_empty() {
                 return Ok((word_start, matches));
             }
@@ -421,7 +561,7 @@ fn shell_split(input: &str) -> Vec<String> {
 async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEntry> {
     let data = match client
         .query(
-            r#"{ driveDocuments { id state { nodes { ... on DocumentDrive_FileNode { id name kind documentType } } } } }"#,
+            r#"{ driveDocuments { id name slug state { nodes { ... on DocumentDrive_FileNode { id name kind documentType } } } } }"#,
             None,
         )
         .await
@@ -438,6 +578,7 @@ async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEnt
 
     let mut docs = Vec::new();
     for drv in &drives {
+        let drv_slug = drv["slug"].as_str().unwrap_or("").to_string();
         let nodes = drv
             .pointer("/state/nodes")
             .and_then(|v| v.as_array())
@@ -460,7 +601,11 @@ async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEnt
                             docs.push(DocEntry {
                                 id: node["id"].as_str().unwrap_or("").to_string(),
                                 name: node["name"].as_str().unwrap_or("").to_string(),
-                                doc_type: node["documentType"].as_str().unwrap_or("").to_string(),
+                                doc_type: node["documentType"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string(),
+                                drive_slug: drv_slug.clone(),
                             });
                         }
                     }
@@ -473,6 +618,7 @@ async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEnt
                         id: node["id"].as_str().unwrap_or("").to_string(),
                         name: node["name"].as_str().unwrap_or("").to_string(),
                         doc_type: node["documentType"].as_str().unwrap_or("").to_string(),
+                        drive_slug: drv_slug.clone(),
                     });
                 }
             }
@@ -529,7 +675,8 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
         eprintln!("Profile: {} ({})", name, client.url);
         eprintln!("Models:  {model_count}");
         eprintln!();
-        eprintln!("Type 'help' for commands, or press Tab for auto-completion.");
+        eprintln!("Type 'help' for commands, press Tab for auto-completion.");
+        eprintln!("Tip: ops [Tab] shows drives and docs. Use drive/[Tab] to browse inside a drive.");
         eprintln!();
     }
 

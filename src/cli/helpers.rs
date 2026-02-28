@@ -89,12 +89,27 @@ pub fn json_to_graphql(value: &Value) -> String {
 }
 
 /// Resolve a document identifier (UUID or name) to `(doc_id, drive_id)`.
-/// If `id_or_name` looks like a UUID, searches drives for that ID.
-/// Otherwise, searches all drives for a document with a matching name.
+///
+/// Supports three formats:
+/// - `"drive-slug/doc-name"` — scoped search within a specific drive
+/// - `"doc-name"` or UUID — searches all drives for a matching file node
+/// - Falls back to matching drive slugs/names (returns `(drive_id, drive_id)`)
 pub async fn resolve_doc(client: &GraphQLClient, id_or_name: &str) -> Result<(String, String)> {
+    // Handle "drive/doc" format: scope search to a specific drive
+    // "drive/" (trailing slash, no doc) → treat as the drive document itself
+    if let Some(slash_pos) = id_or_name.find('/') {
+        let drive_part = &id_or_name[..slash_pos];
+        let doc_part = &id_or_name[slash_pos + 1..];
+        let drive_id = resolve_drive_id(client, drive_part).await?;
+        if doc_part.is_empty() {
+            return Ok((drive_id.clone(), drive_id));
+        }
+        return resolve_doc_in_drive(client, doc_part, &drive_id).await;
+    }
+
     let data = client
         .query(
-            r#"{ driveDocuments { id state { nodes { ... on DocumentDrive_FileNode { id name kind } } } } }"#,
+            r#"{ driveDocuments { id name slug state { nodes { ... on DocumentDrive_FileNode { id name kind } } } } }"#,
             None,
         )
         .await?;
@@ -145,7 +160,62 @@ pub async fn resolve_doc(client: &GraphQLClient, id_or_name: &str) -> Result<(St
         }
     }
 
+    // Fallback: check if id_or_name is a drive slug, name, or UUID
+    for drv in &drives {
+        let drive_id = drv["id"].as_str().unwrap_or("");
+        let drive_slug = drv["slug"].as_str().unwrap_or("");
+        let drive_name = drv["name"].as_str().unwrap_or("");
+
+        if (is_uuid && drive_id == id_or_name)
+            || (!is_uuid
+                && (drive_slug.eq_ignore_ascii_case(id_or_name)
+                    || drive_name.eq_ignore_ascii_case(id_or_name)))
+        {
+            return Ok((drive_id.to_string(), drive_id.to_string()));
+        }
+    }
+
     bail!("Document '{}' not found in any drive", id_or_name)
+}
+
+/// Search for a document by name or UUID within a specific drive.
+async fn resolve_doc_in_drive(
+    client: &GraphQLClient,
+    doc_name_or_id: &str,
+    drive_id: &str,
+) -> Result<(String, String)> {
+    let q = format!(
+        r#"{{ driveDocument(idOrSlug: "{drive_id}") {{ state {{ nodes {{ ... on DocumentDrive_FileNode {{ id name kind }} }} }} }} }}"#
+    );
+    let data = client.query(&q, None).await?;
+    let nodes = data
+        .pointer("/driveDocument/state/nodes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let is_uuid = is_uuid(doc_name_or_id);
+
+    for node in &nodes {
+        if node["kind"].as_str() != Some("file") {
+            continue;
+        }
+        let node_id = node["id"].as_str().unwrap_or("");
+        let node_name = node["name"].as_str().unwrap_or("");
+
+        if is_uuid && node_id == doc_name_or_id {
+            return Ok((node_id.to_string(), drive_id.to_string()));
+        }
+        if !is_uuid && node_name.eq_ignore_ascii_case(doc_name_or_id) {
+            return Ok((node_id.to_string(), drive_id.to_string()));
+        }
+    }
+
+    bail!(
+        "Document '{}' not found in drive '{}'",
+        doc_name_or_id,
+        drive_id
+    )
 }
 
 /// Fetch available drives and present a `Select` picker.
@@ -194,6 +264,15 @@ pub async fn select_drive(client: &GraphQLClient) -> Result<(String, String, Str
         .interact()?;
 
     Ok(drives[selection].clone())
+}
+
+/// Derive the base URL from a GraphQL endpoint URL.
+/// e.g. "http://localhost:4001/graphql" → "http://localhost:4001"
+pub fn base_url_from(graphql_url: &str) -> String {
+    graphql_url
+        .trim_end_matches('/')
+        .trim_end_matches("/graphql")
+        .to_string()
 }
 
 fn is_uuid(s: &str) -> bool {

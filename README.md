@@ -164,11 +164,11 @@ switchboard import ./backup/*.phd --drive another-drive
 | Command | Description |
 |---------|-------------|
 | `switchboard docs list [--drive <slug>]` | List documents (all drives, or filtered by `--drive`; add `--type` to filter) |
-| `switchboard docs get <id-or-name>` | Get document details (auto-detects drive, or pass `--drive`) |
+| `switchboard docs get <id-or-name> [--drive <slug>] [--state]` | Get document details (auto-detects drive; `--state` includes full state) |
 | `switchboard docs tree [--drive <slug>]` | Hierarchical folder/file view (interactive drive picker if omitted) |
 | `switchboard docs create` | Interactive creation with drive picker (or pass `--type`, `--name`, `--drive`) |
 | `switchboard docs delete <ids-or-names...>` | Delete one or more documents (use `-y` to skip confirmation) |
-| `switchboard docs mutate <id-or-name> [<op>] [--input '<json>']` | Apply a mutation with field-by-field editor (or pass `--input` for raw JSON) |
+| `switchboard docs mutate <id-or-name> [<op>] [--input '<json>'] [--drive <slug>]` | Apply a mutation with field-by-field editor (or pass `--input` for raw JSON) |
 
 ### Models & Operations
 
@@ -176,7 +176,7 @@ switchboard import ./backup/*.phd --drive another-drive
 |---------|-------------|
 | `switchboard models list` | List all discovered document types |
 | `switchboard models get <type>` | Show available operations for a type |
-| `switchboard ops <doc-id-or-name>` | View operation history (auto-detects drive, or pass `--drive`) |
+| `switchboard ops <doc-id-or-name> [--drive <slug>] [--skip N] [--first N]` | View operation history (auto-detects drive; paginate with `--skip`/`--first`) |
 
 ### Import / Export
 
@@ -198,8 +198,21 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard access show <doc-id>` | Show document permissions |
 | `switchboard access grant <doc-id> --user <addr> --level <level>` | Grant user permission |
 | `switchboard access revoke <doc-id> --user <addr>` | Revoke user permission |
+| `switchboard access grant-group <doc-id> --group <id> --level <level>` | Grant group permission |
+| `switchboard access revoke-group <doc-id> --group <id>` | Revoke group permission |
+| `switchboard access ops show <doc-id> <op-type>` | Show operation-level permissions |
+| `switchboard access ops can-execute <doc-id> <op-type>` | Check if current user can execute an operation |
+| `switchboard access ops grant <doc-id> <op-type> --user <addr>` | Grant operation permission to a user |
+| `switchboard access ops revoke <doc-id> <op-type> --user <addr>` | Revoke operation permission from a user |
+| `switchboard access ops grant-group <doc-id> <op-type> --group <id>` | Grant operation permission to a group |
+| `switchboard access ops revoke-group <doc-id> <op-type> --group <id>` | Revoke operation permission from a group |
 | `switchboard groups list` | List all groups |
-| `switchboard groups create --name <name>` | Create a group |
+| `switchboard groups get <id>` | Get group details and members |
+| `switchboard groups create --name <name> [--description <desc>]` | Create a group |
+| `switchboard groups delete <id> [-y]` | Delete a group |
+| `switchboard groups add-user <group-id> --user <addr>` | Add a user to a group |
+| `switchboard groups remove-user <group-id> --user <addr>` | Remove a user from a group |
+| `switchboard groups user-groups <address>` | List groups for a specific user |
 
 ### Real-Time & Advanced
 
@@ -208,17 +221,18 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard watch docs [--type <type>] [--drive <id>] [--doc <id>]` | Stream document change events via WebSocket |
 | `switchboard watch job <job-id>` | Stream job status updates |
 | `switchboard jobs status <job-id>` | Get current job status |
-| `switchboard jobs wait <job-id>` | Block until a job completes |
+| `switchboard jobs wait <job-id> [--interval <secs>] [--timeout <secs>]` | Block until a job completes |
+| `switchboard jobs watch <job-id>` | Stream job status updates via WebSocket |
 | `switchboard sync touch <input>` | Create/update a sync channel |
 | `switchboard sync push <envelopes>` | Push sync envelopes |
-| `switchboard sync poll <channel-id>` | Poll for sync envelopes |
+| `switchboard sync poll <channel-id> [--ack N] [--latest N]` | Poll for sync envelopes |
 
 ### Tools
 
 | Command | Description |
 |---------|-------------|
-| `switchboard query '<graphql>'` | Run a raw GraphQL query |
-| `switchboard query --file query.graphql` | Run query from a file |
+| `switchboard query '<graphql>' [--variables '<json>']` | Run a raw GraphQL query (with optional variables) |
+| `switchboard query --file query.graphql [--variables '<json>']` | Run query from a file |
 | `switchboard schema` | Dump the full GraphQL schema |
 | `switchboard interactive` | Launch interactive REPL mode |
 | `switchboard update` | Self-update to the latest release (shows changelog) |

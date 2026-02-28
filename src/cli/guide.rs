@@ -483,6 +483,16 @@ USING THE REPL
   local> drives list --format json
   local> --profile staging drives list
 
+BROWSING DRIVE OPERATIONS
+
+  The ops command supports hierarchical Tab completion — type a drive
+  slug followed by / to browse its contents:
+
+  local> ops [Tab]             Shows drive slugs (with /) and doc names
+  local> ops jazzman/[Tab]     Shows docs inside the jazzman drive
+  local> ops jazzman/          View operations on the jazzman drive itself
+  local> ops jazzman/my-doc    View operations on a doc inside jazzman
+
 REPL-ONLY COMMANDS
 
   help / ?                      Show available commands
@@ -494,6 +504,8 @@ FEATURES
   - Full CLI parity — all commands work (drives, docs, models, auth,
     access, groups, export, import, watch, jobs, sync, etc.)
   - Tab completion for commands, drive slugs, model types, and guide topics
+  - Hierarchical ops completion: ops [Tab] shows drives and docs,
+    ops drive/[Tab] shows documents inside that drive
   - Shell-like quoting — single quotes, double quotes, backslash escapes
   - Per-command --format, --profile, --quiet overrides
   - --help passthrough on any command

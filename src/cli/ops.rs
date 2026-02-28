@@ -24,14 +24,12 @@ pub struct OpsArgs {
 }
 
 pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
-    let (_name, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
+    let (_name, profile, client, cache) = helpers::setup_with_cache(profile_name)?;
 
-    // Resolve doc (accepts name or UUID) and drive
+    // Resolve doc (accepts name or UUID) and drive.
+    // When --drive is given, use "drive/doc" format so name resolution is scoped.
     let (args_doc_id, drive_id) = match &args.drive {
-        Some(d) => (
-            args.doc_id.clone(),
-            helpers::resolve_drive_id(&client, d).await?,
-        ),
+        Some(d) => helpers::resolve_doc(&client, &format!("{d}/{}", args.doc_id)).await?,
         None => helpers::resolve_doc(&client, &args.doc_id).await?,
     };
 
@@ -104,6 +102,38 @@ pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>
                     break 'outer;
                 }
             }
+        }
+    }
+
+    // Fallback for drive documents: use the drive-scoped endpoint
+    if ops.is_none() && args_doc_id == drive_id {
+        let base_url = helpers::base_url_from(&client.url);
+        let drive_client = crate::graphql::GraphQLClient::new(
+            format!("{base_url}/d/{drive_id}"),
+            profile.token.clone(),
+        );
+        if let Ok(data) = drive_client
+            .query(
+                r#"query ($id: String!, $first: Int, $skip: Int) {
+                    document(id: $id) {
+                        operations(first: $first, skip: $skip) {
+                            id type index skip hash timestampUtcMs inputText
+                        }
+                    }
+                }"#,
+                Some(&serde_json::json!({
+                    "id": drive_id,
+                    "first": 25000,
+                    "skip": 0,
+                })),
+            )
+            .await
+        {
+            ops = data
+                .pointer("/document/operations")
+                .and_then(|v| v.as_array())
+                .filter(|arr| !arr.is_empty())
+                .cloned();
         }
     }
 

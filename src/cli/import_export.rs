@@ -126,7 +126,7 @@ async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bo
         );
     }
 
-    let base_url = base_url_from(&client.url);
+    let base_url = helpers::base_url_from(&client.url);
     let mut total_docs = 0;
 
     for (drive_idx, drive) in drives.iter().enumerate() {
@@ -302,7 +302,7 @@ async fn export_doc(
     let drive_id = resolve_drive_id(&client, drive).await?;
 
     // Use the drive endpoint which has real operations and state
-    let base_url = base_url_from(&client.url);
+    let base_url = helpers::base_url_from(&client.url);
     let drive_client =
         GraphQLClient::new(format!("{base_url}/d/{drive_id}"), _profile.token.clone());
 
@@ -350,7 +350,7 @@ async fn export_drive(
     let drive_id = resolve_drive_id(&client, drive).await?;
 
     // Build drive endpoint client for fetching docs with operations
-    let base_url = base_url_from(&client.url);
+    let base_url = helpers::base_url_from(&client.url);
     let drive_client =
         GraphQLClient::new(format!("{base_url}/d/{drive_id}"), _profile.token.clone());
 
@@ -628,14 +628,6 @@ fn format_bytes(bytes: u64) -> String {
 const PUSH_BATCH_SIZE: usize = 50;
 const REQUEST_DELAY_MS: u64 = 200;
 
-/// Derive the base URL from a GraphQL endpoint URL
-/// e.g. "http://localhost:4001/graphql" -> "http://localhost:4001"
-fn base_url_from(graphql_url: &str) -> String {
-    graphql_url
-        .trim_end_matches('/')
-        .trim_end_matches("/graphql")
-        .to_string()
-}
 
 pub async fn run_import(
     files: Vec<String>,
@@ -652,7 +644,7 @@ pub async fn run_import(
     }
 
     // Build the drive endpoint for pushUpdates and state verification
-    let base_url = base_url_from(&client.url);
+    let base_url = helpers::base_url_from(&client.url);
     let drive_endpoint = format!("{base_url}/d/{drive_id}");
     let drive_client = GraphQLClient::new(drive_endpoint.clone(), _profile.token.clone());
 

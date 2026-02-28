@@ -222,9 +222,10 @@ async fn get(
 ) -> Result<()> {
     let (_name, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
 
-    // Resolve doc (accepts name or UUID) and drive
+    // Resolve doc (accepts name or UUID) and drive.
+    // When --drive is given, use "drive/doc" format so name resolution is scoped.
     let (doc_id, drive_id) = match drive {
-        Some(d) => (id.to_string(), resolve_drive_id(&client, d).await?),
+        Some(d) => helpers::resolve_doc(&client, &format!("{d}/{id}")).await?,
         None => helpers::resolve_doc(&client, id).await?,
     };
     let id = &doc_id;
