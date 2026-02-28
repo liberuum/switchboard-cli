@@ -273,8 +273,7 @@ fn hierarchical_doc_pairs(
             .zip(doc_drive_slugs.iter())
             .filter(|((_id, label), ds)| {
                 ds.eq_ignore_ascii_case(drive_part)
-                    && (doc_part.is_empty()
-                        || label.to_lowercase().contains(doc_part.as_str()))
+                    && (doc_part.is_empty() || label.to_lowercase().contains(doc_part.as_str()))
             })
             .map(|((id, _label), ds)| Pair {
                 display: id.clone(),
@@ -386,8 +385,7 @@ impl Completer for ReplHelper {
                 let matches: Vec<Pair> = flags
                     .iter()
                     .filter(|f| {
-                        !input.contains(**f)
-                            && (partial.is_empty() || f.starts_with(partial))
+                        !input.contains(**f) && (partial.is_empty() || f.starts_with(partial))
                     })
                     .map(|f| Pair {
                         display: f.to_string(),
@@ -601,10 +599,7 @@ async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEnt
                             docs.push(DocEntry {
                                 id: node["id"].as_str().unwrap_or("").to_string(),
                                 name: node["name"].as_str().unwrap_or("").to_string(),
-                                doc_type: node["documentType"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string(),
+                                doc_type: node["documentType"].as_str().unwrap_or("").to_string(),
                                 drive_slug: drv_slug.clone(),
                             });
                         }
@@ -676,7 +671,9 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
         eprintln!("Models:  {model_count}");
         eprintln!();
         eprintln!("Type 'help' for commands, press Tab for auto-completion.");
-        eprintln!("Tip: ops [Tab] shows drives and docs. Use drive/[Tab] to browse inside a drive.");
+        eprintln!(
+            "Tip: ops [Tab] shows drives and docs. Use drive/[Tab] to browse inside a drive."
+        );
         eprintln!();
     }
 
