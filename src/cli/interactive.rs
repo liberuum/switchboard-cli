@@ -117,6 +117,12 @@ impl ReplHelper {
             "sync touch ".into(),
             "sync push ".into(),
             "sync poll ".into(),
+            // Visualize
+            "visualize".into(),
+            "visualize --format json".into(),
+            "visualize --format svg --out ".into(),
+            "visualize --format png --out ".into(),
+            "visualize --format mermaid".into(),
             // Other
             "query ".into(),
             "schema".into(),
@@ -146,6 +152,7 @@ impl ReplHelper {
             "sync".into(),
             "interactive".into(),
             "output".into(),
+            "visualize".into(),
             "graphql".into(),
             "commands".into(),
         ];

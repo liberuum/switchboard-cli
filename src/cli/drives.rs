@@ -7,7 +7,7 @@ use serde_json::Value;
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL};
 
 use crate::cli::helpers::{self, resolve_drive_id};
-use crate::output::{OutputFormat, print_json, print_table};
+use crate::output::{self, OutputFormat, print_json, print_table};
 
 #[derive(Subcommand)]
 pub enum DrivesCommand {
@@ -17,6 +17,9 @@ pub enum DrivesCommand {
     Get {
         /// Drive ID or slug
         id: String,
+        /// Output file path (for svg/png/mermaid formats)
+        #[arg(long, short)]
+        out: Option<String>,
     },
     /// Create a new drive
     Create {
@@ -53,7 +56,7 @@ pub async fn run(
 ) -> Result<()> {
     match cmd {
         DrivesCommand::List => list(format, profile_name).await,
-        DrivesCommand::Get { id } => get(&id, format, profile_name).await,
+        DrivesCommand::Get { id, out } => get(&id, format, out.as_deref(), profile_name).await,
         DrivesCommand::Create {
             name,
             slug,
@@ -83,7 +86,7 @@ async fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&Value::Array(drives)),
-        OutputFormat::Table => {
+        _ => {
             if drives.is_empty() {
                 println!("No drives found.");
                 return Ok(());
@@ -111,8 +114,13 @@ async fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn get(id: &str, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
-    let (_name, _profile, client) = helpers::setup(profile_name)?;
+async fn get(
+    id: &str,
+    format: OutputFormat,
+    out: Option<&str>,
+    profile_name: Option<&str>,
+) -> Result<()> {
+    let (name, _profile, client) = helpers::setup(profile_name)?;
 
     let query = format!(
         r#"{{
@@ -134,9 +142,43 @@ async fn get(id: &str, format: OutputFormat, profile_name: Option<&str>) -> Resu
     let data = client.query(&query, None).await?;
     let drive = &data["driveDocument"];
 
+    // Handle visual formats (SVG/PNG/Mermaid)
+    if format.is_visual() {
+        let nodes = drive
+            .pointer("/state/nodes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let drive_data = vec![(drive.clone(), nodes)];
+        let revisions = std::collections::HashMap::new();
+        let mut tree = output::build_drive_tree(&drive_data, &revisions);
+        tree.url = Some(client.url.clone());
+        tree.profile = Some(name.clone());
+
+        let resolved_out = output::resolve_visual_output(out, format, "drive");
+        let out_ref = resolved_out.as_deref();
+
+        return match format {
+            OutputFormat::Svg => {
+                let svg = output::svg::render_svg(&tree);
+                output::write_output(svg.as_bytes(), out_ref, false)
+            }
+            OutputFormat::Png => {
+                let svg = output::svg::render_svg(&tree);
+                let png = output::png::render_png(&svg)?;
+                output::write_output(&png, out_ref, true)
+            }
+            OutputFormat::Mermaid => {
+                let mmd = output::render_mermaid(&tree);
+                output::write_output(mmd.as_bytes(), out_ref, false)
+            }
+            _ => unreachable!(),
+        };
+    }
+
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(drive),
-        OutputFormat::Table => {
+        _ => {
             println!("ID:       {}", drive["id"].as_str().unwrap_or("-"));
             println!("Name:     {}", drive["name"].as_str().unwrap_or("-"));
             println!("Slug:     {}", drive["slug"].as_str().unwrap_or("-"));
@@ -266,7 +308,7 @@ async fn create(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(drive),
-        OutputFormat::Table => {
+        _ => {
             println!("{} Drive created", "✓".green());
             println!("  ID:   {}", drive["id"].as_str().unwrap_or("-"));
             println!("  Slug: {}", drive["slug"].as_str().unwrap_or("-"));

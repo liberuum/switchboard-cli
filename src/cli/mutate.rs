@@ -215,7 +215,7 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             println!("{} Mutation applied.", "✓".green());
         }
     }

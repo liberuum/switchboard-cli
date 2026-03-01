@@ -84,7 +84,7 @@ async fn login(
         OutputFormat::Json | OutputFormat::Raw => {
             print_json(&serde_json::json!({ "profile": name, "authenticated": true }));
         }
-        OutputFormat::Table => {
+        _ => {
             println!("{} Token saved to profile '{name}'", "✓".green());
         }
     }
@@ -125,7 +125,7 @@ async fn status(format: OutputFormat, profile_name: Option<&str>) -> Result<()> 
                 "env_override": has_env,
             }));
         }
-        OutputFormat::Table => {
+        _ => {
             println!("Profile:  {}", name.green());
             println!("URL:      {}", profile.url);
             println!(

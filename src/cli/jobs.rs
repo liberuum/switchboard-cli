@@ -61,7 +61,7 @@ async fn status(job_id: &str, format: OutputFormat, profile_name: Option<&str>) 
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(job),
-        OutputFormat::Table => {
+        _ => {
             println!("Job:      {}", job["id"].as_str().unwrap_or("-"));
             println!("Status:   {}", job["status"].as_str().unwrap_or("-"));
             if let Some(p) = job["progress"].as_f64() {
@@ -108,7 +108,7 @@ async fn wait(
             "COMPLETED" | "FAILED" | "CANCELLED" => {
                 match format {
                     OutputFormat::Json | OutputFormat::Raw => print_json(job),
-                    OutputFormat::Table => {
+                    _ => {
                         println!("Job {} finished: {}", job_id, status_str);
                         if let Some(msg) = job["message"].as_str().filter(|msg| !msg.is_empty()) {
                             println!("Message: {msg}");
@@ -176,7 +176,7 @@ async fn watch(
                     OutputFormat::Json | OutputFormat::Raw => {
                         println!("{}", serde_json::to_string(job).unwrap_or_default());
                     }
-                    OutputFormat::Table => {
+                    _ => {
                         let s = job["status"].as_str().unwrap_or("?");
                         let error = job["error"].as_str();
                         if let Some(err) = error {

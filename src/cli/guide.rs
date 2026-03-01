@@ -29,6 +29,8 @@ pub enum GuideCommand {
     Output,
     /// GraphQL query patterns and the raw query escape hatch
     Graphql,
+    /// Visualization formats (SVG, PNG, Mermaid, JSON diagrams)
+    Visualize,
     /// All commands at a glance
     Commands,
 }
@@ -48,6 +50,7 @@ pub fn run(topic: GuideCommand) -> Result<()> {
         GuideCommand::Interactive => print_interactive(),
         GuideCommand::Output => print_output(),
         GuideCommand::Graphql => print_graphql(),
+        GuideCommand::Visualize => print_visualize(),
         GuideCommand::Commands => print_commands(),
     }
     Ok(())
@@ -96,7 +99,7 @@ KEY CONCEPTS
 
 Use `switchboard guide <topic>` for detailed help on any area.
 Available topics: config, drives, docs, import-export, auth, permissions,
-                  watch, jobs, sync, interactive, output, graphql, commands"#
+                  watch, jobs, sync, interactive, output, visualize, graphql, commands"#
     );
 }
 
@@ -539,6 +542,9 @@ GLOBAL FLAGS
   --format table     Human-readable table (default for TTY)
   --format json      Machine-readable JSON (default for pipes)
   --format raw       Raw GraphQL response as-is
+  --format svg       SVG diagram (visualize, drives get, docs list)
+  --format png       PNG diagram (requires --out for TTY)
+  --format mermaid   Mermaid flowchart markup
   --quiet            Suppress extra output (headers, decorations)
   --no-color         Disable colored output (also honors NO_COLOR env var)
 
@@ -621,6 +627,68 @@ KEY QUIRKS
     );
 }
 
+fn print_visualize() {
+    println!(
+        r#"VISUALIZATION
+
+Generate visual diagrams of all drives and documents in your Switchboard instance.
+
+COMMAND
+
+  switchboard visualize                              Terminal tree (default)
+  switchboard visualize --format json                Hierarchical JSON tree
+  switchboard visualize --format svg --out map.svg   Powerhouse-themed SVG diagram
+  switchboard visualize --format png --out map.png   Rasterized PNG diagram
+  switchboard visualize --format mermaid             Mermaid flowchart markup
+
+FORMATS
+
+  table     Terminal tree with folder/file hierarchy and unicode connectors (default)
+  json      Hierarchical JSON — drives, folders, files with metadata (revision, type)
+  svg       Powerhouse-themed vector diagram (dark background, colored node cards)
+  png       Rasterized SVG — requires --out when stdout is a terminal
+  mermaid   Mermaid graph TD flowchart — renders in GitHub, Notion, etc.
+
+OUTPUT
+
+  --out <file>    Write output to a file instead of stdout
+                  Required for PNG when stdout is a terminal
+
+  SVG and Mermaid can be written to stdout or a file.
+  PNG is binary — it requires --out <file> unless stdout is piped.
+
+VISUAL FORMATS ON OTHER COMMANDS
+
+  Visual formats (svg, png, mermaid) also work on:
+
+  switchboard drives get <slug> --format svg --out drive.svg
+  switchboard docs list --drive <slug> --format mermaid --out docs.mmd
+
+THEME (SVG/PNG)
+
+  The Powerhouse theme uses a dark canvas with colored accents:
+  - Drives: cyan (#04D9EB) top bar
+  - Folders: purple (#7A3AFF) left accent
+  - Documents: green (#07C262) left accent
+  - Connecting lines: blue (#0285FF)
+  - Background: dark (#0E0E0D)
+
+EXAMPLES
+
+  # Generate a full instance diagram
+  switchboard visualize --format svg --out instance.svg
+
+  # Get Mermaid markup for a README
+  switchboard visualize --format mermaid > diagram.mmd
+
+  # Export a single drive as PNG
+  switchboard drives get my-drive --format png --out drive.png
+
+  # Pipe hierarchical JSON to jq
+  switchboard visualize --format json | jq '.drives[].name'"#
+    );
+}
+
 fn print_commands() {
     println!(
         r#"ALL COMMANDS
@@ -683,6 +751,13 @@ REAL-TIME & ADVANCED
   sync push <envelopes>         Push sync envelopes
   sync poll <id>                Poll for envelopes
 
+VISUALIZATION
+  visualize                     Visualize all drives and documents
+  visualize --format svg        SVG diagram (Powerhouse theme)
+  visualize --format png        PNG diagram (requires --out)
+  visualize --format mermaid    Mermaid flowchart markup
+  visualize --format json       Hierarchical JSON tree
+
 TOOLS
   query '<graphql>'             Run raw GraphQL
   interactive (or -i)           Launch REPL mode
@@ -695,7 +770,7 @@ TOOLS
   guide <topic>                 Built-in documentation
 
 GLOBAL FLAGS
-  --format <table|json|raw>     Output format
+  --format <table|json|raw|svg|png|mermaid>  Output format
   --quiet                       Suppress extra output
   --no-color                    Disable colors
   -p, --profile <name>          Use specific profile

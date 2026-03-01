@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::cli::helpers::{self, resolve_drive_id};
 use crate::cli::mutate;
-use crate::output::{OutputFormat, print_json, print_table};
+use crate::output::{self, OutputFormat, print_json, print_table};
 
 #[derive(Subcommand)]
 pub enum DocsCommand {
@@ -18,6 +18,9 @@ pub enum DocsCommand {
         /// Filter by document type
         #[arg(long, short = 't')]
         r#type: Option<String>,
+        /// Output file path (for svg/png/mermaid formats)
+        #[arg(long)]
+        out: Option<String>,
     },
     /// Get a document by ID or name (searches across all drives if --drive is omitted)
     Get {
@@ -62,8 +65,19 @@ pub enum DocsCommand {
 
 pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     match cmd {
-        DocsCommand::List { drive, r#type } => {
-            list(drive.as_deref(), r#type.as_deref(), format, profile_name).await
+        DocsCommand::List {
+            drive,
+            r#type,
+            out,
+        } => {
+            list(
+                drive.as_deref(),
+                r#type.as_deref(),
+                format,
+                out.as_deref(),
+                profile_name,
+            )
+            .await
         }
         DocsCommand::Get { id, drive, state } => {
             get(&id, drive.as_deref(), state, format, profile_name).await
@@ -83,9 +97,10 @@ async fn list(
     drive: Option<&str>,
     doc_type: Option<&str>,
     format: OutputFormat,
+    out: Option<&str>,
     profile_name: Option<&str>,
 ) -> Result<()> {
-    let (_name, _profile, client) = helpers::setup(profile_name)?;
+    let (name, _profile, client) = helpers::setup(profile_name)?;
 
     // Collect drive IDs to query
     let drive_ids: Vec<(String, String)> = match drive {
@@ -127,6 +142,7 @@ async fn list(
     };
 
     let mut all_files: Vec<Value> = Vec::new();
+    let mut drive_with_nodes: Vec<(Value, Vec<Value>)> = Vec::new();
     let multiple_drives = drive_ids.len() > 1;
 
     for (drive_id, drive_name) in &drive_ids {
@@ -149,6 +165,18 @@ async fn list(
             .cloned()
             .unwrap_or_default();
 
+        // Collect for visual formats
+        if format.is_visual() {
+            let drive_meta = serde_json::json!({
+                "id": drive_id,
+                "name": drive_name,
+                "slug": drive_name,
+                "documentType": "powerhouse/document-drive",
+                "revision": 0
+            });
+            drive_with_nodes.push((drive_meta, nodes.clone()));
+        }
+
         for node in nodes {
             if node["kind"].as_str() != Some("file") {
                 continue;
@@ -167,11 +195,38 @@ async fn list(
         }
     }
 
+    // Handle visual formats
+    if format.is_visual() {
+        let revisions = std::collections::HashMap::new();
+        let mut tree = output::build_drive_tree(&drive_with_nodes, &revisions);
+        tree.url = Some(client.url.clone());
+        tree.profile = Some(name.clone());
+        let resolved_out = output::resolve_visual_output(out, format, "docs");
+        let out_ref = resolved_out.as_deref();
+
+        return match format {
+            OutputFormat::Svg => {
+                let svg = output::svg::render_svg(&tree);
+                output::write_output(svg.as_bytes(), out_ref, false)
+            }
+            OutputFormat::Png => {
+                let svg = output::svg::render_svg(&tree);
+                let png = output::png::render_png(&svg)?;
+                output::write_output(&png, out_ref, true)
+            }
+            OutputFormat::Mermaid => {
+                let mmd = output::render_mermaid(&tree);
+                output::write_output(mmd.as_bytes(), out_ref, false)
+            }
+            _ => unreachable!(),
+        };
+    }
+
     match format {
         OutputFormat::Json | OutputFormat::Raw => {
             print_json(&serde_json::to_value(&all_files)?);
         }
-        OutputFormat::Table => {
+        _ => {
             if all_files.is_empty() {
                 if let Some(d) = drive {
                     println!("No documents found in drive '{d}'.");
@@ -271,7 +326,7 @@ async fn get(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&doc),
-        OutputFormat::Table => {
+        _ => {
             println!("ID:       {}", doc["id"].as_str().unwrap_or("-"));
             println!("Name:     {}", doc["name"].as_str().unwrap_or("-"));
             println!("Type:     {}", doc["documentType"].as_str().unwrap_or("-"));
@@ -339,7 +394,7 @@ async fn tree(
         OutputFormat::Json | OutputFormat::Raw => {
             print_json(&data["driveDocument"]);
         }
-        OutputFormat::Table => {
+        _ => {
             let drive_name = data
                 .pointer("/driveDocument/name")
                 .and_then(|v| v.as_str())
@@ -465,7 +520,7 @@ async fn create(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             println!("{} Document created", "✓".green());
             if let Some(id) = doc_id {
                 println!("  ID: {id}");

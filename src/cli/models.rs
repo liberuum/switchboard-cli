@@ -44,7 +44,7 @@ fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
                 .collect();
             print_json(&serde_json::Value::Array(models));
         }
-        OutputFormat::Table => {
+        _ => {
             if cache.models.is_empty() {
                 println!("No document models found. Run `switchboard introspect`.");
                 return Ok(());
@@ -76,7 +76,7 @@ fn get(type_or_prefix: &str, format: OutputFormat, profile_name: Option<&str>) -
         OutputFormat::Json | OutputFormat::Raw => {
             print_json(&serde_json::to_value(model)?);
         }
-        OutputFormat::Table => {
+        _ => {
             println!("Type:   {}", model.document_type);
             println!("Prefix: {}", model.prefix);
             println!();

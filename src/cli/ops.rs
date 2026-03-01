@@ -151,7 +151,7 @@ pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>
             let slice: Vec<&Value> = displayed.into_iter().collect();
             print_json(&serde_json::to_value(slice)?);
         }
-        OutputFormat::Table => {
+        _ => {
             if displayed.is_empty() {
                 println!("No operations found.");
                 return Ok(());

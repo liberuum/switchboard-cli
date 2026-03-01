@@ -204,7 +204,7 @@ async fn show(document_id: &str, format: OutputFormat, profile_name: Option<&str
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&Value::Array(access)),
-        OutputFormat::Table => {
+        _ => {
             if access.is_empty() {
                 println!("No permissions set for document '{document_id}'.");
                 return Ok(());
@@ -251,7 +251,7 @@ async fn grant(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             println!(
                 "{} Permission '{}' granted to {} on {}",
                 "✓".green(),
@@ -289,7 +289,7 @@ async fn revoke(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             println!(
                 "{} Permission revoked for {} on {}",
                 "✓".green(),
@@ -328,7 +328,7 @@ async fn grant_group(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             println!(
                 "{} Permission '{}' granted to group {} on {}",
                 "✓".green(),
@@ -366,7 +366,7 @@ async fn revoke_group(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             println!(
                 "{} Group permission revoked for group {} on {}",
                 "✓".green(),
@@ -427,7 +427,7 @@ async fn ops_show(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&Value::Array(access)),
-        OutputFormat::Table => {
+        _ => {
             if access.is_empty() {
                 println!(
                     "No operation permissions for '{}' on '{}'.",
@@ -474,7 +474,7 @@ async fn ops_can_execute(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             if allowed {
                 println!(
                     "{} You can execute '{}' on '{}'",
@@ -516,7 +516,7 @@ async fn ops_grant(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             println!(
                 "{} Operation '{}' permission granted to {} on {}",
                 "✓".green(),
@@ -550,7 +550,7 @@ async fn ops_revoke(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             println!(
                 "{} Operation '{}' permission revoked for {} on {}",
                 "✓".green(),
@@ -584,7 +584,7 @@ async fn ops_grant_group(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             println!(
                 "{} Operation '{}' permission granted to group {} on {}",
                 "✓".green(),
@@ -618,7 +618,7 @@ async fn ops_revoke_group(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             println!(
                 "{} Operation '{}' group permission revoked for group {} on {}",
                 "✓".green(),

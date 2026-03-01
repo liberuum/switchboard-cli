@@ -73,7 +73,8 @@ src/
 │   ├── watch.rs            WebSocket subscriptions
 │   ├── jobs.rs             Async job tracking
 │   ├── sync.rs             Sync channel operations
-│   ├── guide.rs            Built-in documentation (14 topics)
+│   ├── visualize.rs        Visualize all drives/docs as diagrams
+│   ├── guide.rs            Built-in documentation (15 topics)
 │   └── completions.rs      Shell completion generation
 ├── graphql/
 │   ├── client.rs           GraphQLClient — HTTP POST + Bearer auth
@@ -87,7 +88,11 @@ src/
 │   └── types.rs            PhdHeader, PhdOperations structs
 └── output/
     ├── table.rs            Table formatter (comfy-table)
-    └── json.rs             JSON formatter (serde_json pretty-print)
+    ├── json.rs             JSON formatter (serde_json pretty-print)
+    ├── tree.rs             DriveTree shared data model for all renderers
+    ├── svg.rs              SVG renderer (Powerhouse-themed diagrams)
+    ├── png.rs              PNG rasterizer (resvg wrapper)
+    └── mermaid.rs          Mermaid flowchart renderer
 ```
 
 ### Key patterns
@@ -96,7 +101,7 @@ src/
 - **`helpers::setup_with_cache(profile_name)`** — same but also loads the introspection cache. Used by commands that need model info (docs create, mutate, models).
 - **`helpers::resolve_drive_id(client, id_or_slug)`** — resolves a slug to UUID via `driveIdBySlug` GraphQL query. UUIDs pass through unchanged.
 - **`cli::dispatch(command, format, profile, quiet)`** — central dispatcher shared by both `main.rs` and the interactive REPL. All command implementations go through this.
-- **Output format**: `OutputFormat` enum (`Table`, `Json`, `Raw`). Auto-detected from TTY. Each command handles formatting in a `match format { ... }` block.
+- **Output format**: `OutputFormat` enum (`Table`, `Json`, `Raw`, `Svg`, `Png`, `Mermaid`). Auto-detected from TTY. Each command handles formatting in a `match format { ... }` block. Visual formats (`Svg`, `Png`, `Mermaid`) are supported on `visualize`, `drives get`, and `docs list`.
 - **Error handling**: `anyhow::Result` throughout. Errors bubble up to `main()` where they're printed with `{e:#}` (full chain). Commands use `bail!()` for user-facing errors.
 
 ### Interactive REPL (`interactive.rs`)

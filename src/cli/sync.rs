@@ -65,7 +65,7 @@ async fn touch(input: &str, format: OutputFormat, profile_name: Option<&str>) ->
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(channel),
-        OutputFormat::Table => {
+        _ => {
             println!("Channel:  {}", channel["id"].as_str().unwrap_or("-"));
             println!("Name:     {}", channel["name"].as_str().unwrap_or("-"));
             println!("Status:   {}", channel["status"].as_str().unwrap_or("-"));
@@ -94,7 +94,7 @@ async fn push(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(result),
-        OutputFormat::Table => {
+        _ => {
             println!("Status:       {}", result["status"].as_str().unwrap_or("-"));
             println!("Acknowledged: {}", result["acknowledged"]);
         }
@@ -131,7 +131,7 @@ async fn poll(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(result),
-        OutputFormat::Table => {
+        _ => {
             let channel = result["channelId"].as_str().unwrap_or("-");
             let envelopes = result["envelopes"].as_array().map(|a| a.len()).unwrap_or(0);
             println!("Channel:   {channel}");

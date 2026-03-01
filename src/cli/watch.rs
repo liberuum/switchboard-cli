@@ -106,7 +106,7 @@ async fn watch_docs(
                 OutputFormat::Json | OutputFormat::Raw => {
                     println!("{}", serde_json::to_string(change).unwrap_or_default());
                 }
-                OutputFormat::Table => {
+                _ => {
                     let event = change["type"].as_str().unwrap_or("?");
                     let docs = change["documents"].as_array();
                     if let Some(docs) = docs {
@@ -149,7 +149,7 @@ async fn watch_job(
                 OutputFormat::Json | OutputFormat::Raw => {
                     println!("{}", serde_json::to_string(job).unwrap_or_default());
                 }
-                OutputFormat::Table => {
+                _ => {
                     let status = job["status"].as_str().unwrap_or("?");
                     let error = job["error"].as_str();
                     if let Some(err) = error {

@@ -40,7 +40,7 @@ pub async fn run(args: QueryArgs, format: OutputFormat, profile_name: Option<&st
 
     match format {
         OutputFormat::Raw | OutputFormat::Json => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             // For raw queries, just pretty-print the JSON since we don't know the shape
             print_json(&data);
         }

@@ -227,6 +227,18 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard sync push <envelopes>` | Push sync envelopes |
 | `switchboard sync poll <channel-id> [--ack N] [--latest N]` | Poll for sync envelopes |
 
+### Visualization
+
+| Command | Description |
+|---------|-------------|
+| `switchboard visualize` | Visualize all drives and documents (terminal tree by default) |
+| `switchboard visualize --format json` | Hierarchical JSON tree of all drives and docs |
+| `switchboard visualize --format svg --out map.svg` | Powerhouse-themed SVG diagram |
+| `switchboard visualize --format png --out map.png` | Rasterized PNG diagram |
+| `switchboard visualize --format mermaid` | Mermaid flowchart markup (renders in GitHub, Notion) |
+
+Visual formats (`svg`, `png`, `mermaid`) are also available on `drives get` and `docs list` with `--out`.
+
 ### Tools
 
 | Command | Description |
@@ -245,7 +257,7 @@ switchboard import ./backup/*.phd --drive another-drive
 
 | Flag | Description |
 |------|-------------|
-| `--format <table\|json\|raw>` | Output format (default: table for TTY, json for pipes) |
+| `--format <table\|json\|raw\|svg\|png\|mermaid>` | Output format (default: table for TTY, json for pipes) |
 | `--quiet` | Suppress informational output |
 | `--no-color` | Disable colored output (also respects `NO_COLOR` env var) |
 | `-p, --profile <name>` | Use a specific profile instead of the default |
@@ -265,6 +277,11 @@ switchboard drives list | jq '.[].slug'
 # Explicit format override
 switchboard drives list --format json
 switchboard drives list --format raw
+
+# Visual diagrams (SVG, PNG, Mermaid)
+switchboard visualize --format svg --out map.svg
+switchboard visualize --format png --out map.png
+switchboard visualize --format mermaid > diagram.mmd
 ```
 
 ### Scripting examples
@@ -438,6 +455,7 @@ switchboard guide sync            # Sync channels
 switchboard guide interactive     # REPL mode
 switchboard guide output          # Formatting and scripting
 switchboard guide graphql         # Raw GraphQL patterns
+switchboard guide visualize       # Visualization formats and diagrams
 switchboard guide commands        # All commands at a glance
 ```
 
@@ -482,6 +500,7 @@ switchboard-cli/
 │   │   ├── jobs.rs              Async job tracking
 │   │   ├── sync.rs              Sync channels
 │   │   ├── interactive.rs       REPL mode (rustyline, full CLI parity via clap dispatch)
+│   │   ├── visualize.rs         Visualize all drives/docs as diagrams
 │   │   ├── guide.rs             Built-in documentation
 │   │   ├── update.rs            Self-update (GitHub Releases + binary swap)
 │   │   ├── completions.rs       Shell completions
@@ -498,7 +517,11 @@ switchboard-cli/
 │   │   └── types.rs             PhdHeader, PhdOperations, etc.
 │   └── output/
 │       ├── table.rs             Table formatter (comfy-table)
-│       └── json.rs              JSON formatter
+│       ├── json.rs              JSON formatter
+│       ├── tree.rs              DriveTree shared data model
+│       ├── svg.rs               SVG renderer (Powerhouse theme)
+│       ├── png.rs               PNG rasterizer (resvg)
+│       └── mermaid.rs           Mermaid flowchart renderer
 └── tests/
     └── cli_integration.rs       Integration tests (requires running GraphQL API)
 ```

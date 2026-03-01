@@ -20,6 +20,7 @@ pub mod query;
 pub mod schema;
 pub mod sync;
 pub mod update;
+pub mod visualize;
 pub mod watch;
 
 use anyhow::Result;
@@ -135,6 +136,13 @@ pub enum Commands {
     /// Update the CLI to the latest version
     Update(update::UpdateArgs),
 
+    /// Visualize all drives and documents as a diagram
+    Visualize {
+        /// Output file path (required for PNG, optional for SVG/Mermaid)
+        #[arg(long, short)]
+        out: Option<String>,
+    },
+
     /// Launch interactive REPL mode
     Interactive,
 
@@ -176,6 +184,9 @@ pub async fn dispatch(
         Commands::Jobs(cmd) => jobs::run(cmd, format, profile, quiet).await,
         Commands::Sync(cmd) => sync::run(cmd, format, profile).await,
         Commands::Update(args) => update::run(args.check, quiet).await,
+        Commands::Visualize { out } => {
+            visualize::run(format, out.as_deref(), profile, quiet).await
+        }
         Commands::Interactive => anyhow::bail!("Already in interactive mode"),
         Commands::Guide(topic) => guide::run(topic),
         Commands::Completions(args) => completions::run(args),
@@ -226,7 +237,7 @@ async fn info(profile_name: Option<&str>, format: OutputFormat) -> Result<()> {
                 "has_token": client.has_token(),
             }));
         }
-        OutputFormat::Table => {
+        _ => {
             println!("Profile:  {}", name.green());
             println!("URL:      {}", client.url);
             println!(

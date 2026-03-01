@@ -105,7 +105,7 @@ async fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&Value::Array(groups)),
-        OutputFormat::Table => {
+        _ => {
             if groups.is_empty() {
                 println!("No groups found.");
                 return Ok(());
@@ -145,7 +145,7 @@ async fn get(id: &str, format: OutputFormat, profile_name: Option<&str>) -> Resu
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(group),
-        OutputFormat::Table => {
+        _ => {
             println!("ID:          {}", group["id"].as_str().unwrap_or("-"));
             println!("Name:        {}", group["name"].as_str().unwrap_or("-"));
             println!(
@@ -193,7 +193,7 @@ async fn create(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(group),
-        OutputFormat::Table => {
+        _ => {
             println!("{} Group created", "✓".green());
             println!("  ID:   {}", group["id"].as_str().unwrap_or("-"));
             println!("  Name: {}", group["name"].as_str().unwrap_or("-"));
@@ -256,7 +256,7 @@ async fn add_user(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             println!("{} User '{user}' added to group '{group_id}'", "✓".green());
         }
     }
@@ -286,7 +286,7 @@ async fn remove_user(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
-        OutputFormat::Table => {
+        _ => {
             println!(
                 "{} User '{user}' removed from group '{group_id}'",
                 "✓".green()
@@ -323,7 +323,7 @@ async fn user_groups(
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&Value::Array(groups)),
-        OutputFormat::Table => {
+        _ => {
             if groups.is_empty() {
                 println!("No groups found for user '{address}'.");
                 return Ok(());
