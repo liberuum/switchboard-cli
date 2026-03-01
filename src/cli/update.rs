@@ -1,13 +1,19 @@
+use std::io::Read;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use colored::Colorize;
-use serde::Deserialize;
-use std::io::Read;
+use serde::{Deserialize, Serialize};
 
 /// GitHub repository used to fetch releases for self-update.
-const GITHUB_REPO: &str = "liberuum/switchboard-cli";
+pub const GITHUB_REPO: &str = "liberuum/switchboard-cli";
 /// Current version compiled from Cargo.toml at build time.
-const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// How long the update-check cache is considered fresh (24 hours).
+const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 
 #[derive(Args)]
 pub struct UpdateArgs {
@@ -33,7 +39,7 @@ struct Asset {
 
 // ── Version helpers ─────────────────────────────────────────────────────────
 
-fn parse_version(tag: &str) -> Option<(u32, u32, u32)> {
+pub fn parse_version(tag: &str) -> Option<(u32, u32, u32)> {
     let v = tag.strip_prefix('v').unwrap_or(tag);
     let parts: Vec<&str> = v.split('.').collect();
     if parts.len() == 3 {
@@ -47,7 +53,7 @@ fn parse_version(tag: &str) -> Option<(u32, u32, u32)> {
     }
 }
 
-fn is_newer(latest: &str, current: &str) -> bool {
+pub fn is_newer(latest: &str, current: &str) -> bool {
     match (parse_version(latest), parse_version(current)) {
         (Some(l), Some(c)) => l > c,
         _ => false,
@@ -277,4 +283,93 @@ pub async fn run(check: bool, quiet: bool) -> Result<()> {
     );
 
     Ok(())
+}
+
+// ── Startup version-check cache ────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdateCache {
+    last_checked: u64,
+    latest_version: String,
+}
+
+/// Minimal release response — only needs the tag.
+#[derive(Debug, Deserialize)]
+struct LatestRelease {
+    tag_name: String,
+}
+
+fn cache_path() -> Option<PathBuf> {
+    crate::config::profiles::config_dir()
+        .ok()
+        .map(|d| d.join("update-check.json"))
+}
+
+fn read_update_cache() -> Option<UpdateCache> {
+    let path = cache_path()?;
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn write_update_cache(cache: &UpdateCache) {
+    if let Some(path) = cache_path() {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, serde_json::to_string(cache).unwrap_or_default());
+    }
+}
+
+async fn update_cache_if_stale() -> Result<()> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+
+    if let Some(cache) = read_update_cache()
+        && now.saturating_sub(cache.last_checked) < CACHE_TTL_SECS
+    {
+        return Ok(());
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("switchboard-cli")
+        .build()?;
+
+    let release: LatestRelease = client
+        .get(format!(
+            "https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        ))
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    write_update_cache(&UpdateCache {
+        last_checked: now,
+        latest_version: release.tag_name,
+    });
+
+    Ok(())
+}
+
+/// Print a one-line update notice to stderr if a newer version is cached.
+/// Reads a local file only — no network, instant return.
+pub fn print_update_notice() {
+    if let Some(cached) = read_update_cache() {
+        let current_tag = format!("v{CURRENT_VERSION}");
+        if is_newer(&cached.latest_version, &current_tag) {
+            eprintln!(
+                "{} A new version of switchboard is available: {} → {} — run `switchboard update` to upgrade",
+                "↑".cyan().bold(),
+                current_tag,
+                cached.latest_version.green()
+            );
+        }
+    }
+}
+
+/// Spawn a background task to refresh the update cache if stale.
+/// Non-blocking. Errors are silently ignored.
+pub fn check_version_background() {
+    tokio::spawn(async {
+        let _ = update_cache_if_stale().await;
+    });
 }

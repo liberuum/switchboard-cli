@@ -59,5 +59,12 @@ async fn run() -> Result<()> {
         return cli::interactive::run(profile, quiet).await;
     }
 
+    // Non-blocking startup version check
+    let is_update_cmd = matches!(command, cli::Commands::Update(_));
+    if !quiet && !is_update_cmd && std::io::stderr().is_terminal() {
+        cli::update::print_update_notice();
+        cli::update::check_version_background();
+    }
+
     cli::dispatch(command, format, profile, quiet).await
 }
