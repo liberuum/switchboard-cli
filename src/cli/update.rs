@@ -276,7 +276,7 @@ pub async fn run(check: bool, quiet: bool) -> Result<()> {
     }
 
     println!(
-        "{} Updated switchboard {} → {}",
+        "{} Updated switchboard-cli {} → {}",
         "✓".green(),
         current_tag,
         latest_tag.green()
@@ -357,7 +357,7 @@ pub fn print_update_notice() {
         let current_tag = format!("v{CURRENT_VERSION}");
         if is_newer(&cached.latest_version, &current_tag) {
             eprintln!(
-                "{} A new version of switchboard is available: {} → {} — run `switchboard update` to upgrade",
+                "{} A new version of switchboard-cli is available: {} → {} — run `switchboard update` to upgrade\n",
                 "↑".cyan().bold(),
                 current_tag,
                 cached.latest_version.green()
@@ -367,9 +367,10 @@ pub fn print_update_notice() {
 }
 
 /// Spawn a background task to refresh the update cache if stale.
-/// Non-blocking. Errors are silently ignored.
-pub fn check_version_background() {
+/// Returns a JoinHandle so callers can optionally await completion.
+/// Errors are silently ignored.
+pub fn check_version_background() -> tokio::task::JoinHandle<()> {
     tokio::spawn(async {
         let _ = update_cache_if_stale().await;
-    });
+    })
 }

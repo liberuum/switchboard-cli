@@ -44,7 +44,14 @@ async fn run() -> Result<()> {
     // Handle -i flag or no subcommand
     let command = match cli.command {
         Some(cmd) => cmd,
-        None if cli.interactive => return cli::interactive::run(profile, quiet).await,
+        None if cli.interactive => {
+            // Version check before entering REPL (lives long enough for background fetch)
+            if !quiet && std::io::stderr().is_terminal() {
+                cli::update::print_update_notice();
+                cli::update::check_version_background();
+            }
+            return cli::interactive::run(profile, quiet).await;
+        }
         None => {
             // No subcommand and no -i flag: print help
             use clap::CommandFactory;
@@ -56,15 +63,29 @@ async fn run() -> Result<()> {
     // -i flag with a subcommand: ignore -i, run the subcommand
     // Interactive is handled here (not in dispatch) to avoid async recursion.
     if matches!(command, cli::Commands::Interactive) {
+        // Version check before entering REPL
+        if !quiet && std::io::stderr().is_terminal() {
+            cli::update::print_update_notice();
+            cli::update::check_version_background();
+        }
         return cli::interactive::run(profile, quiet).await;
     }
 
     // Non-blocking startup version check
     let is_update_cmd = matches!(command, cli::Commands::Update(_));
-    if !quiet && !is_update_cmd && std::io::stderr().is_terminal() {
+    let version_handle = if !quiet && !is_update_cmd && std::io::stderr().is_terminal() {
         cli::update::print_update_notice();
-        cli::update::check_version_background();
+        Some(cli::update::check_version_background())
+    } else {
+        None
+    };
+
+    let result = cli::dispatch(command, format, profile, quiet).await;
+
+    // Give the background version check a brief grace period to finish writing cache
+    if let Some(handle) = version_handle {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
     }
 
-    cli::dispatch(command, format, profile, quiet).await
+    result
 }
