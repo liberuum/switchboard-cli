@@ -527,12 +527,10 @@ pub fn render_doc_state_svg(doc: &DocStateView) -> String {
     let mut cursor_y = outer_pad + header_h;
 
     // ── Document metadata card ──────────────────────────────────────────
-    let mut doc_meta = vec![
-        MetaLine {
-            label: "ID".into(),
-            value: doc.id.clone(),
-        },
-    ];
+    let mut doc_meta = vec![MetaLine {
+        label: "ID".into(),
+        value: doc.id.clone(),
+    }];
     if let Some(ref file_name) = doc.file_name {
         doc_meta.push(MetaLine {
             label: "File Name".into(),
@@ -652,8 +650,8 @@ fn layout_state_value(
                     _ => {
                         let display = format_display_value(val);
                         let label_len = key.chars().count() + 2;
-                        let needs_own_card =
-                            display.chars().count() + label_len > max_chars || display.contains('\n');
+                        let needs_own_card = display.chars().count() + label_len > max_chars
+                            || display.contains('\n');
                         if needs_own_card {
                             // Long primitive: promote to own sub-card
                             complex_keys.push((key.clone(), val.clone()));
