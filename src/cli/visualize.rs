@@ -6,9 +6,7 @@ use serde_json::Value;
 
 use crate::cli::helpers;
 use crate::graphql::GraphQLClient;
-use crate::output::{
-    self, build_drive_tree, render_mermaid, DriveTree, OutputFormat, TreeEntry,
-};
+use crate::output::{self, DriveTree, OutputFormat, TreeEntry, build_drive_tree, render_mermaid};
 
 pub async fn run(
     format: OutputFormat,
@@ -82,10 +80,7 @@ pub async fn run(
 
     // Step 3: Enrich file metadata with revisions from model namespaces
     if !quiet {
-        eprintln!(
-            "{} Enriching document metadata...",
-            "→".cyan().bold()
-        );
+        eprintln!("{} Enriching document metadata...", "→".cyan().bold());
     }
 
     let revisions = fetch_revisions(&client, &cache, &drive_with_nodes).await;
@@ -207,11 +202,7 @@ fn print_all_drives(tree: &DriveTree) {
             println!();
         }
 
-        println!(
-            "{} {}",
-            "Drive:".bold(),
-            drive.name.bold()
-        );
+        println!("{} {}", "Drive:".bold(), drive.name.bold());
         println!("  ID:       {}", drive.id);
         println!("  Slug:     {}", drive.slug);
         println!("  Revision: {}", drive.revision);
@@ -245,14 +236,8 @@ fn print_tree_entries(entries: &[TreeEntry], indent: &str) {
     // Print files as a simple list
     for file in &files {
         if let TreeEntry::File(f) = file {
-            let rev_str = f
-                .revision
-                .map(|r| format!(" rev:{r}"))
-                .unwrap_or_default();
-            println!(
-                "{indent}  📄 {} ({}{})",
-                f.name, f.document_type, rev_str
-            );
+            let rev_str = f.revision.map(|r| format!(" rev:{r}")).unwrap_or_default();
+            println!("{indent}  📄 {} ({}{})", f.name, f.document_type, rev_str);
         }
     }
 

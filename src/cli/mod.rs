@@ -184,9 +184,7 @@ pub async fn dispatch(
         Commands::Jobs(cmd) => jobs::run(cmd, format, profile, quiet).await,
         Commands::Sync(cmd) => sync::run(cmd, format, profile).await,
         Commands::Update(args) => update::run(args.check, quiet).await,
-        Commands::Visualize { out } => {
-            visualize::run(format, out.as_deref(), profile, quiet).await
-        }
+        Commands::Visualize { out } => visualize::run(format, out.as_deref(), profile, quiet).await,
         Commands::Interactive => anyhow::bail!("Already in interactive mode"),
         Commands::Guide(topic) => guide::run(topic),
         Commands::Completions(args) => completions::run(args),

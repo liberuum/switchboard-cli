@@ -49,9 +49,7 @@ fn emit_children(lines: &mut Vec<String>, parent_id: &str, children: &[TreeEntry
                 let nid = mermaid_id(&folder.id);
                 let label = escape_label(&folder.name);
 
-                lines.push(format!(
-                    "    {nid}[\"\u{1F4C1} {label}\"]"
-                ));
+                lines.push(format!("    {nid}[\"\u{1F4C1} {label}\"]"));
                 lines.push(format!(
                     "    style {nid} fill:#14151A,stroke:#7A3AFF,color:#FFFFFF"
                 ));
@@ -99,7 +97,11 @@ mod tests {
 
     #[test]
     fn render_empty_tree() {
-        let tree = DriveTree { url: None, profile: None, drives: vec![] };
+        let tree = DriveTree {
+            url: None,
+            profile: None,
+            drives: vec![],
+        };
         assert_eq!(render_mermaid(&tree), "graph TD");
     }
 

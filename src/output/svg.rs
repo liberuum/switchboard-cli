@@ -505,7 +505,11 @@ mod tests {
 
     #[test]
     fn render_empty_tree() {
-        let tree = DriveTree { url: None, profile: None, drives: vec![] };
+        let tree = DriveTree {
+            url: None,
+            profile: None,
+            drives: vec![],
+        };
         let svg = render_svg(&tree);
         assert!(svg.starts_with("<svg"));
         assert!(svg.ends_with("</svg>"));

@@ -65,11 +65,7 @@ pub enum DocsCommand {
 
 pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     match cmd {
-        DocsCommand::List {
-            drive,
-            r#type,
-            out,
-        } => {
+        DocsCommand::List { drive, r#type, out } => {
             list(
                 drive.as_deref(),
                 r#type.as_deref(),
