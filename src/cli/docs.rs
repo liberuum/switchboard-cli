@@ -32,6 +32,9 @@ pub enum DocsCommand {
         /// Include full document state in output
         #[arg(long)]
         state: bool,
+        /// Output file path (for svg/png/mermaid formats)
+        #[arg(long, short)]
+        out: Option<String>,
     },
     /// Show hierarchical file tree of a drive
     Tree {
@@ -75,8 +78,21 @@ pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&s
             )
             .await
         }
-        DocsCommand::Get { id, drive, state } => {
-            get(&id, drive.as_deref(), state, format, profile_name).await
+        DocsCommand::Get {
+            id,
+            drive,
+            state,
+            out,
+        } => {
+            get(
+                &id,
+                drive.as_deref(),
+                state,
+                format,
+                out.as_deref(),
+                profile_name,
+            )
+            .await
         }
         DocsCommand::Tree { drive } => tree(drive, format, profile_name).await,
         DocsCommand::Create {
@@ -269,20 +285,27 @@ async fn get(
     drive: Option<&str>,
     include_state: bool,
     format: OutputFormat,
+    out: Option<&str>,
     profile_name: Option<&str>,
 ) -> Result<()> {
-    let (_name, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
+    let (name, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
 
     // Resolve doc (accepts name or UUID) and drive.
     // When --drive is given, use "drive/doc" format so name resolution is scoped.
+    // Capture the original user-provided name before resolution overwrites it
+    let original_name = id.to_string();
+
     let (doc_id, drive_id) = match drive {
         Some(d) => helpers::resolve_doc(&client, &format!("{d}/{id}")).await?,
         None => helpers::resolve_doc(&client, id).await?,
     };
     let id = &doc_id;
 
-    // Build field list — only include stateJSON when --state is passed
-    let fields = if include_state {
+    // Visual formats always need stateJSON
+    let need_state = include_state || format.is_visual();
+
+    // Build field list
+    let fields = if need_state {
         "id name documentType revision stateJSON"
     } else {
         "id name documentType revision"
@@ -319,6 +342,67 @@ async fn get(
 
     let doc =
         doc.ok_or_else(|| anyhow::anyhow!("Document '{id}' not found in any model namespace"))?;
+
+    // Visual formats: render document state as themed SVG/PNG
+    if format.is_visual() {
+        // stateJSON can be either a JSON string (needs parsing) or an already-parsed object
+        let state = doc.get("stateJSON").and_then(|v| match v {
+            Value::String(s) => serde_json::from_str::<Value>(s).ok(),
+            Value::Object(_) | Value::Array(_) => Some(v.clone()),
+            _ => None,
+        });
+
+        // Use the doc name, falling back to the state's "name" field if the metadata name is empty
+        let doc_name = doc["name"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                state
+                    .as_ref()
+                    .and_then(|s| s.get("name"))
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or("-");
+
+        // Only show file_name if original input differs from the resolved UUID
+        let file_name = if original_name != *id {
+            Some(original_name.clone())
+        } else {
+            None
+        };
+
+        let view = output::DocStateView {
+            url: Some(client.url.clone()),
+            profile: Some(name.clone()),
+            drive: Some(drive_id.clone()),
+            id: doc["id"].as_str().unwrap_or("-").into(),
+            name: doc_name.into(),
+            file_name,
+            document_type: doc["documentType"].as_str().unwrap_or("-").into(),
+            revision: doc["revision"].as_u64().unwrap_or(0),
+            state,
+        };
+
+        let resolved_out = output::resolve_visual_output(out, format, "doc");
+        let out_ref = resolved_out.as_deref();
+
+        return match format {
+            OutputFormat::Svg => {
+                let svg = output::svg::render_doc_state_svg(&view);
+                output::write_output(svg.as_bytes(), out_ref, false)
+            }
+            OutputFormat::Png => {
+                let svg = output::svg::render_doc_state_svg(&view);
+                let png = output::png::render_png(&svg)?;
+                output::write_output(&png, out_ref, true)
+            }
+            OutputFormat::Mermaid => {
+                let mmd = format!("graph TD\n    doc[\"{}\"]\n", view.name);
+                output::write_output(mmd.as_bytes(), out_ref, false)
+            }
+            _ => unreachable!(),
+        };
+    }
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&doc),

@@ -1,4 +1,5 @@
-use crate::output::tree::{DriveNode, DriveTree, TreeEntry};
+use crate::output::tree::{DocStateView, DriveNode, DriveTree, TreeEntry};
+use serde_json::Value;
 
 // ── Powerhouse brand theme ──────────────────────────────────────────────────
 
@@ -488,6 +489,609 @@ fn escape_xml(s: &str) -> String {
         }
     }
     out
+}
+
+// ── Document-state SVG renderer ─────────────────────────────────────────────
+
+/// Colors for nested state sub-cards (cycles for deeper objects).
+const STATE_ACCENT: &str = "#07C262"; // green — state section
+const OBJECT_ACCENT: &str = "#7A3AFF"; // purple — nested objects
+const ARRAY_ACCENT: &str = "#0285FF"; // blue — arrays of objects
+
+/// Maximum JSON nesting depth before truncating to a JSON string.
+const MAX_DEPTH: usize = 4;
+
+/// Internal item produced by the state JSON walker.
+#[derive(Debug)]
+struct StateCard {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    accent: &'static str,
+    title: String,
+    lines: Vec<MetaLine>,
+    children: Vec<StateCard>,
+}
+
+/// Render a `DocStateView` as a self-contained SVG string.
+pub fn render_doc_state_svg(doc: &DocStateView) -> String {
+    let card_width = 700.0;
+    let outer_pad = PADDING;
+    let total_width = card_width + outer_pad * 2.0;
+
+    // Header
+    let has_header = doc.url.is_some() || doc.profile.is_some();
+    let header_h = if has_header { HEADER_HEIGHT } else { 0.0 };
+
+    let mut cursor_y = outer_pad + header_h;
+
+    // ── Document metadata card ──────────────────────────────────────────
+    let mut doc_meta = vec![
+        MetaLine {
+            label: "ID".into(),
+            value: doc.id.clone(),
+        },
+    ];
+    if let Some(ref file_name) = doc.file_name {
+        doc_meta.push(MetaLine {
+            label: "File Name".into(),
+            value: file_name.clone(),
+        });
+    }
+    doc_meta.push(MetaLine {
+        label: "Type".into(),
+        value: doc.document_type.clone(),
+    });
+    doc_meta.push(MetaLine {
+        label: "Revision".into(),
+        value: doc.revision.to_string(),
+    });
+    if let Some(ref drive) = doc.drive {
+        doc_meta.push(MetaLine {
+            label: "Drive".into(),
+            value: drive.clone(),
+        });
+    }
+
+    let doc_card_h = node_height(doc_meta.len());
+    let doc_card_y = cursor_y;
+    cursor_y += doc_card_h + GAP_Y;
+
+    // ── State cards ─────────────────────────────────────────────────────
+    let state_cards = if let Some(ref state) = doc.state {
+        layout_state_value(state, "State", outer_pad, &mut cursor_y, card_width, 0)
+    } else {
+        Vec::new()
+    };
+
+    let total_height = cursor_y + outer_pad;
+
+    // ── Render SVG ──────────────────────────────────────────────────────
+    let mut svg = String::with_capacity(16384);
+    svg.push_str(&format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{total_width}" height="{total_height}" viewBox="0 0 {total_width} {total_height}">"#,
+    ));
+    svg.push_str(&format!(
+        r#"<rect width="100%" height="100%" fill="{BG_COLOR}"/>"#,
+    ));
+    svg.push_str(&format!(
+        r#"<style>text {{ font-family: {FONT_FAMILY}; }}</style>"#,
+    ));
+
+    // Header
+    if has_header {
+        render_doc_header(&mut svg, doc, total_width);
+    }
+
+    // Document metadata card (cyan accent)
+    render_state_card_rect(
+        &mut svg,
+        outer_pad,
+        doc_card_y,
+        card_width,
+        doc_card_h,
+        DRIVE_ACCENT,
+        true,
+    );
+    render_state_card_text(&mut svg, outer_pad, doc_card_y, &doc.name, &doc_meta, true);
+
+    // Connecting line from doc card to state
+    if !state_cards.is_empty() {
+        let cx = outer_pad + card_width / 2.0;
+        let py = doc_card_y + doc_card_h;
+        let cy = state_cards[0].y;
+        let mid_y = (py + cy) / 2.0;
+        svg.push_str(&format!(
+            r#"<path d="M {cx} {py} C {cx} {mid_y}, {cx} {mid_y}, {cx} {cy}" fill="none" stroke="{LINE_COLOR}" stroke-width="1.5" stroke-opacity="0.6"/>"#,
+        ));
+    }
+
+    // State cards
+    for card in &state_cards {
+        render_state_card_tree(&mut svg, card);
+    }
+
+    svg.push_str("</svg>");
+    svg
+}
+
+/// Walk a JSON value and produce a list of StateCards.
+fn layout_state_value(
+    value: &Value,
+    title: &str,
+    x: f64,
+    cursor_y: &mut f64,
+    width: f64,
+    depth: usize,
+) -> Vec<StateCard> {
+    let accent = match depth {
+        0 => STATE_ACCENT,
+        d if d % 2 == 1 => OBJECT_ACCENT,
+        _ => ARRAY_ACCENT,
+    };
+
+    match value {
+        Value::Object(map) => {
+            let card_x = x;
+            let card_y = *cursor_y;
+            let inner_pad = 12.0;
+            let is_root = depth == 0;
+            let max_chars = max_line_chars(width, is_root);
+
+            // Separate primitives from complex children
+            let mut lines = Vec::new();
+            let mut complex_keys = Vec::new();
+
+            for (key, val) in map {
+                match val {
+                    Value::Object(_) | Value::Array(_) => {
+                        // Objects and ALL arrays always get their own sub-card
+                        complex_keys.push((key.clone(), val.clone()));
+                    }
+                    _ => {
+                        let display = format_display_value(val);
+                        let label_len = key.chars().count() + 2;
+                        let needs_own_card =
+                            display.chars().count() + label_len > max_chars || display.contains('\n');
+                        if needs_own_card {
+                            // Long primitive: promote to own sub-card
+                            complex_keys.push((key.clone(), val.clone()));
+                        } else {
+                            // Short primitive: stays as MetaLine in parent card
+                            lines.push(MetaLine {
+                                label: key.clone(),
+                                value: display,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Compute header + primitive lines height
+            let header_plus_lines = FIRST_META_Y
+                + if lines.is_empty() {
+                    0.0
+                } else {
+                    (lines.len() as f64 - 1.0) * LINE_H + BOTTOM_PAD
+                };
+
+            // If no complex children, this is a simple card
+            if complex_keys.is_empty() || depth >= MAX_DEPTH {
+                // If we hit max depth and there are complex keys, render them as JSON strings
+                if depth >= MAX_DEPTH {
+                    for (key, val) in &complex_keys {
+                        let json_str = serde_json::to_string(val).unwrap_or_default();
+                        lines.extend(wrap_to_meta_lines(key, &json_str, max_chars));
+                    }
+                }
+
+                let h = node_height(lines.len().max(1));
+                *cursor_y += h + GAP_Y;
+                return vec![StateCard {
+                    x: card_x,
+                    y: card_y,
+                    width,
+                    height: h,
+                    accent,
+                    title: title.to_string(),
+                    lines,
+                    children: Vec::new(),
+                }];
+            }
+
+            // Complex card: has nested sub-cards
+            let child_indent = 20.0;
+            let child_width = width - child_indent * 2.0;
+
+            // Start cursor after primitive lines
+            let mut inner_cursor = card_y + header_plus_lines + inner_pad;
+
+            let mut children = Vec::new();
+            for (key, val) in &complex_keys {
+                let sub_cards = layout_state_value(
+                    val,
+                    key,
+                    card_x + child_indent,
+                    &mut inner_cursor,
+                    child_width,
+                    depth + 1,
+                );
+                children.extend(sub_cards);
+            }
+
+            let card_h = (inner_cursor - card_y) + BOTTOM_PAD;
+            *cursor_y = card_y + card_h + GAP_Y;
+
+            vec![StateCard {
+                x: card_x,
+                y: card_y,
+                width,
+                height: card_h,
+                accent,
+                title: title.to_string(),
+                lines,
+                children,
+            }]
+        }
+        Value::Array(arr) => {
+            if arr.is_empty() {
+                let lines = vec![MetaLine {
+                    label: String::new(),
+                    value: "[]".into(),
+                }];
+                let h = node_height(1);
+                let card_y = *cursor_y;
+                *cursor_y += h + GAP_Y;
+                return vec![StateCard {
+                    x,
+                    y: card_y,
+                    width,
+                    height: h,
+                    accent,
+                    title: title.to_string(),
+                    lines,
+                    children: Vec::new(),
+                }];
+            }
+
+            // If all primitives, render as wrapped list
+            if arr.iter().all(|v| !v.is_object() && !v.is_array()) {
+                let is_root = depth == 0;
+                let max_chars = max_line_chars(width, is_root);
+                let items: Vec<String> = arr.iter().map(format_display_value).collect();
+
+                // If any item is long (e.g. UUIDs), show each on its own line
+                let any_long = items.iter().any(|i| i.chars().count() > 36);
+                let mut lines = Vec::new();
+                if any_long {
+                    for item in &items {
+                        for line in word_wrap(item, max_chars) {
+                            lines.push(MetaLine {
+                                label: String::new(),
+                                value: line,
+                            });
+                        }
+                    }
+                } else {
+                    let joined = items.join(", ");
+                    for line in word_wrap(&joined, max_chars) {
+                        lines.push(MetaLine {
+                            label: String::new(),
+                            value: line,
+                        });
+                    }
+                }
+
+                let h = node_height(lines.len().max(1));
+                let card_y = *cursor_y;
+                *cursor_y += h + GAP_Y;
+                return vec![StateCard {
+                    x,
+                    y: card_y,
+                    width,
+                    height: h,
+                    accent,
+                    title: title.to_string(),
+                    lines,
+                    children: Vec::new(),
+                }];
+            }
+
+            // Array of objects: render each as a sub-card
+            let card_y = *cursor_y;
+            let inner_pad = 12.0;
+            let child_indent = 20.0;
+            let child_width = width - child_indent * 2.0;
+
+            let mut inner_cursor = card_y + TITLE_Y + inner_pad + 4.0;
+            let mut children = Vec::new();
+
+            for (i, item) in arr.iter().enumerate() {
+                let item_title = format!("[{i}]");
+                let sub = layout_state_value(
+                    item,
+                    &item_title,
+                    x + child_indent,
+                    &mut inner_cursor,
+                    child_width,
+                    depth + 1,
+                );
+                children.extend(sub);
+            }
+
+            let card_h = (inner_cursor - card_y) + BOTTOM_PAD;
+            *cursor_y = card_y + card_h + GAP_Y;
+
+            vec![StateCard {
+                x,
+                y: card_y,
+                width,
+                height: card_h,
+                accent,
+                title: title.to_string(),
+                lines: Vec::new(),
+                children,
+            }]
+        }
+        _ => {
+            // Primitive value — word-wrap into card lines
+            let display = format_display_value(value);
+            let max_chars = max_line_chars(width, depth == 0);
+            let lines: Vec<MetaLine> = word_wrap(&display, max_chars)
+                .into_iter()
+                .map(|line| MetaLine {
+                    label: String::new(),
+                    value: line,
+                })
+                .collect();
+            let h = node_height(lines.len().max(1));
+            let card_y = *cursor_y;
+            *cursor_y += h + GAP_Y;
+            vec![StateCard {
+                x,
+                y: card_y,
+                width,
+                height: h,
+                accent,
+                title: title.to_string(),
+                lines,
+                children: Vec::new(),
+            }]
+        }
+    }
+}
+
+/// Format a JSON value for clean display (no quotes on strings, no truncation).
+fn format_display_value(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => "null".into(),
+        Value::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(format_display_value).collect();
+            items.join(", ")
+        }
+        Value::Object(_) => "{...}".into(),
+    }
+}
+
+/// Compute maximum characters per rendered line given card inner width.
+fn max_line_chars(card_width: f64, is_top_accent: bool) -> usize {
+    let pad_left = if is_top_accent {
+        DRIVE_PAD_X
+    } else {
+        CHILD_PAD_X
+    };
+    ((card_width - pad_left - PAD_RIGHT) / (META_FONT * 0.6)) as usize
+}
+
+/// Word-wrap text to lines of at most `max_chars` characters.
+/// Splits on existing newlines first, then wraps each paragraph at word boundaries.
+/// Falls back to character-level splitting for "words" that exceed `max_chars`
+/// (e.g. compact JSON strings with no whitespace).
+fn word_wrap(text: &str, max_chars: usize) -> Vec<String> {
+    if max_chars == 0 {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let trimmed = paragraph.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut current = String::new();
+        for word in trimmed.split_whitespace() {
+            if current.is_empty() {
+                // First word — if it's too long, split at character boundaries
+                if word.chars().count() > max_chars {
+                    char_split(word, max_chars, &mut lines);
+                } else {
+                    current = word.to_string();
+                }
+            } else if current.chars().count() + 1 + word.chars().count() <= max_chars {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(current);
+                current = String::new();
+                // New word might also be too long
+                if word.chars().count() > max_chars {
+                    char_split(word, max_chars, &mut lines);
+                } else {
+                    current = word.to_string();
+                }
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// Split a long string at character boundaries into chunks of `max_chars`.
+fn char_split(text: &str, max_chars: usize, lines: &mut Vec<String>) {
+    let mut chars = text.chars().peekable();
+    while chars.peek().is_some() {
+        let chunk: String = chars.by_ref().take(max_chars).collect();
+        lines.push(chunk);
+    }
+}
+
+/// Expand a label+value pair into wrapped MetaLines that fit within `max_chars`.
+/// Short values stay on the same line as the label.
+/// Long values: label on its own line (empty value), then wrapped value lines below.
+fn wrap_to_meta_lines(label: &str, value: &str, max_chars: usize) -> Vec<MetaLine> {
+    let label_prefix = if label.is_empty() {
+        0
+    } else {
+        label.chars().count() + 2 // "label: "
+    };
+    let first_avail = max_chars.saturating_sub(label_prefix);
+
+    // Fits on one line with label
+    if value.chars().count() <= first_avail && !value.contains('\n') {
+        return vec![MetaLine {
+            label: label.into(),
+            value: value.into(),
+        }];
+    }
+
+    // Long value: label alone on first line, then wrapped value lines
+    let mut result = vec![MetaLine {
+        label: label.into(),
+        value: String::new(),
+    }];
+    for line in word_wrap(value, max_chars) {
+        result.push(MetaLine {
+            label: String::new(),
+            value: line,
+        });
+    }
+    result
+}
+
+/// Render the header for the doc-state SVG (similar to render_header but for a single doc).
+fn render_doc_header(svg: &mut String, doc: &DocStateView, _total_width: f64) {
+    let x = PADDING;
+
+    svg.push_str(&format!(
+        r#"<text x="{x}" y="{y}" fill="{DRIVE_ACCENT}" font-size="20" font-weight="700">Switchboard</text>"#,
+        y = PADDING + 6.0,
+    ));
+
+    if let Some(ref url) = doc.url {
+        svg.push_str(&format!(
+            r#"<text x="{x}" y="{y}" fill="{TEXT_SECONDARY}" font-size="12">{url}</text>"#,
+            y = PADDING + 28.0,
+            url = escape_xml(url),
+        ));
+    }
+
+    let caption = match doc.profile {
+        Some(ref p) => format!("Document state for profile '{p}'"),
+        None => "Document state".into(),
+    };
+    svg.push_str(&format!(
+        r#"<text x="{x}" y="{y}" fill="{TEXT_TERTIARY}" font-size="11">{caption}</text>"#,
+        y = PADDING + 46.0,
+        caption = escape_xml(&caption),
+    ));
+
+    svg.push_str(&format!(
+        r#"<line x1="{x}" y1="{y}" x2="99%" y2="{y}" stroke="{BORDER_COLOR}" stroke-width="1"/>"#,
+        y = PADDING + 60.0,
+    ));
+}
+
+/// Render a card background rectangle with accent bar.
+fn render_state_card_rect(
+    svg: &mut String,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    accent: &str,
+    top_accent: bool,
+) {
+    svg.push_str(&format!(
+        r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{CORNER_RADIUS}" fill="{SURFACE_COLOR}" stroke="{BORDER_COLOR}"/>"#,
+    ));
+    if top_accent {
+        svg.push_str(&format!(
+            r#"<rect x="{x}" y="{y}" width="{w}" height="{ACCENT_BAR_W}" rx="{CORNER_RADIUS}" fill="{accent}"/>"#,
+        ));
+    } else {
+        svg.push_str(&format!(
+            r#"<rect x="{x}" y="{y}" width="{ACCENT_BAR_W}" height="{h}" rx="2" fill="{accent}"/>"#,
+        ));
+    }
+}
+
+/// Render text inside a card (title + meta lines).
+fn render_state_card_text(
+    svg: &mut String,
+    x: f64,
+    y: f64,
+    title: &str,
+    lines: &[MetaLine],
+    top_accent: bool,
+) {
+    let text_x = if top_accent {
+        x + DRIVE_PAD_X
+    } else {
+        x + CHILD_PAD_X
+    };
+
+    svg.push_str(&format!(
+        r#"<text x="{text_x}" y="{ty}" fill="{TEXT_PRIMARY}" font-size="{TITLE_FONT}" font-weight="600">{label}</text>"#,
+        ty = y + TITLE_Y,
+        label = escape_xml(title),
+    ));
+
+    let mut line_y = y + FIRST_META_Y;
+    for ml in lines {
+        if ml.label.is_empty() {
+            // Value-only line
+            svg.push_str(&format!(
+                r#"<text x="{text_x}" y="{line_y}" font-size="{META_FONT}" fill="{TEXT_SECONDARY}">{value}</text>"#,
+                value = escape_xml(&ml.value),
+            ));
+        } else {
+            svg.push_str(&format!(
+                r#"<text x="{text_x}" y="{line_y}" font-size="{META_FONT}"><tspan fill="{TEXT_TERTIARY}">{label}: </tspan><tspan fill="{TEXT_SECONDARY}">{value}</tspan></text>"#,
+                label = escape_xml(&ml.label),
+                value = escape_xml(&ml.value),
+            ));
+        }
+        line_y += LINE_H;
+    }
+}
+
+/// Recursively render a state card and all its children.
+fn render_state_card_tree(svg: &mut String, card: &StateCard) {
+    // Card background
+    let is_root_state = card.accent == STATE_ACCENT;
+    render_state_card_rect(
+        svg,
+        card.x,
+        card.y,
+        card.width,
+        card.height,
+        card.accent,
+        is_root_state,
+    );
+    render_state_card_text(svg, card.x, card.y, &card.title, &card.lines, is_root_state);
+
+    // Children
+    for child in &card.children {
+        render_state_card_tree(svg, child);
+    }
 }
 
 #[cfg(test)]

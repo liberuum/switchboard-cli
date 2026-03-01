@@ -164,7 +164,7 @@ switchboard import ./backup/*.phd --drive another-drive
 | Command | Description |
 |---------|-------------|
 | `switchboard docs list [--drive <slug>]` | List documents (all drives, or filtered by `--drive`; add `--type` to filter) |
-| `switchboard docs get <id-or-name> [--drive <slug>] [--state]` | Get document details (auto-detects drive; `--state` includes full state) |
+| `switchboard docs get <id-or-name> [--drive <slug>] [--state] [--out <file>]` | Get document details (auto-detects drive; `--state` includes full state) |
 | `switchboard docs tree [--drive <slug>]` | Hierarchical folder/file view (interactive drive picker if omitted) |
 | `switchboard docs create` | Interactive creation with drive picker (or pass `--type`, `--name`, `--drive`) |
 | `switchboard docs delete <ids-or-names...>` | Delete one or more documents (use `-y` to skip confirmation) |
@@ -237,7 +237,7 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard visualize --format png --out map.png` | Rasterized PNG diagram |
 | `switchboard visualize --format mermaid` | Mermaid flowchart markup (renders in GitHub, Notion) |
 
-Visual formats (`svg`, `png`, `mermaid`) are also available on `drives get` and `docs list` with `--out`.
+Visual formats (`svg`, `png`, `mermaid`) are also available on `drives get`, `docs list`, and `docs get` with `--out`. When used with `docs get`, renders the document's full state as a themed card diagram.
 
 ### Tools
 

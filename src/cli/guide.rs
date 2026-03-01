@@ -195,9 +195,10 @@ COMMANDS
 
   switchboard docs list --drive <slug> [--type <type>]
                                        List documents (optionally filter by type)
-  switchboard docs get <id> [--drive <slug>] [--state]
+  switchboard docs get <id> [--drive <slug>] [--state] [--out <file>]
                                        Get document metadata (searches all drives if --drive omitted)
                                        Use --state to include the full document state
+                                       Use --format svg|png with --out to render state as a themed diagram
   switchboard docs tree --drive <slug>
                                        Hierarchical folder/file view
   switchboard docs create              Interactive document creation
@@ -542,7 +543,7 @@ GLOBAL FLAGS
   --format table     Human-readable table (default for TTY)
   --format json      Machine-readable JSON (default for pipes)
   --format raw       Raw GraphQL response as-is
-  --format svg       SVG diagram (visualize, drives get, docs list)
+  --format svg       SVG diagram (visualize, drives get, docs list, docs get)
   --format png       PNG diagram (requires --out for TTY)
   --format mermaid   Mermaid flowchart markup
   --quiet            Suppress extra output (headers, decorations)
@@ -663,6 +664,7 @@ VISUAL FORMATS ON OTHER COMMANDS
 
   switchboard drives get <slug> --format svg --out drive.svg
   switchboard docs list --drive <slug> --format mermaid --out docs.mmd
+  switchboard docs get <id> --drive <slug> --format png --out doc.png
 
 THEME (SVG/PNG)
 
@@ -712,7 +714,7 @@ DRIVES
 
 DOCUMENTS
   docs list --drive <id>        List documents
-  docs get <id> [--drive] [--state]  Get document metadata
+  docs get <id> [--drive] [--state] [--out]  Get document metadata
   docs tree --drive <id>        Hierarchical tree view
   docs create                   Create a document
   docs delete <ids...> [-y]     Delete one or more documents

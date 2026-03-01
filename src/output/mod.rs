@@ -8,7 +8,7 @@ pub mod tree;
 pub use json::print_json;
 pub use mermaid::render_mermaid;
 pub use table::print_table;
-pub use tree::{DriveTree, TreeEntry, build_drive_tree};
+pub use tree::{DocStateView, DriveTree, TreeEntry, build_drive_tree};
 
 use std::io::IsTerminal;
 

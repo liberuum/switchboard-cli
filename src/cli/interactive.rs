@@ -371,7 +371,13 @@ impl Completer for ReplHelper {
                         return Ok((word_start, matches));
                     }
                 } else {
-                    let matches = filter_doc_pairs(&self.doc_ids, &self.doc_labels, partial);
+                    let matches = hierarchical_doc_pairs(
+                        &self.drive_slugs,
+                        &self.doc_ids,
+                        &self.doc_labels,
+                        &self.doc_drive_slugs,
+                        partial,
+                    );
                     if !matches.is_empty() {
                         return Ok((word_start, matches));
                     }

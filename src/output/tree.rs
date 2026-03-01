@@ -2,6 +2,25 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// A single document with its parsed state, for visual rendering.
+#[derive(Debug, Clone, Serialize)]
+pub struct DocStateView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive: Option<String>,
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+    pub document_type: String,
+    pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<Value>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DriveTree {
     /// The Switchboard GraphQL endpoint URL.
