@@ -309,10 +309,13 @@ async fn create(
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(drive),
         _ => {
+            let slug = drive["slug"].as_str().unwrap_or("-");
+            let base = helpers::base_url_from(&client.url);
             println!("{} Drive created", "✓".green());
             println!("  ID:   {}", drive["id"].as_str().unwrap_or("-"));
-            println!("  Slug: {}", drive["slug"].as_str().unwrap_or("-"));
+            println!("  Slug: {}", slug);
             println!("  Name: {}", drive["name"].as_str().unwrap_or("-"));
+            println!("  URL:  {}/d/{}", base, slug);
         }
     }
 
