@@ -188,16 +188,35 @@ async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bo
             continue;
         }
 
-        // Build folder hierarchy: id -> name mapping, and parent lookup
-        let folders: std::collections::HashMap<&str, &str> = nodes
+        // Build folder lookup: id -> (name, parentFolder)
+        let folder_map: std::collections::HashMap<&str, (&str, &str)> = nodes
             .iter()
             .filter(|n| n["kind"].as_str() == Some("folder"))
             .filter_map(|n| {
                 let id = n["id"].as_str()?;
                 let name = n["name"].as_str()?;
-                Some((id, name))
+                let parent = n["parentFolder"].as_str().unwrap_or("");
+                Some((id, (name, parent)))
             })
             .collect();
+
+        // Build full relative path for a folder id by walking up the parent chain
+        fn folder_path(
+            id: &str,
+            map: &std::collections::HashMap<&str, (&str, &str)>,
+        ) -> std::path::PathBuf {
+            let mut parts = vec![];
+            let mut current = id;
+            while let Some(&(name, parent)) = map.get(current) {
+                parts.push(sanitize_filename(name));
+                current = parent;
+                if current.is_empty() {
+                    break;
+                }
+            }
+            parts.reverse();
+            parts.iter().collect()
+        }
 
         let drive_dir = base_path.join(sanitize_filename(drive_slug));
         std::fs::create_dir_all(&drive_dir)?;
@@ -210,12 +229,14 @@ async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bo
             let file_name = file_node["name"].as_str().unwrap_or("document");
             let file_type = file_node["documentType"].as_str().unwrap_or("unknown");
 
-            // Determine folder path for this file
+            // Determine folder path for this file (supports arbitrary nesting depth)
             let mut file_dir = drive_dir.clone();
             if let Some(parent_id) = file_node["parentFolder"].as_str()
-                && let Some(folder_name) = folders.get(parent_id)
+                && !parent_id.is_empty()
+                && folder_map.contains_key(parent_id)
             {
-                let folder_dir = drive_dir.join(sanitize_filename(folder_name));
+                let rel = folder_path(parent_id, &folder_map);
+                let folder_dir = drive_dir.join(rel);
                 std::fs::create_dir_all(&folder_dir)?;
                 file_dir = folder_dir;
             }
