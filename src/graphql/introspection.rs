@@ -22,26 +22,6 @@ const INTROSPECTION_QUERY: &str = r#"{
         }
       }
     }
-    queryType {
-      fields {
-        name
-        type {
-          name
-          kind
-          fields {
-            name
-            args {
-              name
-              type {
-                name
-                kind
-                ofType { name kind ofType { name kind ofType { name kind } } }
-              }
-            }
-          }
-        }
-      }
-    }
   }
 }"#;
 
@@ -65,8 +45,6 @@ pub struct DocumentModel {
     pub document_type: String,
     pub create_mutation: String,
     pub operations: Vec<ModelOperation>,
-    /// Query namespace fields (e.g., getDocuments, getDocument)
-    pub query_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -129,7 +107,6 @@ pub async fn run_introspection(client: &GraphQLClient) -> Result<IntrospectionCa
                             operation: "createDocument".to_string(),
                             args,
                         }],
-                        query_fields: Vec::new(),
                     },
                 );
             }
@@ -151,32 +128,6 @@ pub async fn run_introspection(client: &GraphQLClient) -> Result<IntrospectionCa
                         operation: op_name.to_string(),
                         args,
                     });
-                    break;
-                }
-            }
-        }
-    }
-
-    // Parse query type to find model-specific query namespaces
-    if let Some(fields) = data
-        .pointer("/__schema/queryType/fields")
-        .and_then(|v| v.as_array())
-    {
-        for field in fields {
-            let name = field["name"].as_str().unwrap_or_default();
-            // Check if this is a model namespace (e.g., "Invoice", "BuilderProfile")
-            for model in models.values_mut() {
-                if name == model.prefix {
-                    // Extract sub-fields like getDocuments, getDocument
-                    if let Some(sub_fields) =
-                        field.pointer("/type/fields").and_then(|v| v.as_array())
-                    {
-                        for sub_field in sub_fields {
-                            if let Some(sub_name) = sub_field["name"].as_str() {
-                                model.query_fields.push(sub_name.to_string());
-                            }
-                        }
-                    }
                     break;
                 }
             }

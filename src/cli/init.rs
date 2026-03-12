@@ -50,30 +50,65 @@ pub async fn run() -> Result<()> {
 
     // Test connection
     println!("Connecting to {url}...");
-    let client = GraphQLClient::new(url.clone(), token.clone());
-    let data = client.query("{ drives }", None).await;
+    let mut token = token;
+    let mut client = GraphQLClient::new(url.clone(), token.clone());
+    let test_query = r#"{ findDocuments(search: { type: "powerhouse/document-drive" }, paging: { limit: 1 }) { totalCount } }"#;
+    let data = client.query(test_query, None).await;
 
     match data {
         Ok(d) => {
-            let drive_count = d
-                .get("drives")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
+            let count = d
+                .pointer("/findDocuments/totalCount")
+                .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            println!("{} Connected. {drive_count} drives found.", "✓".green());
+            println!("{} Connected. {count} documents found.", "✓".green());
         }
         Err(e) => {
-            eprintln!("{} Connection failed: {e}", "✗".red());
-            let proceed = Confirm::new()
-                .with_prompt("Save profile anyway?")
-                .default(false)
-                .interact()?;
-            if !proceed {
-                return Ok(());
+            let err_str = format!("{e:#}");
+            // If we get Forbidden and no token was provided, prompt for one and retry
+            if (err_str.contains("Forbidden") || err_str.contains("forbidden"))
+                && !client.has_token()
+            {
+                eprintln!("{} Server requires authentication.", "⚠".yellow());
+                let retry_token: String = Input::new()
+                    .with_prompt("Bearer token")
+                    .interact_text()?;
+                let retry_token = strip_terminal_escapes(&retry_token);
+                if !retry_token.is_empty() {
+                    token = Some(retry_token);
+                    client = GraphQLClient::new(url.clone(), token.clone());
+                    match client.query(test_query, None).await {
+                        Ok(d) => {
+                            let count = d
+                                .pointer("/findDocuments/totalCount")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            println!("{} Connected. {count} documents found.", "✓".green());
+                        }
+                        Err(e2) => {
+                            eprintln!("{} Connection still failed: {e2}", "✗".red());
+                            let proceed = Confirm::new()
+                                .with_prompt("Save profile anyway?")
+                                .default(false)
+                                .interact()?;
+                            if !proceed {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            } else {
+                eprintln!("{} Connection failed: {e}", "✗".red());
+                let proceed = Confirm::new()
+                    .with_prompt("Save profile anyway?")
+                    .default(false)
+                    .interact()?;
+                if !proceed {
+                    return Ok(());
+                }
             }
         }
     }
-
     // Run introspection
     println!("Introspecting schema...");
     match run_introspection(&client).await {

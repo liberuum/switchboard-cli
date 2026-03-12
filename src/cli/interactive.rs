@@ -66,6 +66,11 @@ impl ReplHelper {
             "docs tree --drive ".into(),
             "docs create".into(),
             "docs delete ".into(),
+            "docs rename ".into(),
+            "docs parents ".into(),
+            "docs add-to ".into(),
+            "docs remove-from ".into(),
+            "docs move --from ".into(),
             "docs mutate ".into(),
             // Models
             "models list".into(),
@@ -82,21 +87,6 @@ impl ReplHelper {
             "auth logout".into(),
             "auth status".into(),
             "auth token".into(),
-            // Access
-            "access show ".into(),
-            "access grant ".into(),
-            "access revoke ".into(),
-            "access grant-group ".into(),
-            "access revoke-group ".into(),
-            "access ops ".into(),
-            // Groups
-            "groups list".into(),
-            "groups get ".into(),
-            "groups create ".into(),
-            "groups delete ".into(),
-            "groups add-user ".into(),
-            "groups remove-user ".into(),
-            "groups user-groups ".into(),
             // Export / Import
             "export all".into(),
             "export all --out ".into(),
@@ -123,6 +113,12 @@ impl ReplHelper {
             "visualize --format svg --out ".into(),
             "visualize --format png --out ".into(),
             "visualize --format mermaid".into(),
+            // Analytics
+            "analytics metrics".into(),
+            "analytics dimensions".into(),
+            "analytics currencies".into(),
+            "analytics series".into(),
+            "analytics series --start ".into(),
             // Other
             "query ".into(),
             "schema".into(),
@@ -146,7 +142,6 @@ impl ReplHelper {
             "docs".into(),
             "import-export".into(),
             "auth".into(),
-            "permissions".into(),
             "watch".into(),
             "jobs".into(),
             "sync".into(),
@@ -338,10 +333,6 @@ impl Completer for ReplHelper {
             || input.starts_with("docs delete ")
             || input.starts_with("docs mutate ")
             || input.starts_with("export doc ")
-            || input.starts_with("access show ")
-            || input.starts_with("access grant ")
-            || input.starts_with("access revoke ")
-            || input.starts_with("access ops ")
         {
             let drive_filter = words_before
                 .windows(2)
@@ -572,7 +563,7 @@ fn shell_split(input: &str) -> Vec<String> {
 async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEntry> {
     let data = match client
         .query(
-            r#"{ driveDocuments { id name slug state { nodes { ... on DocumentDrive_FileNode { id name kind documentType } } } } }"#,
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id slug } } }"#,
             None,
         )
         .await
@@ -582,7 +573,7 @@ async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEnt
     };
 
     let drives = data
-        .get("driveDocuments")
+        .pointer("/findDocuments/items")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
@@ -590,45 +581,26 @@ async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEnt
     let mut docs = Vec::new();
     for drv in &drives {
         let drv_slug = drv["slug"].as_str().unwrap_or("").to_string();
-        let nodes = drv
-            .pointer("/state/nodes")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let drv_id = drv["id"].as_str().unwrap_or("");
+        if drv_id.is_empty() {
+            continue;
+        }
 
-        if nodes.is_empty() {
-            let drive_id = drv["id"].as_str().unwrap_or("");
-            if !drive_id.is_empty() {
-                let q = format!(
-                    r#"{{ driveDocument(idOrSlug: "{drive_id}") {{ state {{ nodes {{ ... on DocumentDrive_FileNode {{ id name kind documentType }} }} }} }} }}"#
-                );
-                if let Ok(d) = client.query(&q, None).await
-                    && let Some(n) = d
-                        .pointer("/driveDocument/state/nodes")
-                        .and_then(|v| v.as_array())
-                {
-                    for node in n {
-                        if node["kind"].as_str() == Some("file") {
-                            docs.push(DocEntry {
-                                id: node["id"].as_str().unwrap_or("").to_string(),
-                                name: node["name"].as_str().unwrap_or("").to_string(),
-                                doc_type: node["documentType"].as_str().unwrap_or("").to_string(),
-                                drive_slug: drv_slug.clone(),
-                            });
-                        }
-                    }
-                }
-            }
-        } else {
-            for node in &nodes {
-                if node["kind"].as_str() == Some("file") {
-                    docs.push(DocEntry {
-                        id: node["id"].as_str().unwrap_or("").to_string(),
-                        name: node["name"].as_str().unwrap_or("").to_string(),
-                        doc_type: node["documentType"].as_str().unwrap_or("").to_string(),
-                        drive_slug: drv_slug.clone(),
-                    });
-                }
+        let children_query = format!(
+            r#"{{ documentChildren(parentIdentifier: "{drv_id}") {{ items {{ id name documentType }} }} }}"#
+        );
+        if let Ok(cd) = client.query(&children_query, None).await
+            && let Some(items) = cd
+                .pointer("/documentChildren/items")
+                .and_then(|v| v.as_array())
+        {
+            for node in items {
+                docs.push(DocEntry {
+                    id: node["id"].as_str().unwrap_or("").to_string(),
+                    name: node["name"].as_str().unwrap_or("").to_string(),
+                    doc_type: node["documentType"].as_str().unwrap_or("").to_string(),
+                    drive_slug: drv_slug.clone(),
+                });
             }
         }
     }
@@ -655,9 +627,15 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
     let spinner = spawn_spinner("Loading...");
 
     // Fetch drive slugs for tab completion
-    let drive_slugs: Vec<String> = match client.query("{ driveDocuments { slug } }", None).await {
+    let drive_slugs: Vec<String> = match client
+        .query(
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { slug } } }"#,
+            None,
+        )
+        .await
+    {
         Ok(data) => data
-            .get("driveDocuments")
+            .pointer("/findDocuments/items")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
@@ -774,6 +752,10 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                         // Check if this command modifies docs (for refreshing completions)
                         let modifies_docs = line.starts_with("docs create")
                             || line.starts_with("docs delete")
+                            || line.starts_with("docs rename")
+                            || line.starts_with("docs add-to")
+                            || line.starts_with("docs remove-from")
+                            || line.starts_with("docs move")
                             || line.starts_with("docs mutate")
                             || line.starts_with("import ");
 
@@ -812,9 +794,12 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                                 let spinner = spawn_spinner("Loading profile data...");
 
                                 let new_slugs: Vec<String> =
-                                    match client.query("{ driveDocuments { slug } }", None).await {
+                                    match client.query(
+                                        r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { slug } } }"#,
+                                        None,
+                                    ).await {
                                         Ok(data) => data
-                                            .get("driveDocuments")
+                                            .pointer("/findDocuments/items")
                                             .and_then(|v| v.as_array())
                                             .map(|arr| {
                                                 arr.iter()
@@ -917,10 +902,6 @@ fn print_repl_help() {
     eprintln!("  Configuration:");
     eprintln!("    config   list | show | use | remove");
     eprintln!("    auth     login | logout | status | token");
-    eprintln!();
-    eprintln!("  Permissions:");
-    eprintln!("    access   show | grant | revoke | grant-group | revoke-group | ops");
-    eprintln!("    groups   list | get | create | delete | add-user | remove-user");
     eprintln!();
     eprintln!("  Import / Export:");
     eprintln!("    export   all | drive | doc");

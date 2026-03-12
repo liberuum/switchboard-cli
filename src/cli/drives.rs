@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL};
 
-use crate::cli::helpers::{self, resolve_drive_id};
+use crate::cli::helpers;
 use crate::output::{self, OutputFormat, print_json, print_table};
 
 #[derive(Subcommand)]
@@ -73,13 +73,13 @@ async fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
 
     let data = client
         .query(
-            "{ driveDocuments { id name slug documentType revision meta { preferredEditor } } }",
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name slug documentType state } } }"#,
             None,
         )
         .await?;
 
     let drives = data
-        .get("driveDocuments")
+        .pointer("/findDocuments/items")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
@@ -94,20 +94,14 @@ async fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
             let rows: Vec<Vec<String>> = drives
                 .iter()
                 .map(|d| {
-                    let editor = d
-                        .pointer("/meta/preferredEditor")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("-");
                     vec![
                         d["id"].as_str().unwrap_or("-").to_string(),
                         d["name"].as_str().unwrap_or("-").to_string(),
                         d["slug"].as_str().unwrap_or("-").to_string(),
-                        editor.to_string(),
                     ]
                 })
                 .collect();
-            print_table(&["ID", "Name", "Slug", "Editor"], &rows);
+            print_table(&["ID", "Name", "Slug"], &rows);
         }
     }
 
@@ -123,33 +117,21 @@ async fn get(
     let (name, _profile, client) = helpers::setup(profile_name)?;
 
     let query = format!(
-        r#"{{
-  driveDocument(idOrSlug: "{id}") {{
-    id name slug revision documentType
-    meta {{ preferredEditor }}
-    state {{
-      name icon
-      nodes {{
-        ... on DocumentDrive_FileNode {{ id name kind documentType parentFolder }}
-        ... on DocumentDrive_FolderNode {{ id name kind parentFolder }}
-      }}
-    }}
-  }}
-}}"#,
+        r#"{{ document(identifier: "{id}") {{ document {{ id name slug documentType state revisionsList {{ scope revision }} }} childIds }} }}"#,
         id = id.replace('"', r#"\""#)
     );
 
     let data = client.query(&query, None).await?;
-    let drive = &data["driveDocument"];
+    let doc = &data["document"]["document"];
 
     // Handle visual formats (SVG/PNG/Mermaid)
     if format.is_visual() {
-        let nodes = drive
-            .pointer("/state/nodes")
+        let nodes = doc
+            .pointer("/state/global/nodes")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        let drive_data = vec![(drive.clone(), nodes)];
+        let drive_data = vec![(doc.clone(), nodes)];
         let revisions = std::collections::HashMap::new();
         let mut tree = output::build_drive_tree(&drive_data, &revisions);
         tree.url = Some(client.url.clone());
@@ -177,25 +159,35 @@ async fn get(
     }
 
     match format {
-        OutputFormat::Json | OutputFormat::Raw => print_json(drive),
+        OutputFormat::Json | OutputFormat::Raw => print_json(doc),
         _ => {
-            println!("ID:       {}", drive["id"].as_str().unwrap_or("-"));
-            println!("Name:     {}", drive["name"].as_str().unwrap_or("-"));
-            println!("Slug:     {}", drive["slug"].as_str().unwrap_or("-"));
-            println!("Revision: {}", drive["revision"]);
+            println!("ID:       {}", doc["id"].as_str().unwrap_or("-"));
+            println!("Name:     {}", doc["name"].as_str().unwrap_or("-"));
+            println!("Slug:     {}", doc["slug"].as_str().unwrap_or("-"));
+            // Show revision from revisionsList
+            if let Some(revisions) = doc["revisionsList"].as_array() {
+                let rev_str: Vec<String> = revisions
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{}:{}",
+                            r["scope"].as_str().unwrap_or("?"),
+                            r["revision"].as_u64().unwrap_or(0)
+                        )
+                    })
+                    .collect();
+                println!("Revision: {}", rev_str.join(", "));
+            }
             println!(
                 "Type:     {}",
-                drive["documentType"].as_str().unwrap_or("-")
+                doc["documentType"].as_str().unwrap_or("-")
             );
-            let editor = drive
-                .pointer("/meta/preferredEditor")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or("-");
-            println!("Editor:   {}", editor);
 
-            // Show contents as a tree with metadata
-            if let Some(nodes) = drive.pointer("/state/nodes").and_then(|v| v.as_array()) {
+            // Show contents as a tree with metadata from state.global.nodes
+            if let Some(nodes) = doc
+                .pointer("/state/global/nodes")
+                .and_then(|v| v.as_array())
+            {
                 let files = nodes
                     .iter()
                     .filter(|n| n["kind"].as_str() == Some("file"))
@@ -220,9 +212,9 @@ async fn get(
 async fn create(
     name: Option<String>,
     slug: Option<String>,
-    id: Option<String>,
+    _id: Option<String>,
     icon: Option<String>,
-    preferred_editor: Option<String>,
+    _preferred_editor: Option<String>,
     format: OutputFormat,
     profile_name: Option<&str>,
 ) -> Result<()> {
@@ -236,33 +228,26 @@ async fn create(
         None => Input::new().with_prompt("Drive name").interact_text()?,
     };
 
-    let default_slug = name
-        .to_lowercase()
-        .replace(' ', "-")
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect::<String>();
-
-    let slug = match slug {
+    let _slug = match slug {
         Some(s) => s,
-        None if interactive => Input::new()
-            .with_prompt("Slug")
-            .default(default_slug)
-            .interact_text()?,
-        None => default_slug,
-    };
-
-    let id = match id {
-        Some(i) if !i.is_empty() => Some(i),
-        Some(_) => None,
         None if interactive => {
-            let i: String = Input::new()
-                .with_prompt("Custom ID (optional, press Enter for auto-generated UUID)")
-                .default(String::new())
-                .interact_text()?;
-            if i.is_empty() { None } else { Some(i) }
+            let default_slug = name
+                .to_lowercase()
+                .replace(' ', "-")
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect::<String>();
+            Input::new()
+                .with_prompt("Slug")
+                .default(default_slug)
+                .interact_text()?
         }
-        None => None,
+        None => name
+            .to_lowercase()
+            .replace(' ', "-")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect::<String>(),
     };
 
     let icon = match icon {
@@ -278,33 +263,35 @@ async fn create(
         None => None,
     };
 
-    let preferred_editor = match preferred_editor {
-        Some(e) if !e.is_empty() => Some(e),
-        Some(_) => None,
-        None if interactive => pick_preferred_editor(&client).await?,
-        None => None,
-    };
+    // Step 1: Create drive document
+    let create_mutation = format!(
+        r#"mutation {{ DocumentDrive_createDocument(name: "{name}") {{ id slug name }} }}"#,
+        name = name.replace('"', r#"\""#)
+    );
+    let create_data = client.query(&create_mutation, None).await?;
+    let drive = &create_data["DocumentDrive_createDocument"];
+    let doc_id = drive["id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("No id returned from create"))?;
 
-    // Build mutation — only include non-empty optional fields
-    let mut args = format!(r#"name: "{name}""#);
-    if !slug.is_empty() {
-        args.push_str(&format!(r#", slug: "{slug}""#));
-    }
-    if let Some(ref id) = id {
-        args.push_str(&format!(r#", id: "{id}""#));
-    }
-    if let Some(ref icon) = icon {
-        args.push_str(&format!(r#", icon: "{icon}""#));
-    }
-    if let Some(ref editor) = preferred_editor {
-        args.push_str(&format!(r#", preferredEditor: "{editor}""#));
-    }
+    // Step 2: Set drive name via DocumentDrive_setDriveName
+    let set_name_mutation = format!(
+        r#"mutation {{ DocumentDrive_setDriveName(docId: "{doc_id}", input: {{ name: "{name}" }}) {{ id name slug }} }}"#,
+        doc_id = doc_id.replace('"', r#"\""#),
+        name = name.replace('"', r#"\""#),
+    );
+    let name_data = client.query(&set_name_mutation, None).await?;
+    let drive = &name_data["DocumentDrive_setDriveName"];
 
-    let mutation =
-        format!(r#"mutation {{ addDrive({args}) {{ id slug name icon preferredEditor }} }}"#);
-
-    let data = client.query(&mutation, None).await?;
-    let drive = &data["addDrive"];
+    // Step 3: Optionally set icon
+    if let Some(ref icon_url) = icon {
+        let icon_mutation = format!(
+            r#"mutation {{ DocumentDrive_setDriveIcon(docId: "{doc_id}", input: {{ icon: "{icon}" }}) {{ id }} }}"#,
+            doc_id = doc_id.replace('"', r#"\""#),
+            icon = icon_url.replace('"', r#"\""#),
+        );
+        client.query(&icon_mutation, None).await?;
+    }
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(drive),
@@ -312,7 +299,7 @@ async fn create(
             let slug = drive["slug"].as_str().unwrap_or("-");
             let base = helpers::base_url_from(&client.url);
             println!("{} Drive created", "✓".green());
-            println!("  ID:   {}", drive["id"].as_str().unwrap_or("-"));
+            println!("  ID:   {}", drive["id"].as_str().unwrap_or(doc_id));
             println!("  Slug: {}", slug);
             println!("  Name: {}", drive["name"].as_str().unwrap_or("-"));
             println!("  URL:  {}/d/{}", base, slug);
@@ -322,71 +309,14 @@ async fn create(
     Ok(())
 }
 
-/// Discover available drive editors by querying existing drives for their
-/// `meta.preferredEditor` values, then present a picker.
-async fn pick_preferred_editor(client: &crate::graphql::GraphQLClient) -> Result<Option<String>> {
-    // Query existing drives for their preferredEditor metadata
-    let mut editors: Vec<String> = Vec::new();
-
-    if let Ok(data) = client
-        .query("{ driveDocuments { meta { preferredEditor } } }", None)
-        .await
-        && let Some(drives) = data.get("driveDocuments").and_then(|v| v.as_array())
-    {
-        for d in drives {
-            if let Some(editor) = d
-                .pointer("/meta/preferredEditor")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                && !editors.contains(&editor.to_string())
-            {
-                editors.push(editor.to_string());
-            }
-        }
-    }
-
-    let mut options = vec!["None (general purpose drive)".to_string()];
-    for editor in &editors {
-        options.push(editor.clone());
-    }
-    options.push("Custom (enter manually)".to_string());
-
-    let selection = dialoguer::Select::new()
-        .with_prompt("Drive type")
-        .items(&options)
-        .default(0)
-        .interact()?;
-
-    if selection == 0 {
-        // None
-        Ok(None)
-    } else if selection == options.len() - 1 {
-        // Custom — free text input
-        let e: String = Input::new().with_prompt("Editor ID").interact_text()?;
-        if e.is_empty() { Ok(None) } else { Ok(Some(e)) }
-    } else {
-        Ok(Some(editors[selection - 1].clone()))
-    }
-}
-
 async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    // Resolve all slugs to UUIDs up front
-    let mut uuids = Vec::with_capacity(ids.len());
-    for id in ids {
-        let uuid = resolve_drive_id(&client, id).await?;
-        if id != &uuid {
-            println!("Resolved slug \"{}\" → UUID {}", id, &uuid[..12]);
-        }
-        uuids.push(uuid);
-    }
-
     if !skip_confirm {
-        let label = if uuids.len() == 1 {
-            format!("Delete drive {}?", uuids[0])
+        let label = if ids.len() == 1 {
+            format!("Delete drive {}?", ids[0])
         } else {
-            format!("Delete {} drives?", uuids.len())
+            format!("Delete {} drives?", ids.len())
         };
         let confirm = Confirm::new()
             .with_prompt(label)
@@ -398,21 +328,27 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
         }
     }
 
-    let mut failed = 0u32;
-    for uuid in &uuids {
-        let mutation = format!(r#"mutation {{ deleteDrive(id: "{uuid}") }}"#);
-        match client.query(&mutation, None).await {
-            Ok(_) => println!("{} Deleted drive {uuid}", "✓".green()),
-            Err(e) => {
-                eprintln!("{} Failed to delete {uuid}: {e}", "✗".red());
-                failed += 1;
+    // Use batch deleteDocuments API
+    let id_list: String = ids
+        .iter()
+        .map(|id| format!("\"{}\"", id.replace('"', r#"\""#)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mutation = format!(
+        r#"mutation {{ deleteDocuments(identifiers: [{id_list}], propagate: CASCADE) }}"#
+    );
+
+    match client.query(&mutation, None).await {
+        Ok(_) => {
+            for id in ids {
+                println!("{} Deleted drive {id}", "✓".green());
             }
+        }
+        Err(e) => {
+            bail!("Failed to delete drives: {e}");
         }
     }
 
-    if failed > 0 {
-        bail!("{failed} of {} deletes failed", uuids.len());
-    }
     Ok(())
 }
 

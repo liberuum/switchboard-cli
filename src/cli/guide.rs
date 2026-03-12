@@ -98,8 +98,8 @@ KEY CONCEPTS
   .phd files   ZIP archives containing document data for backup/transfer
 
 Use `switchboard guide <topic>` for detailed help on any area.
-Available topics: config, drives, docs, import-export, auth, permissions,
-                  watch, jobs, sync, interactive, output, visualize, graphql, commands"#
+Available topics: config, drives, docs, import-export, auth, watch,
+                  jobs, sync, interactive, output, visualize, graphql, commands"#
     );
 }
 
@@ -172,8 +172,8 @@ DRIVE CREATION (all flags)
 
 SLUG RESOLUTION
 
-  Most commands accept either a drive UUID or a slug. The CLI automatically
-  resolves slugs to UUIDs using the `driveIdBySlug` query.
+  Most commands accept either a drive UUID or a slug. The API's
+  `document(identifier)` query accepts both formats directly.
 
 EXAMPLES
 
@@ -204,15 +204,36 @@ COMMANDS
   switchboard docs create              Interactive document creation
   switchboard docs create --type <type> --name <name> --drive <slug>
                                        Scripted creation
-  switchboard docs delete <ids...> [-y] Delete one or more documents
+  switchboard docs delete <ids...> [-y] Delete one or more documents (batch)
+  switchboard docs rename <id> <name>  Rename a document
+  switchboard docs parents <id>        Show parent documents (reverse tree traversal)
+
+HIERARCHY MANAGEMENT
+
+  switchboard docs add-to <parent> <ids...>
+                                       Add documents as children of a parent
+  switchboard docs remove-from <parent> <ids...>
+                                       Remove documents from a parent
+  switchboard docs move <ids...> --from <src> --to <dst>
+                                       Move documents between parents
 
 MUTATIONS
 
   switchboard docs mutate <doc-id> <operation> --input '<json>' --drive <slug>
+  switchboard docs mutate <doc-id> <operation> --input-file <file> --drive <slug>
   switchboard docs mutate <doc-id> --interactive --drive <slug>
 
   Operations are model-specific (discovered via introspection).
   E.g. for powerhouse/invoice: editInvoice, setStatus, addLineItem, etc.
+
+  --input-file <FILE>   Read input JSON from a file (use "-" for stdin).
+                         Bypasses shell escaping issues with special characters
+                         like \n, !, {{}}, etc. Ideal for AI agents and scripts
+                         that need to pass multiline content as JSON values.
+
+  Example:
+    switchboard docs mutate <doc-id> setStateSchema --input-file schema.json
+    echo '{{"schema": "type Foo {{\n  bar: String\n}}"}}' | switchboard docs mutate <doc-id> setStateSchema --input-file -
 
 OPERATIONS HISTORY
 
@@ -223,12 +244,26 @@ MODELS
   switchboard models list              List all document types
   switchboard models get <type>        Show operations for a type
 
+ANALYTICS
+
+  switchboard analytics metrics        List available metrics
+  switchboard analytics dimensions     List available dimensions
+  switchboard analytics currencies     List available currencies
+  switchboard analytics series [--start <date>] [--end <date>] [--granularity <g>] [--metrics <m>]
+                                       Query analytics time series
+
 EXAMPLES
 
   switchboard docs list --drive builders --type powerhouse/builder-profile
   switchboard docs get abc123 --state           # fetch metadata + state across all drives
   switchboard docs get abc123 --drive builders   # fetch metadata from a specific drive
-  switchboard docs mutate abc123 updateProfile --input '{{"name":"New"}}' --drive builders"#
+  switchboard docs rename abc123 "New Name"     # rename a document
+  switchboard docs parents abc123               # find parent drives/folders
+  switchboard docs add-to my-drive abc123       # add doc to a drive
+  switchboard docs move abc123 --from driveA --to driveB
+  switchboard docs mutate abc123 updateProfile --input '{{"name":"New"}}' --drive builders
+  switchboard analytics metrics                 # list all available metrics
+  switchboard analytics series --granularity total --metrics Budget"#
     );
 }
 
@@ -262,7 +297,7 @@ IMPORT
   Import flow:
   1. Reads header.json to determine document type and name
   2. Creates document via model-specific _createDocument mutation
-  3. Replays all operations via pushUpdates
+  3. Replays all operations via mutateDocument
   4. Verifies final state matches expected state
 
 EXAMPLES
@@ -319,38 +354,11 @@ fn print_permissions() {
     println!(
         r#"PERMISSIONS
 
-Switchboard supports fine-grained permissions at document and operation level,
-with both user-level and group-level grants.
+The access and groups commands have been removed in this version.
+Permission management is no longer available through the CLI.
 
-DOCUMENT PERMISSIONS
-
-  switchboard access show <doc-id>
-  switchboard access grant <doc-id> --user <addr> --level <read|write|admin>
-  switchboard access revoke <doc-id> --user <addr>
-  switchboard access grant-group <doc-id> --group <id> --level <read|write|admin>
-  switchboard access revoke-group <doc-id> --group <id>
-
-OPERATION-LEVEL PERMISSIONS
-
-  switchboard access ops show <doc-id> <operation-type>
-  switchboard access ops can-execute <doc-id> <operation-type>
-  switchboard access ops grant <doc-id> <op-type> --user <addr>
-  switchboard access ops revoke <doc-id> <op-type> --user <addr>
-  switchboard access ops grant-group <doc-id> <op-type> --group <id>
-  switchboard access ops revoke-group <doc-id> <op-type> --group <id>
-
-GROUPS
-
-  switchboard groups list                          List all groups
-  switchboard groups get <id>                      Get group with members
-  switchboard groups create --name <name>          Create a group
-  switchboard groups delete <id> [-y]              Delete a group
-  switchboard groups add-user <group-id> --user <addr>
-  switchboard groups remove-user <group-id> --user <addr>
-  switchboard groups user-groups <addr>            List groups for a user
-
-NOTE: Permission commands use the /graphql/auth subgraph when available,
-falling back to the main /graphql endpoint."#
+Use the Switchboard web UI or direct GraphQL queries if your instance
+supports permission management."#
     );
 }
 
@@ -471,7 +479,6 @@ USING THE REPL
   local> docs tree --drive my-drive
   local> docs create --type powerhouse/invoice --name "Q1" --drive my-drive
   local> auth status
-  local> access show <doc-id>
   local> export drive my-drive --out ./backup/
   local> ping
   local> info --format json
@@ -506,7 +513,7 @@ REPL-ONLY COMMANDS
 FEATURES
 
   - Full CLI parity — all commands work (drives, docs, models, auth,
-    access, groups, export, import, watch, jobs, sync, etc.)
+    export, import, watch, jobs, sync, etc.)
   - Tab completion for commands, drive slugs, model types, and guide topics
   - Hierarchical ops completion: ops [Tab] shows drives and docs,
     ops drive/[Tab] shows documents inside that drive
@@ -593,38 +600,41 @@ RAW QUERY
 
 API ENDPOINTS
 
-  /graphql          Main Apollo Gateway (all standard queries/mutations)
+  /graphql          Main GraphQL endpoint (all queries/mutations)
   /graphql/subscriptions  WebSocket endpoint for GraphQL subscriptions
-  /graphql/auth     Auth subgraph (permissions, groups)
 
 QUERY PATTERNS
 
-  # List drives
-  {{ driveDocuments {{ id name slug }} }}
+  # Find documents (with optional type filter)
+  {{ findDocuments(search: {{ type: "powerhouse/document-drive" }}) {{ items {{ id name slug }} totalCount }} }}
 
-  # Get drive with node tree
-  {{ driveDocument(idOrSlug: "my-drive") {{ id state {{ nodes {{ ... }} }} }} }}
+  # Get a document by ID or slug
+  {{ document(identifier: "my-doc") {{ document {{ id name slug documentType state }} }} }}
 
-  # Model-specific document queries
-  {{ Invoice {{ getDocuments(driveId: "uuid") {{ id name stateJSON }} }} }}
-  {{ BuilderProfile {{ getDocument(docId: "uuid", driveId: "uuid") {{ stateJSON }} }} }}
+  # Get children of a document/drive
+  {{ documentChildren(parentIdentifier: "my-drive") {{ items {{ id name slug documentType }} }} }}
+
+  # Get document operations
+  {{ documentOperations(filter: {{ documentId: "uuid" }}) {{ items {{ id index action {{ type input scope }} }} totalCount }} }}
 
 MUTATION PATTERNS
 
-  # Drive operations
-  mutation {{ addDrive(name: "test", slug: "test") {{ id }} }}
-  mutation {{ deleteDrive(id: "uuid") }}
+  # Generic document mutation
+  mutation {{ mutateDocument(documentIdentifier: "uuid", actions: [...]) }}
 
   # Model-specific mutations (discovered via introspection)
   mutation {{ Invoice_editInvoice(docId: "uuid", input: {{ amount: 2000 }}) }}
   mutation {{ BuilderProfile_updateProfile(docId: "uuid", input: {{ name: "New" }}) }}
 
-KEY QUIRKS
+  # Delete a document
+  mutation {{ deleteDocument(identifier: "uuid", propagate: CASCADE) }}
 
-  - deleteDrive requires UUID (not slug) — CLI auto-resolves
-  - _createDocument requires driveId as UUID — CLI auto-resolves
-  - Document state is always via stateJSON field (raw JSON)
-  - Model queries use namespace pattern: {{ ModelName {{ getDocument(...) }} }}"#
+KEY PATTERNS
+
+  - document(identifier) accepts both UUID and slug
+  - State is a JSONObject directly (not a stateJSON string)
+  - Drives are documents of type "powerhouse/document-drive"
+  - Use findDocuments with type filter to list drives"#
     );
 }
 
@@ -718,7 +728,7 @@ DOCUMENTS
   docs tree --drive <id>        Hierarchical tree view
   docs create                   Create a document
   docs delete <ids...> [-y]     Delete one or more documents
-  docs mutate <id> <op>         Apply an operation
+  docs mutate <id> <op>         Apply an operation (--input, --input-file)
 
 MODELS & OPERATIONS
   models list                   List document types
@@ -731,17 +741,11 @@ IMPORT / EXPORT
   export doc <id> --drive <id>  Export a document as .phd
   import <files> --drive <id>   Import .phd files
 
-AUTH & PERMISSIONS
+AUTH
   auth login [--token <jwt>]    Authenticate
   auth logout                   Remove token
   auth status                   Show auth state
   auth token                    Print current token
-  access show <doc-id>          Show document permissions
-  access grant/revoke           Grant/revoke user permissions
-  access grant-group/revoke-group  Grant/revoke group permissions
-  access ops show/grant/revoke  Operation-level permissions
-  groups list/get/create/delete Group management
-  groups add-user/remove-user   Group membership
 
 REAL-TIME & ADVANCED
   watch docs [--type] [--drive] Subscribe to document changes

@@ -52,12 +52,12 @@ async fn status(job_id: &str, format: OutputFormat, profile_name: Option<&str>) 
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
     let query = format!(
-        r#"{{ job(id: "{id}") {{ id status progress message result createdAt updatedAt }} }}"#,
+        r#"{{ jobStatus(jobId: "{id}") {{ id status progress result error createdAt updatedAt }} }}"#,
         id = job_id.replace('"', r#"\""#)
     );
 
     let data = client.query(&query, None).await?;
-    let job = &data["job"];
+    let job = &data["jobStatus"];
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(job),
@@ -67,8 +67,8 @@ async fn status(job_id: &str, format: OutputFormat, profile_name: Option<&str>) 
             if let Some(p) = job["progress"].as_f64() {
                 println!("Progress: {:.0}%", p * 100.0);
             }
-            if let Some(msg) = job["message"].as_str().filter(|msg| !msg.is_empty()) {
-                println!("Message:  {msg}");
+            if let Some(err) = job["error"].as_str().filter(|e| !e.is_empty()) {
+                println!("Error:    {err}");
             }
             if let Some(created) = job["createdAt"].as_str() {
                 println!("Created:  {created}");
@@ -96,12 +96,12 @@ async fn wait(
 
     loop {
         let query = format!(
-            r#"{{ job(id: "{id}") {{ id status progress message result }} }}"#,
+            r#"{{ jobStatus(jobId: "{id}") {{ id status progress result error }} }}"#,
             id = job_id.replace('"', r#"\""#)
         );
 
         let data = client.query(&query, None).await?;
-        let job = &data["job"];
+        let job = &data["jobStatus"];
         let status_str = job["status"].as_str().unwrap_or("UNKNOWN");
 
         match status_str {
@@ -110,8 +110,8 @@ async fn wait(
                     OutputFormat::Json | OutputFormat::Raw => print_json(job),
                     _ => {
                         println!("Job {} finished: {}", job_id, status_str);
-                        if let Some(msg) = job["message"].as_str().filter(|msg| !msg.is_empty()) {
-                            println!("Message: {msg}");
+                        if let Some(err) = job["error"].as_str().filter(|e| !e.is_empty()) {
+                            println!("Error: {err}");
                         }
                     }
                 }

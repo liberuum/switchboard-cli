@@ -141,7 +141,7 @@ Profiles stored at `~/.switchboard/profiles.toml`. Each profile has `url`, optio
 - Colored output uses the `colored` crate — respects `--no-color` and `NO_COLOR` env var
 - Table output uses `comfy-table`
 - Delete commands accept multiple IDs: `Vec<String>` with `[IDS]...` in help text
-- GraphQL mutations are built via `format!()` string interpolation (no query builder library)
+- GraphQL mutations use parameterized queries with `$variables` (not string interpolation) — this properly handles newlines, special characters, and enum values
 - Built-in docs live in `guide.rs` as raw string literals — update them when adding/changing commands
 
 ### CRITICAL: Always Build & Install After Changes
@@ -169,6 +169,17 @@ The codesign step is required on macOS — without it, the OS firewall blocks ne
 - Quick Start examples still parse correctly with the current clap definitions
 
 Failure to keep docs in sync is a bug — treat it with the same severity as a compilation error.
+
+### CRITICAL: Staging → Main Migration Checklist
+
+This codebase is currently on the `staging` branch. When merging to `main`, the following files contain staging-specific references that **must** be updated:
+
+1. **`install.sh`** — Default `CHANNEL` is `staging`. Change to `stable`. Update usage comment URL from `staging` to `main`.
+2. **`README.md`** — Install URLs reference `staging` branch. Change all `raw.githubusercontent.com/.../staging/install.sh` to `.../main/install.sh`. Remove `CHANNEL=staging` references. Update example version from `v0.0.0-staging.N` to a real semver.
+3. **`Cargo.toml`** — Version is `0.0.0-staging.0`. The release workflow auto-updates this, but verify it after first main release.
+4. **`docs/skill.md`** — If it references staging install commands, update to main.
+
+The release workflow (`release.yml`) already handles both branches automatically — no changes needed there.
 
 ---
 

@@ -1,11 +1,10 @@
-pub mod access;
+pub mod analytics;
 pub mod auth;
 pub mod completions;
 pub mod config;
 pub mod docs;
 pub mod drives;
 pub mod field_editor;
-pub mod groups;
 pub mod guide;
 pub mod helpers;
 pub mod import_export;
@@ -113,14 +112,6 @@ pub enum Commands {
     #[command(subcommand)]
     Auth(auth::AuthCommand),
 
-    /// Manage document access permissions
-    #[command(subcommand)]
-    Access(access::AccessCommand),
-
-    /// Manage user groups
-    #[command(subcommand)]
-    Groups(groups::GroupsCommand),
-
     /// Watch for real-time changes via WebSocket
     #[command(subcommand)]
     Watch(watch::WatchCommand),
@@ -150,6 +141,10 @@ pub enum Commands {
     #[command(subcommand)]
     Guide(guide::GuideCommand),
 
+    /// Query analytics (metrics, dimensions, time series)
+    #[command(subcommand)]
+    Analytics(analytics::AnalyticsCommand),
+
     /// Generate shell completions (auto-detects shell, or specify explicitly)
     Completions(completions::CompletionsArgs),
 }
@@ -178,8 +173,6 @@ pub async fn dispatch(
             import_export::run_import(files, drive, format, profile, quiet).await
         }
         Commands::Auth(cmd) => auth::run(cmd, format, profile).await,
-        Commands::Access(cmd) => access::run(cmd, format, profile).await,
-        Commands::Groups(cmd) => groups::run(cmd, format, profile).await,
         Commands::Watch(cmd) => watch::run(cmd, format, profile, quiet).await,
         Commands::Jobs(cmd) => jobs::run(cmd, format, profile, quiet).await,
         Commands::Sync(cmd) => sync::run(cmd, format, profile).await,
@@ -187,6 +180,7 @@ pub async fn dispatch(
         Commands::Visualize { out } => visualize::run(format, out.as_deref(), profile, quiet).await,
         Commands::Interactive => anyhow::bail!("Already in interactive mode"),
         Commands::Guide(topic) => guide::run(topic),
+        Commands::Analytics(cmd) => analytics::run(cmd, format, profile).await,
         Commands::Completions(args) => completions::run(args),
     }
 }
@@ -195,7 +189,12 @@ async fn ping(profile_name: Option<&str>, quiet: bool) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
     let start = std::time::Instant::now();
-    client.query("{ drives }", None).await?;
+    client
+        .query(
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }, paging: { limit: 1 }) { totalCount } }"#,
+            None,
+        )
+        .await?;
     let elapsed = start.elapsed();
 
     if !quiet {
@@ -213,13 +212,15 @@ async fn info(profile_name: Option<&str>, format: OutputFormat) -> Result<()> {
     let (name, _profile, client) = helpers::setup(profile_name)?;
 
     let data = client
-        .query("{ driveDocuments { id name slug } }", None)
+        .query(
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { totalCount } }"#,
+            None,
+        )
         .await?;
 
     let drives = data
-        .get("driveDocuments")
-        .and_then(|v| v.as_array())
-        .map(|a| a.len())
+        .pointer("/findDocuments/totalCount")
+        .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
     let cache = crate::graphql::introspection::load_cache(&name)?;

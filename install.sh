@@ -3,11 +3,12 @@
 # Switchboard CLI installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/staging/install.sh | bash
 #
 # Environment variables:
 #   INSTALL_DIR   — where to place the binary (default: /usr/local/bin)
-#   VERSION       — specific version to install (default: latest)
+#   VERSION       — specific version to install (default: latest for the channel)
+#   CHANNEL       — "staging" or "stable" (default: staging on this branch)
 
 set -euo pipefail
 
@@ -62,13 +63,25 @@ resolve_version() {
 
   need_cmd curl
 
+  local channel="${CHANNEL:-staging}"
   local latest
-  latest="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep '"tag_name"' \
-    | head -1 \
-    | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
 
-  [ -n "$latest" ] || err "Could not determine latest version. Set VERSION= explicitly."
+  if [ "$channel" = "staging" ]; then
+    # Staging: find the latest v0.0.0-staging.* prerelease tag
+    latest="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
+      | grep '"tag_name"' \
+      | grep 'staging' \
+      | head -1 \
+      | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+  else
+    # Stable: use the /releases/latest endpoint (excludes prereleases)
+    latest="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+      | grep '"tag_name"' \
+      | head -1 \
+      | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+  fi
+
+  [ -n "$latest" ] || err "Could not determine latest ${channel} version. Set VERSION= explicitly."
   echo "$latest"
 }
 

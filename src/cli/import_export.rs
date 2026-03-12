@@ -4,7 +4,7 @@ use colored::Colorize;
 use serde_json::Value;
 use std::path::Path;
 
-use crate::cli::helpers::{self, resolve_drive_id};
+use crate::cli::helpers;
 use crate::graphql::GraphQLClient;
 use crate::output::OutputFormat;
 use crate::phd::{self, PhdHeader, PhdOperations, PhdState};
@@ -67,7 +67,25 @@ fn build_header(doc: &Value) -> PhdHeader {
         .as_str()
         .unwrap_or("unknown")
         .to_string();
-    let revision = doc["revision"].as_u64().unwrap_or(0);
+
+    // Build revision from revisionsList if available
+    let revision = if let Some(arr) = doc["revisionsList"].as_array() {
+        let mut rev_map = serde_json::Map::new();
+        for entry in arr {
+            if let (Some(scope), Some(rev)) =
+                (entry["scope"].as_str(), entry["revision"].as_u64())
+            {
+                rev_map.insert(scope.to_string(), serde_json::json!(rev));
+            }
+        }
+        if rev_map.is_empty() {
+            serde_json::json!({ "global": 0 })
+        } else {
+            Value::Object(rev_map)
+        }
+    } else {
+        serde_json::json!({ "global": 0 })
+    };
 
     PhdHeader {
         id: doc_id.clone(),
@@ -77,16 +95,16 @@ fn build_header(doc: &Value) -> PhdHeader {
         slug: Some(doc_id),
         name: doc_name,
         branch: "main".to_string(),
-        revision: serde_json::json!({ "global": revision }),
+        revision,
         last_modified_at_utc_iso: doc["lastModifiedAtUtcIso"].as_str().map(|s| s.to_string()),
         meta: Value::Object(serde_json::Map::new()),
     }
 }
 
-/// Build the PhdState wrapping stateJSON under the `global` key
-fn build_current_state(state_json: Value) -> PhdState {
+/// Build the PhdState wrapping state under the `global` key
+fn build_current_state(state: Value) -> PhdState {
     PhdState {
-        global: state_json,
+        global: state,
         ..PhdState::default()
     }
 }
@@ -96,11 +114,14 @@ async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bo
 
     // List all drives
     let data = client
-        .query("{ driveDocuments { id name slug } }", None)
+        .query(
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name slug } totalCount } }"#,
+            None,
+        )
         .await?;
 
     let drives = data
-        .get("driveDocuments")
+        .pointer("/findDocuments/items")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
@@ -126,7 +147,6 @@ async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bo
         );
     }
 
-    let base_url = helpers::base_url_from(&client.url);
     let mut total_docs = 0;
 
     for (drive_idx, drive) in drives.iter().enumerate() {
@@ -147,34 +167,14 @@ async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bo
             );
         }
 
-        // Get nodes for this drive
-        let drive_query = format!(
-            r#"{{
-  driveDocument(idOrSlug: "{}") {{
-    state {{
-      nodes {{
-        ... on DocumentDrive_FileNode {{ id name kind documentType parentFolder }}
-        ... on DocumentDrive_FolderNode {{ id name kind parentFolder }}
-      }}
-    }}
-  }}
-}}"#,
-            drive_id.replace('"', r#"\""#)
-        );
-
-        let drive_data = match client.query(&drive_query, None).await {
-            Ok(d) => d,
+        // Get nodes for this drive via document() query
+        let nodes = match fetch_drive_nodes(&client, drive_id).await {
+            Ok(n) => n,
             Err(e) => {
                 eprintln!("  Failed to query drive {drive_slug}: {e}");
                 continue;
             }
         };
-
-        let nodes = drive_data
-            .pointer("/driveDocument/state/nodes")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
 
         let files: Vec<&Value> = nodes
             .iter()
@@ -221,9 +221,6 @@ async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bo
         let drive_dir = base_path.join(sanitize_filename(drive_slug));
         std::fs::create_dir_all(&drive_dir)?;
 
-        let drive_client =
-            GraphQLClient::new(format!("{base_url}/d/{drive_id}"), _profile.token.clone());
-
         for (i, file_node) in files.iter().enumerate() {
             let file_id = file_node["id"].as_str().unwrap_or("");
             let file_name = file_node["name"].as_str().unwrap_or("document");
@@ -241,15 +238,15 @@ async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bo
                 file_dir = folder_dir;
             }
 
-            match fetch_document_via_drive(&drive_client, file_id).await {
+            match fetch_document(&client, file_id).await {
                 Ok((doc, operations)) => {
                     let header = build_header(&doc);
-                    let state_json = parse_state_json(&doc);
+                    let state = extract_state(&doc);
                     let phd_ops = PhdOperations {
                         global: operations.clone(),
                     };
                     let initial_state = PhdState::default();
-                    let current_state = build_current_state(state_json);
+                    let current_state = build_current_state(state);
 
                     let safe_file = sanitize_filename(file_name);
                     let file_path = file_dir.join(format!("{safe_file}.phd"));
@@ -320,22 +317,20 @@ async fn export_doc(
     quiet: bool,
 ) -> Result<()> {
     let (_name, _profile, client, _cache) = helpers::setup_with_cache(profile_name)?;
-    let drive_id = resolve_drive_id(&client, drive).await?;
 
-    // Use the drive endpoint which has real operations and state
-    let base_url = helpers::base_url_from(&client.url);
-    let drive_client =
-        GraphQLClient::new(format!("{base_url}/d/{drive_id}"), _profile.token.clone());
+    // Resolve document: if drive is provided, use "drive/doc_id" format
+    let identifier = format!("{drive}/{doc_id}");
+    let resolved_id = helpers::resolve_doc(&client, &identifier).await?;
 
-    let (doc, operations) = fetch_document_via_drive(&drive_client, doc_id).await?;
+    let (doc, operations) = fetch_document(&client, &resolved_id).await?;
 
     let header = build_header(&doc);
-    let state_json = parse_state_json(&doc);
+    let state = extract_state(&doc);
     let phd_ops = PhdOperations {
         global: operations.clone(),
     };
     let initial_state = PhdState::default();
-    let current_state = build_current_state(state_json);
+    let current_state = build_current_state(state);
 
     // Determine output path
     let safe_name = sanitize_filename(&header.name);
@@ -368,40 +363,20 @@ async fn export_drive(
     quiet: bool,
 ) -> Result<()> {
     let (_name, _profile, client, _cache) = helpers::setup_with_cache(profile_name)?;
-    let drive_id = resolve_drive_id(&client, drive).await?;
 
-    // Build drive endpoint client for fetching docs with operations
-    let base_url = helpers::base_url_from(&client.url);
-    let drive_client =
-        GraphQLClient::new(format!("{base_url}/d/{drive_id}"), _profile.token.clone());
+    // Get drive info and node tree via document() query
+    let nodes = fetch_drive_nodes(&client, drive).await?;
 
-    // Get drive info and node tree
-    let drive_query = format!(
-        r#"{{
-  driveDocument(idOrSlug: "{drive}") {{
-    name
-    state {{
-      nodes {{
-        ... on DocumentDrive_FileNode {{ id name kind documentType parentFolder }}
-        ... on DocumentDrive_FolderNode {{ id name kind parentFolder }}
-      }}
-    }}
-  }}
-}}"#,
-        drive = drive.replace('"', r#"\""#)
+    // Also get the drive name
+    let escaped = drive.replace('"', r#"\""#);
+    let name_query = format!(
+        r#"{{ document(identifier: "{escaped}") {{ document {{ name }} }} }}"#
     );
-
-    let data = client.query(&drive_query, None).await?;
-    let drive_name = data
-        .pointer("/driveDocument/name")
+    let name_data = client.query(&name_query, None).await?;
+    let drive_name = name_data
+        .pointer("/document/document/name")
         .and_then(|v| v.as_str())
         .unwrap_or(drive);
-
-    let nodes = data
-        .pointer("/driveDocument/state/nodes")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
 
     let files: Vec<&Value> = nodes
         .iter()
@@ -449,16 +424,16 @@ async fn export_drive(
         let file_name = file_node["name"].as_str().unwrap_or("document");
         let file_type = file_node["documentType"].as_str().unwrap_or("unknown");
 
-        match fetch_document_via_drive(&drive_client, file_id).await {
+        match fetch_document(&client, file_id).await {
             Ok((doc, operations)) => {
-                let state_json = parse_state_json(&doc);
+                let state = extract_state(&doc);
 
                 let header = build_header(&doc);
                 let phd_ops = PhdOperations {
                     global: operations.clone(),
                 };
                 let initial_state = PhdState::default();
-                let current_state = build_current_state(state_json);
+                let current_state = build_current_state(state);
 
                 let safe_file = sanitize_filename(file_name);
                 let file_path = dir.join(format!("{safe_file}.phd"));
@@ -507,72 +482,56 @@ async fn export_drive(
 }
 
 const OP_BATCH_SIZE: usize = 100;
+const REQUEST_DELAY_MS: u64 = 200;
 
-/// Fetch a document's full data (state + operations) via the drive endpoint.
-/// Matches the logic from download-drive-documents.ts:
-/// - Uses {base_url}/d/{driveId} with document(id:) query
-/// - Paginates operations with first/skip
-/// - Transforms flat API ops to nested action format (gqlOperationToInternal)
-async fn fetch_document_via_drive(
-    drive_client: &GraphQLClient,
+/// Fetch drive nodes via the document() query on the main GraphQL endpoint.
+async fn fetch_drive_nodes(client: &GraphQLClient, drive_identifier: &str) -> Result<Vec<Value>> {
+    let escaped = drive_identifier.replace('"', r#"\""#);
+    let query = format!(
+        r#"{{ document(identifier: "{escaped}") {{ document {{ state }} }} }}"#,
+    );
+    let data = client.query(&query, None).await?;
+    Ok(data
+        .pointer("/document/document/state/nodes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// Fetch a document's full data (metadata + state + operations) via the main GraphQL endpoint.
+/// Uses document() for metadata/state and documentOperations() for ops with pagination.
+async fn fetch_document(
+    client: &GraphQLClient,
     doc_id: &str,
 ) -> Result<(Value, Vec<Value>)> {
-    // First batch: metadata + stateJSON + first page of operations
-    let variables = serde_json::json!({
-        "id": doc_id,
-        "first": OP_BATCH_SIZE,
-        "skip": 0,
-    });
-    let data = drive_client
-        .query(
-            r#"query ($id: String!, $first: Int, $skip: Int) {
-            document(id: $id) {
-                id name documentType revision
-                createdAtUtcIso lastModifiedAtUtcIso
-                operations(first: $first, skip: $skip) {
-                    id type index skip hash timestampUtcMs inputText error
-                }
-                stateJSON
-            }
-        }"#,
-            Some(&variables),
-        )
-        .await?;
+    let escaped = doc_id.replace('"', r#"\""#);
 
-    let doc = data
-        .get("document")
+    // Fetch document metadata and state
+    let doc_query = format!(
+        r#"{{ document(identifier: "{escaped}") {{ document {{ id name documentType state revisionsList {{ scope revision }} createdAtUtcIso lastModifiedAtUtcIso }} }} }}"#,
+    );
+    let doc_data = client.query(&doc_query, None).await?;
+    let doc = doc_data
+        .pointer("/document/document")
         .filter(|v| !v.is_null())
-        .ok_or_else(|| anyhow::anyhow!("Document '{doc_id}' not found on drive endpoint"))?;
+        .ok_or_else(|| anyhow::anyhow!("Document '{doc_id}' not found"))?
+        .clone();
 
-    let mut all_ops: Vec<Value> = doc
-        .get("operations")
-        .and_then(|v: &Value| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    // Fetch operations with pagination
+    let mut all_ops: Vec<Value> = Vec::new();
+    loop {
+        let offset = all_ops.len();
+        let ops_query = format!(
+            r#"{{ documentOperations(filter: {{ documentId: "{escaped}" }}, paging: {{ limit: {OP_BATCH_SIZE}, offset: {offset} }}) {{ items {{ id index action {{ type input scope }} timestampUtcMs hash skip error }} totalCount }} }}"#,
+        );
 
-    // Paginate remaining operations if first batch was full
-    while !all_ops.is_empty() && all_ops.len().is_multiple_of(OP_BATCH_SIZE) {
-        tokio::time::sleep(std::time::Duration::from_millis(REQUEST_DELAY_MS)).await;
-        let vars = serde_json::json!({
-            "id": doc_id,
-            "first": OP_BATCH_SIZE,
-            "skip": all_ops.len(),
-        });
-        let more = drive_client
-            .query(
-                r#"query ($id: String!, $first: Int, $skip: Int) {
-                document(id: $id) {
-                    operations(first: $first, skip: $skip) {
-                        id type index skip hash timestampUtcMs inputText error
-                    }
-                }
-            }"#,
-                Some(&vars),
-            )
-            .await?;
+        if !all_ops.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(REQUEST_DELAY_MS)).await;
+        }
 
-        let batch = more
-            .pointer("/document/operations")
+        let ops_data = client.query(&ops_query, None).await?;
+        let batch = ops_data
+            .pointer("/documentOperations/items")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
@@ -580,16 +539,23 @@ async fn fetch_document_via_drive(
         if batch.is_empty() {
             break;
         }
+
+        let batch_len = batch.len();
         all_ops.extend(batch);
+
+        // If we got fewer than the batch size, we're done
+        if batch_len < OP_BATCH_SIZE {
+            break;
+        }
     }
 
-    // Transform flat API ops to the nested action format (matching gqlOperationToInternal)
+    // Transform operations to the nested action format expected by .phd
     let transformed_ops: Vec<Value> = all_ops
         .iter()
         .map(|op| {
-            let input_text = op.get("inputText").and_then(|v| v.as_str()).unwrap_or("{}");
-            let input: Value =
-                serde_json::from_str(input_text).unwrap_or(Value::String(input_text.to_string()));
+            let action = &op["action"];
+            let input = action.get("input").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+            let scope = action["scope"].as_str().unwrap_or("global");
 
             serde_json::json!({
                 "id": op.get("id"),
@@ -600,26 +566,23 @@ async fn fetch_document_via_drive(
                 "error": op.get("error").cloned().unwrap_or(Value::Null),
                 "action": {
                     "id": op.get("id"),
-                    "type": op.get("type"),
+                    "type": action.get("type"),
                     "timestampUtcMs": op.get("timestampUtcMs"),
                     "input": input,
-                    "scope": "global",
+                    "scope": scope,
                 }
             })
         })
         .collect();
 
-    Ok((doc.clone(), transformed_ops))
+    Ok((doc, transformed_ops))
 }
 
-fn parse_state_json(doc: &Value) -> Value {
-    match doc.get("stateJSON") {
-        Some(Value::String(s)) => {
-            serde_json::from_str(s).unwrap_or(Value::Object(serde_json::Map::new()))
-        }
-        Some(v) => v.clone(),
-        None => Value::Object(serde_json::Map::new()),
-    }
+/// Extract state from a document value. In the new API, state is a JSONObject directly.
+fn extract_state(doc: &Value) -> Value {
+    doc.get("state")
+        .cloned()
+        .unwrap_or(Value::Object(serde_json::Map::new()))
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -647,7 +610,6 @@ fn format_bytes(bytes: u64) -> String {
 // --- Import ---
 
 const PUSH_BATCH_SIZE: usize = 50;
-const REQUEST_DELAY_MS: u64 = 200;
 
 pub async fn run_import(
     files: Vec<String>,
@@ -657,23 +619,19 @@ pub async fn run_import(
     quiet: bool,
 ) -> Result<()> {
     let (_name, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
-    let drive_id = resolve_drive_id(&client, &drive).await?;
 
     if files.is_empty() {
         bail!("No .phd files specified");
     }
 
-    // Build the drive endpoint for pushUpdates and state verification
-    let base_url = helpers::base_url_from(&client.url);
-    let drive_endpoint = format!("{base_url}/d/{drive_id}");
-    let drive_client = GraphQLClient::new(drive_endpoint.clone(), _profile.token.clone());
+    // Resolve the drive identifier
+    let drive_id = helpers::resolve_doc(&client, &drive).await?;
 
     if !quiet {
         println!(
             "  Importing {} file(s) into drive '{drive}'...",
             files.len()
         );
-        println!("  Drive endpoint: {drive_endpoint}");
     }
 
     let mut success = 0;
@@ -721,7 +679,7 @@ pub async fn run_import(
 
         // Step 1: Create the document via model-specific mutation
         let mutation = format!(
-            r#"mutation {{ {create}(name: "{name}", driveId: "{drive_id}") }}"#,
+            r#"mutation {{ {create}(name: "{name}", parentIdentifier: "{drive_id}") {{ id }} }}"#,
             create = model.create_mutation,
             name = doc_name.replace('"', r#"\""#),
         );
@@ -750,13 +708,11 @@ pub async fn run_import(
             }
         };
 
-        // Step 2: Push operations via pushUpdates on the drive endpoint
+        // Step 2: Push operations via mutateDocument
         if ops_count > 0 {
-            match push_operations(
-                &drive_client,
-                &drive_id,
+            match push_operations_via_mutate(
+                &client,
                 &new_doc_id,
-                doc_type,
                 &contents.operations,
                 quiet,
             )
@@ -779,7 +735,7 @@ pub async fn run_import(
         // Step 3: Verify state matches the .phd current-state
         tokio::time::sleep(std::time::Duration::from_millis(REQUEST_DELAY_MS)).await;
         if !quiet {
-            match verify_state(&drive_client, &new_doc_id, &contents.current_state.global).await {
+            match verify_state(&client, &new_doc_id, &contents.current_state.global).await {
                 Ok(true) => println!("  State:  {} EXACT MATCH", "✓".green()),
                 Ok(false) => println!("  State:  {} MISMATCH (see diffs above)", "~".yellow()),
                 Err(e) => println!("  State:  {} Could not verify: {e}", "~".yellow()),
@@ -802,12 +758,10 @@ pub async fn run_import(
     Ok(())
 }
 
-/// Push operations in batches via pushUpdates on the drive endpoint
-async fn push_operations(
-    drive_client: &GraphQLClient,
-    drive_id: &str,
+/// Push operations in batches via mutateDocument on the main endpoint
+async fn push_operations_via_mutate(
+    client: &GraphQLClient,
     doc_id: &str,
-    doc_type: &str,
     operations: &PhdOperations,
     quiet: bool,
 ) -> Result<usize> {
@@ -818,119 +772,73 @@ async fn push_operations(
 
     let total_batches = ops.len().div_ceil(PUSH_BATCH_SIZE);
     let mut total_pushed = 0;
+    let escaped_id = doc_id.replace('"', r#"\""#);
 
     for (batch_idx, chunk) in ops.chunks(PUSH_BATCH_SIZE).enumerate() {
-        // Transform operations to the InputStrandUpdate format
-        let input_ops: Vec<Value> = chunk
+        // Transform operations to the mutateDocument action format
+        let actions: Vec<Value> = chunk
             .iter()
             .map(|op| {
-                // Handle both flat format (from our export) and nested action format (from reference .phd files)
-                let (op_type, input, action_id) = if let Some(action) = op.get("action") {
-                    // Nested action format: { action: { type, input, id, ... } }
-                    let t = action
+                // Handle both nested action format and flat format
+                if let Some(action) = op.get("action") {
+                    let op_type = action
                         .get("type")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let inp = match action.get("input") {
-                        Some(v) => serde_json::to_string(v).unwrap_or_default(),
-                        None => "{}".to_string(),
-                    };
-                    let aid = action
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| op.get("id").and_then(|v| v.as_str()))
-                        .unwrap_or("")
-                        .to_string();
-                    (t, inp, aid)
+                    let input = action.get("input").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+                    let scope = action["scope"].as_str().unwrap_or("global");
+
+                    serde_json::json!({
+                        "type": op_type,
+                        "input": input,
+                        "scope": scope,
+                    })
                 } else {
-                    // Flat format: { type, inputText, id, ... }
-                    let t = op
+                    // Flat format: { type, inputText, ... }
+                    let op_type = op
                         .get("type")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let inp = op
+                    let input_text = op
                         .get("inputText")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("{}")
-                        .to_string();
-                    let aid = op
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    (t, inp, aid)
-                };
+                        .unwrap_or("{}");
+                    let input: Value = serde_json::from_str(input_text)
+                        .unwrap_or(Value::Object(serde_json::Map::new()));
 
-                serde_json::json!({
-                    "index": op.get("index").and_then(|v| v.as_u64()).unwrap_or(0),
-                    "skip": op.get("skip").and_then(|v| v.as_u64()).unwrap_or(0),
-                    "type": op_type,
-                    "id": op.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                    "actionId": action_id,
-                    "input": input,
-                    "hash": op.get("hash").and_then(|v| v.as_str()).unwrap_or(""),
-                    "timestampUtcMs": op.get("timestampUtcMs"),
-                    "error": op.get("error").cloned().unwrap_or(Value::Null),
-                })
+                    serde_json::json!({
+                        "type": op_type,
+                        "input": input,
+                        "scope": "global",
+                    })
+                }
             })
             .collect();
 
-        let strand = serde_json::json!({
-            "driveId": drive_id,
-            "documentId": doc_id,
-            "documentType": doc_type,
-            "scope": "global",
-            "branch": "main",
-            "operations": input_ops,
-        });
+        let actions_gql = helpers::json_to_graphql(&Value::Array(actions));
 
-        let variables = serde_json::json!({ "strands": [strand] });
+        let mutation = format!(
+            r#"mutation {{ mutateDocument(documentIdentifier: "{escaped_id}", actions: {actions_gql}) {{ id }} }}"#,
+        );
 
         if batch_idx > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(REQUEST_DELAY_MS)).await;
         }
 
-        let result = drive_client
-            .query(
-                r#"mutation ($strands: [InputStrandUpdate!]) {
-                pushUpdates(strands: $strands) { revision status error }
-            }"#,
-                Some(&variables),
-            )
-            .await?;
+        client.query(&mutation, None).await?;
 
-        let update = result
-            .get("pushUpdates")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first());
+        // The GraphQL client already handles errors from the response.
+        // A null mutateDocument result is not necessarily an error.
 
-        if let Some(update) = update {
-            let status = update
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("UNKNOWN");
-            if status != "SUCCESS" {
-                let error = update
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown error");
-                bail!(
-                    "pushUpdates failed at batch {}/{total_batches}: status={status}, error={error}",
-                    batch_idx + 1
-                );
-            }
-            if !quiet {
-                let revision = update.get("revision").and_then(|v| v.as_u64()).unwrap_or(0);
-                println!(
-                    "    [{}/{}] {} ops → revision {}",
-                    batch_idx + 1,
-                    total_batches,
-                    chunk.len(),
-                    revision
-                );
-            }
+        if !quiet {
+            println!(
+                "    [{}/{}] {} ops pushed",
+                batch_idx + 1,
+                total_batches,
+                chunk.len(),
+            );
         }
 
         total_pushed += chunk.len();
@@ -941,25 +849,20 @@ async fn push_operations(
 
 /// Verify the imported document's state matches the expected state from the .phd
 async fn verify_state(
-    drive_client: &GraphQLClient,
+    client: &GraphQLClient,
     doc_id: &str,
     expected_global: &Value,
 ) -> Result<bool> {
-    let variables = serde_json::json!({ "id": doc_id });
-    let data = drive_client
-        .query(
-            r#"query ($id: String!) { document(id: $id) { stateJSON } }"#,
-            Some(&variables),
-        )
-        .await?;
+    let escaped = doc_id.replace('"', r#"\""#);
+    let query = format!(
+        r#"{{ document(identifier: "{escaped}") {{ document {{ state }} }} }}"#,
+    );
+    let data = client.query(&query, None).await?;
 
-    let actual = match data.pointer("/document/stateJSON") {
-        Some(Value::String(s)) => {
-            serde_json::from_str(s).unwrap_or(Value::Object(serde_json::Map::new()))
-        }
-        Some(v) => v.clone(),
-        None => Value::Object(serde_json::Map::new()),
-    };
+    let actual = data
+        .pointer("/document/document/state")
+        .cloned()
+        .unwrap_or(Value::Object(serde_json::Map::new()));
 
     let expected_str = serde_json::to_string(expected_global)?;
     let actual_str = serde_json::to_string(&actual)?;

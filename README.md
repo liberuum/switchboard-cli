@@ -60,17 +60,20 @@ This CLI is a standalone tool — it doesn't share code with the TypeScript mono
 ### One-line install (macOS / Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/staging/install.sh | bash
 ```
 
-This downloads the latest prebuilt binary for your platform and installs it to `/usr/local/bin`. You can customize the install:
+This downloads the latest staging prerelease binary for your platform and installs it to `/usr/local/bin`. You can customize the install:
 
 ```bash
 # Install to a custom directory
-curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/main/install.sh | INSTALL_DIR=~/.local/bin bash
+curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/staging/install.sh | INSTALL_DIR=~/.local/bin bash
 
 # Install a specific version
-curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/main/install.sh | VERSION=v0.1.0 bash
+curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/staging/install.sh | VERSION=v0.0.0-staging.5 bash
+
+# Install stable (main branch) release instead
+curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/main/install.sh | CHANNEL=stable bash
 ```
 
 See [How the install script works](#how-the-install-script-works) for details.
@@ -125,6 +128,7 @@ switchboard docs create --type powerhouse/invoice --name "Q1 Invoice" --drive my
 switchboard docs get <doc-id-or-name>             # Auto-detects drive
 switchboard docs mutate <doc-id-or-name>         # Interactive field-by-field editor
 switchboard docs mutate <doc-id> editInvoice --input '{"amount": 2000}' --drive my-drive
+switchboard docs mutate <doc-id> setStateSchema --input-file schema.json --drive my-drive
 ```
 
 ### 4. Export and import
@@ -167,8 +171,13 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard docs get <id-or-name> [--drive <slug>] [--state] [--out <file>]` | Get document details (auto-detects drive; `--state` includes full state) |
 | `switchboard docs tree [--drive <slug>]` | Hierarchical folder/file view (interactive drive picker if omitted) |
 | `switchboard docs create` | Interactive creation with drive picker (or pass `--type`, `--name`, `--drive`) |
-| `switchboard docs delete <ids-or-names...>` | Delete one or more documents (use `-y` to skip confirmation) |
-| `switchboard docs mutate <id-or-name> [<op>] [--input '<json>'] [--drive <slug>]` | Apply a mutation with field-by-field editor (or pass `--input` for raw JSON) |
+| `switchboard docs delete <ids-or-names...>` | Delete one or more documents — batch API (use `-y` to skip confirmation) |
+| `switchboard docs rename <id> <name>` | Rename a document |
+| `switchboard docs parents <id>` | Show parent documents (reverse tree traversal) |
+| `switchboard docs add-to <parent> <ids...>` | Add documents as children of a parent |
+| `switchboard docs remove-from <parent> <ids...>` | Remove documents from a parent |
+| `switchboard docs move <ids...> --from <src> --to <dst>` | Move documents between parents |
+| `switchboard docs mutate <id-or-name> [<op>] [--input '<json>'] [--input-file <file>] [--drive <slug>]` | Apply a mutation with field-by-field editor (or pass `--input` for raw JSON, or `--input-file` to read JSON from a file / stdin with `-`) |
 
 ### Models & Operations
 
@@ -195,24 +204,15 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard auth logout` | Remove token from current profile |
 | `switchboard auth status` | Show authentication state |
 | `switchboard auth token` | Print the current token |
-| `switchboard access show <doc-id>` | Show document permissions |
-| `switchboard access grant <doc-id> --user <addr> --level <level>` | Grant user permission |
-| `switchboard access revoke <doc-id> --user <addr>` | Revoke user permission |
-| `switchboard access grant-group <doc-id> --group <id> --level <level>` | Grant group permission |
-| `switchboard access revoke-group <doc-id> --group <id>` | Revoke group permission |
-| `switchboard access ops show <doc-id> <op-type>` | Show operation-level permissions |
-| `switchboard access ops can-execute <doc-id> <op-type>` | Check if current user can execute an operation |
-| `switchboard access ops grant <doc-id> <op-type> --user <addr>` | Grant operation permission to a user |
-| `switchboard access ops revoke <doc-id> <op-type> --user <addr>` | Revoke operation permission from a user |
-| `switchboard access ops grant-group <doc-id> <op-type> --group <id>` | Grant operation permission to a group |
-| `switchboard access ops revoke-group <doc-id> <op-type> --group <id>` | Revoke operation permission from a group |
-| `switchboard groups list` | List all groups |
-| `switchboard groups get <id>` | Get group details and members |
-| `switchboard groups create --name <name> [--description <desc>]` | Create a group |
-| `switchboard groups delete <id> [-y]` | Delete a group |
-| `switchboard groups add-user <group-id> --user <addr>` | Add a user to a group |
-| `switchboard groups remove-user <group-id> --user <addr>` | Remove a user from a group |
-| `switchboard groups user-groups <address>` | List groups for a specific user |
+
+### Analytics
+
+| Command | Description |
+|---------|-------------|
+| `switchboard analytics metrics` | List available analytics metrics |
+| `switchboard analytics dimensions` | List available dimensions and their values |
+| `switchboard analytics currencies` | List available currencies |
+| `switchboard analytics series [--start <date>] [--end <date>] [--granularity <g>] [--metrics <m>] [--currency <c>]` | Query analytics time series |
 
 ### Real-Time & Advanced
 
@@ -358,12 +358,12 @@ The REPL supports **every CLI command** — the same syntax you use on the comma
 staging> drives list
 
 ──── drives list ────────────────────────────────────────────
-┌──────────────────┬──────────────┬──────────────┬───────────────────┐
-│ ID               │ Name         │ Slug         │ Editor            │
-├──────────────────┼──────────────┼──────────────┼───────────────────┤
-│ 47cda535-...     │ liberum      │ liberuum     │ builder-team-admin│
-│ e5f6g7h8-...     │ Vetra        │ vetra        │ -                 │
-└──────────────────┴──────────────┴──────────────┴───────────────────┘
+┌──────────────────┬──────────────┬──────────────┐
+│ ID               │ Name         │ Slug         │
+├──────────────────┼──────────────┼──────────────┤
+│ 47cda535-...     │ liberum      │ liberuum     │
+│ e5f6g7h8-...     │ Vetra        │ vetra        │
+└──────────────────┴──────────────┴──────────────┘
 
 staging> docs tree
 Select drive: liberuum
@@ -383,7 +383,7 @@ local> exit
 
 Features:
 
-- **Full CLI parity** — every command works inside the REPL (drives, docs, models, auth, access, groups, export, import, watch, jobs, sync, etc.)
+- **Full CLI parity** — every command works inside the REPL (drives, docs, models, auth, analytics, export, import, watch, jobs, sync, etc.)
 - **Tab completion** for commands, drive slugs, document names, profile names, model types, and guide topics
 - **Visual command separators** — dimmed header lines before each command's output
 - **Loading spinners** — animated feedback during API queries
@@ -448,7 +448,6 @@ switchboard guide drives          # Working with drives
 switchboard guide docs            # Documents, mutations, models
 switchboard guide import-export   # .phd file format
 switchboard guide auth            # Authentication
-switchboard guide permissions     # Access control and groups
 switchboard guide watch           # WebSocket subscriptions
 switchboard guide jobs            # Async job tracking
 switchboard guide sync            # Sync channels
@@ -485,15 +484,14 @@ switchboard-cli/
 │   │   ├── config.rs            Profile management
 │   │   ├── introspect.rs        Schema discovery
 │   │   ├── drives.rs            Drive commands (list, get, create, multi-delete)
-│   │   ├── docs.rs              Document commands (list, get, tree, create, multi-delete)
+│   │   ├── docs.rs              Document commands (list, get, tree, create, delete, rename, parents, add-to, remove-from, move)
 │   │   ├── models.rs            Model inspection (from cache)
 │   │   ├── ops.rs               Operations history (with input display)
 │   │   ├── mutate.rs            Model-specific mutations (interactive field editor)
 │   │   ├── field_editor.rs      Field-by-field mutation editor (introspection + prompting)
+│   │   ├── analytics.rs         Analytics queries (metrics, dimensions, currencies, series)
 │   │   ├── import_export.rs     .phd file import/export
 │   │   ├── auth.rs              Authentication
-│   │   ├── access.rs            Permission commands
-│   │   ├── groups.rs            Group management
 │   │   ├── query.rs             Raw GraphQL
 │   │   ├── schema.rs            Schema dump
 │   │   ├── watch.rs             WebSocket subscriptions
@@ -638,7 +636,7 @@ Two GitHub Actions workflows are included in `.github/workflows/`:
 
 ### CI (`ci.yml`)
 
-Runs on pull requests to `main`. Three parallel jobs:
+Runs on pull requests to `main` and `staging`. Three parallel jobs:
 
 - **Check & Test** — `cargo check` and `cargo test`
 - **Format** — `cargo fmt --check` (fails if code isn't formatted)
@@ -646,12 +644,17 @@ Runs on pull requests to `main`. Three parallel jobs:
 
 ### Release (`release.yml`)
 
-**Every push to `main` automatically creates a new release.** No manual tagging required.
+**Every push to `main` or `staging` automatically creates a new release.** No manual tagging required.
+
+- **`main` branch**: Stable releases with semver patch bumps (e.g. `v0.1.2` → `v0.1.3`)
+- **`staging` branch**: Pre-releases with `v0.0.0-staging.N` versioning (marked as pre-release on GitHub)
 
 The workflow:
 
 1. Runs pre-release checks (fmt, clippy, test)
-2. Computes the next version by incrementing the patch from the latest `v*` tag (e.g. `v0.1.2` → `v0.1.3`). If no tags exist, starts at `v0.1.0`
+2. Computes the next version:
+   - **main**: Increments patch from the latest `v*` tag (e.g. `v0.1.2` → `v0.1.3`). If no tags exist, starts at `v0.1.0`
+   - **staging**: Increments N from the latest `v0.0.0-staging.*` tag (e.g. `v0.0.0-staging.3` → `v0.0.0-staging.4`)
 3. Builds in parallel across 2 targets:
 
    | Target                     | Runner        | Archive name            |

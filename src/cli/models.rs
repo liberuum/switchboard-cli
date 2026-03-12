@@ -93,13 +93,6 @@ fn get(type_or_prefix: &str, format: OutputFormat, profile_name: Option<&str>) -
                 println!("  {}({})", op.full_name, args.join(", "));
             }
 
-            if !model.query_fields.is_empty() {
-                println!();
-                println!("Queries:");
-                for field in &model.query_fields {
-                    println!("  {}.{}", model.prefix, field);
-                }
-            }
         }
     }
 

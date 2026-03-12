@@ -2,12 +2,12 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
 
 # Only one release at a time — if a new push arrives while releasing,
 # the queued run waits and then computes the next version from the new tag.
 concurrency:
-  group: release
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -46,16 +46,31 @@ jobs:
       - name: Compute next version from latest tag
         id: next
         run: |
-          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
-          if [ -z "$LATEST_TAG" ]; then
-            NEXT="0.1.0"
+          BRANCH="${GITHUB_REF_NAME}"
+
+          if [ "$BRANCH" = "staging" ]; then
+            # Staging: v0.0.0-staging.N — increment N from latest staging tag
+            LATEST_TAG=$(git tag -l 'v0.0.0-staging.*' --sort=-v:refname | head -1)
+            if [ -z "$LATEST_TAG" ]; then
+              NEXT="0.0.0-staging.0"
+            else
+              NUM="${LATEST_TAG##*staging.}"
+              NEXT="0.0.0-staging.$((NUM + 1))"
+            fi
           else
-            CURRENT="${LATEST_TAG#v}"
-            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
-            MINOR=$(echo "$CURRENT" | cut -d. -f2)
-            PATCH=$(echo "$CURRENT" | cut -d. -f3)
-            NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            # Main: standard semver patch bump
+            LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | grep -v 'staging' | head -1)
+            if [ -z "$LATEST_TAG" ]; then
+              NEXT="0.1.0"
+            else
+              CURRENT="${LATEST_TAG#v}"
+              MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+              MINOR=$(echo "$CURRENT" | cut -d. -f2)
+              PATCH=$(echo "$CURRENT" | cut -d. -f3)
+              NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            fi
           fi
+
           echo "version=${NEXT}" >> "$GITHUB_OUTPUT"
           echo "tag=v${NEXT}" >> "$GITHUB_OUTPUT"
           echo "Next release: v${NEXT}"
@@ -139,12 +154,13 @@ jobs:
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           name: ${{ needs.version.outputs.tag }}
+          prerelease: ${{ github.ref_name == 'staging' }}
           generate_release_notes: true
           body: |
             ## Install
 
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/main/install.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/${{ github.ref_name }}/install.sh | CHANNEL=${{ github.ref_name == 'staging' && 'staging' || 'stable' }} bash
             ```
 
             Or download a binary below, extract, and run:

@@ -1949,7 +1949,7 @@ dependencies = [
 
 [[package]]
 name = "switchboard-cli"
-version = "0.1.19"
+version = "0.0.0-staging.0"
 dependencies = [
  "anyhow",
  "clap",

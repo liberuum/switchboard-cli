@@ -21,6 +21,10 @@ pub struct MutateArgs {
     #[arg(long)]
     pub input: Option<String>,
 
+    /// Read input JSON from a file (avoids shell escaping issues)
+    #[arg(long, value_name = "FILE")]
+    pub input_file: Option<String>,
+
     /// Drive ID or slug (omit for interactive selection)
     #[arg(long)]
     pub drive: Option<String>,
@@ -33,43 +37,34 @@ pub struct MutateArgs {
 pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
 
-    // Resolve doc (name or UUID) and drive.
+    // Resolve doc identifier (name or UUID).
     // When --drive is given, use "drive/doc" format so name resolution is scoped.
-    let (resolved_doc_id, drive_id) = match &args.drive {
+    let doc_identifier = match &args.drive {
         Some(d) => helpers::resolve_doc(&client, &format!("{d}/{}", args.doc_id)).await?,
         None => helpers::resolve_doc(&client, &args.doc_id).await?,
     };
 
-    // We need to figure out the document's type to know which mutations to offer.
-    // Try each model's getDocument to find the doc.
-    let mut doc_type: Option<String> = None;
+    // Query the document directly to get its type and actual PHID
+    let doc_query = format!(
+        r#"{{ document(identifier: "{id}") {{ document {{ id documentType }} }} }}"#,
+        id = doc_identifier.replace('"', r#"\""#)
+    );
+    let doc_data = client.query(&doc_query, None).await?;
 
-    for model in cache.models.values() {
-        if !model.query_fields.iter().any(|f| f == "getDocument") {
-            continue;
-        }
+    let doc_type = doc_data
+        .pointer("/document/document/documentType")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!("Could not determine document type for {}", doc_identifier)
+        })?
+        .to_string();
 
-        let query = format!(
-            r#"{{ {prefix} {{ getDocument(docId: "{doc_id}", driveId: "{drive_id}") {{ documentType }} }} }}"#,
-            prefix = model.prefix,
-            doc_id = resolved_doc_id.replace('"', r#"\""#),
-        );
-
-        if let Ok(data) = client.query(&query, None).await
-            && let Some(dt) = data
-                .get(&model.prefix)
-                .and_then(|v| v.get("getDocument"))
-                .and_then(|v| v.get("documentType"))
-                .and_then(|v| v.as_str())
-        {
-            doc_type = Some(dt.to_string());
-            break;
-        }
-    }
-
-    let doc_type = doc_type.ok_or_else(|| {
-        anyhow::anyhow!("Could not determine document type for {}", resolved_doc_id)
-    })?;
+    // Get the actual PHID (UUID) — mutations use docId, not identifier/slug
+    let resolved_doc_id = doc_data
+        .pointer("/document/document/id")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&doc_identifier)
+        .to_string();
 
     let model = cache.find_model(&doc_type).ok_or_else(|| {
         anyhow::anyhow!("No model found for type {doc_type}. Run `switchboard introspect`.")
@@ -101,13 +96,29 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
         &operations[selection]
     };
 
-    // Get input JSON + optional schema for enum-aware serialization
-    let (input_value, input_schema): (Value, Option<Vec<field_editor::InputField>>) =
-        match args.input {
-            Some(ref input) => {
-                let v = serde_json::from_str(input)
-                    .map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?;
-                (v, None)
+    // Get input JSON — prefer --input-file over --input to avoid shell escaping issues
+    let input_from_file = match &args.input_file {
+        Some(path) if path == "-" => {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| anyhow::anyhow!("Failed to read stdin: {e}"))?;
+            Some(buf)
+        }
+        Some(path) => {
+            let contents = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("Failed to read input file '{path}': {e}"))?;
+            Some(contents)
+        }
+        None => None,
+    };
+    let effective_input = input_from_file.as_deref().or(args.input.as_deref());
+
+    let input_value: Value = match effective_input {
+            Some(input) => {
+                serde_json::from_str(input)
+                    .map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?
             }
             None => {
                 let input_args: Vec<_> = operation
@@ -117,20 +128,12 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
                     .collect();
 
                 if input_args.is_empty() {
-                    (Value::Object(serde_json::Map::new()), None)
+                    Value::Object(serde_json::Map::new())
                 } else {
                     // Try field-by-field editor for the "input" arg
                     let input_arg = input_args.iter().find(|a| a.name == "input");
-                    match try_field_editor(
-                        &client,
-                        input_arg,
-                        model.prefix.as_str(),
-                        &resolved_doc_id,
-                        &drive_id,
-                    )
-                    .await
-                    {
-                        Ok(Some((val, schema))) => (val, Some(schema)),
+                    match try_field_editor(&client, input_arg, &doc_identifier).await {
+                        Ok(Some((val, _schema))) => val,
                         Ok(None) => {
                             // User cancelled or no changes
                             println!("No changes. Aborted.");
@@ -151,54 +154,81 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
                             let input_json: String = dialoguer::Input::new()
                                 .with_prompt("Input JSON")
                                 .interact_text()?;
-                            let v = serde_json::from_str(&input_json)
-                                .map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?;
-                            (v, None)
+                            serde_json::from_str(&input_json)
+                                .map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?
                         }
                     }
                 }
             }
         };
 
-    // Build mutation
-    // Check if this operation takes `input` as an argument or uses direct args
+    // Build mutation using GraphQL variables to avoid string-interpolation issues
+    // (newlines, special chars in values get properly serialized by serde)
     let has_input_arg = operation.args.iter().any(|a| a.name == "input");
 
-    // Convert JSON to GraphQL literal — use schema-aware version when available
-    // so enum values are sent unquoted
-    let gql_input = match &input_schema {
-        Some(schema) => field_editor::json_to_graphql_with_schema(&input_value, schema),
-        None => helpers::json_to_graphql(&input_value),
-    };
+    // All typed mutations return *MutationResult which requires a selection set
+    let selection = "{ id name }";
 
-    let mutation = if has_input_arg {
-        format!(
-            r#"mutation {{ {full_name}(docId: "{doc_id}", input: {gql_input}) }}"#,
-            full_name = operation.full_name,
-            doc_id = resolved_doc_id.replace('"', r#"\""#),
-        )
+    let (mutation, variables) = if has_input_arg {
+        // Find the input type name from the operation args
+        let input_type = operation
+            .args
+            .iter()
+            .find(|a| a.name == "input")
+            .map(|a| &a.type_name)
+            .unwrap();
+        let required = operation
+            .args
+            .iter()
+            .find(|a| a.name == "input")
+            .is_some_and(|a| a.required);
+        let bang = if required { "!" } else { "" };
+
+        let query = format!(
+            "mutation($docId: PHID!, $input: {input_type}{bang}) {{ {name}(docId: $docId, input: $input) {selection} }}",
+            name = operation.full_name,
+        );
+        let vars = serde_json::json!({
+            "docId": resolved_doc_id,
+            "input": input_value,
+        });
+        (query, vars)
     } else {
-        // Spread the input object as direct arguments
-        let args_str = if let Value::Object(map) = &input_value {
-            map.iter()
-                .map(|(k, v)| format!("{k}: {}", helpers::json_to_graphql(v)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        } else {
-            String::new()
-        };
+        // Direct args — build variable declarations and references dynamically
+        let mut var_decls = vec!["$docId: PHID!".to_string()];
+        let mut arg_refs = vec!["docId: $docId".to_string()];
+        let mut vars = serde_json::Map::new();
+        vars.insert("docId".into(), Value::String(resolved_doc_id.clone()));
 
-        let extra = if args_str.is_empty() {
-            String::new()
-        } else {
-            format!(", {args_str}")
-        };
+        if let Value::Object(map) = &input_value {
+            for (key, val) in map {
+                // Find the arg type from the operation definition
+                let arg_type = operation
+                    .args
+                    .iter()
+                    .find(|a| a.name == *key)
+                    .map(|a| a.type_name.as_str())
+                    .unwrap_or("String");
+                let required = operation
+                    .args
+                    .iter()
+                    .find(|a| a.name == *key)
+                    .is_some_and(|a| a.required);
+                let bang = if required { "!" } else { "" };
 
-        format!(
-            r#"mutation {{ {full_name}(docId: "{doc_id}"{extra}) }}"#,
-            full_name = operation.full_name,
-            doc_id = resolved_doc_id.replace('"', r#"\""#),
-        )
+                var_decls.push(format!("${key}: {arg_type}{bang}"));
+                arg_refs.push(format!("{key}: ${key}"));
+                vars.insert(key.clone(), val.clone());
+            }
+        }
+
+        let query = format!(
+            "mutation({decls}) {{ {name}({args}) {selection} }}",
+            decls = var_decls.join(", "),
+            name = operation.full_name,
+            args = arg_refs.join(", "),
+        );
+        (query, Value::Object(vars))
     };
 
     println!(
@@ -211,7 +241,7 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
         .dimmed()
     );
 
-    let data = client.query(&mutation, None).await?;
+    let data = client.query(&mutation, Some(&variables)).await?;
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
@@ -228,9 +258,7 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
 async fn try_field_editor(
     client: &GraphQLClient,
     input_arg: Option<&&crate::graphql::introspection::OperationArg>,
-    prefix: &str,
-    doc_id: &str,
-    drive_id: &str,
+    doc_identifier: &str,
 ) -> Result<Option<(Value, Vec<field_editor::InputField>)>> {
     let input_arg = input_arg.ok_or_else(|| anyhow::anyhow!("No input arg found"))?;
     let type_name = &input_arg.type_name;
@@ -242,7 +270,7 @@ async fn try_field_editor(
     }
 
     // Fetch current document state for pre-population
-    let state = match field_editor::fetch_document_state(client, prefix, doc_id, drive_id).await {
+    let state = match field_editor::fetch_document_state(client, doc_identifier).await {
         Ok(s) => s,
         Err(_) => {
             eprintln!(

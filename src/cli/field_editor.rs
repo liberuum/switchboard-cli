@@ -156,33 +156,19 @@ async fn fetch_enum_values(client: &GraphQLClient, type_name: &str) -> Result<Ve
 
 // ── Document state ───────────────────────────────────────────────────
 
-/// Fetch the current document state via getDocument(stateJSON).
+/// Fetch the current document state via document(identifier).
 pub async fn fetch_document_state(
     client: &GraphQLClient,
-    prefix: &str,
-    doc_id: &str,
-    drive_id: &str,
+    identifier: &str,
 ) -> Result<Value> {
     let query = format!(
-        r#"{{ {prefix} {{ getDocument(docId: "{doc_id}", driveId: "{drive_id}") {{ stateJSON }} }} }}"#,
-        doc_id = doc_id.replace('"', r#"\""#),
+        r#"{{ document(identifier: "{id}") {{ document {{ state }} }} }}"#,
+        id = identifier.replace('"', r#"\""#),
     );
 
     let data = client.query(&query, None).await?;
-    let state_val = data
-        .get(prefix)
-        .and_then(|v| v.get("getDocument"))
-        .and_then(|v| v.get("stateJSON"));
-
-    match state_val {
-        Some(Value::String(s)) => {
-            // stateJSON came back as a JSON string — parse it
-            Ok(serde_json::from_str(s).unwrap_or(Value::Object(Map::new())))
-        }
-        Some(val) if val.is_object() => {
-            // stateJSON came back as a JSON object directly
-            Ok(val.clone())
-        }
+    match data.pointer("/document/document/state") {
+        Some(val) if val.is_object() => Ok(val.clone()),
         _ => Ok(Value::Object(Map::new())),
     }
 }
@@ -583,53 +569,6 @@ fn value_preview(v: &Value) -> String {
                 s
             }
         }
-    }
-}
-
-// ── Schema-aware GraphQL serialization ───────────────────────────────
-
-/// Convert a JSON value to a GraphQL literal, using the schema to leave
-/// enum values unquoted (GraphQL requires `ACTIVE` not `"ACTIVE"`).
-pub fn json_to_graphql_with_schema(value: &Value, fields: &[InputField]) -> String {
-    match value {
-        Value::Object(map) => {
-            let parts: Vec<String> = map
-                .iter()
-                .map(|(k, v)| {
-                    let field_schema = fields.iter().find(|f| f.name == *k);
-                    let gql = match field_schema {
-                        Some(f) => value_to_graphql(v, &f.field_type),
-                        None => crate::cli::helpers::json_to_graphql(v),
-                    };
-                    format!("{k}: {gql}")
-                })
-                .collect();
-            format!("{{ {} }}", parts.join(", "))
-        }
-        _ => crate::cli::helpers::json_to_graphql(value),
-    }
-}
-
-fn value_to_graphql(value: &Value, field_type: &FieldType) -> String {
-    match field_type {
-        FieldType::Enum(_) => {
-            // Enum values must be unquoted in GraphQL
-            if let Some(s) = value.as_str() {
-                s.to_string()
-            } else {
-                crate::cli::helpers::json_to_graphql(value)
-            }
-        }
-        FieldType::List(inner) => {
-            if let Some(arr) = value.as_array() {
-                let items: Vec<String> = arr.iter().map(|v| value_to_graphql(v, inner)).collect();
-                format!("[{}]", items.join(", "))
-            } else {
-                crate::cli::helpers::json_to_graphql(value)
-            }
-        }
-        FieldType::InputObject(sub_fields) => json_to_graphql_with_schema(value, sub_fields),
-        FieldType::Scalar(_) => crate::cli::helpers::json_to_graphql(value),
     }
 }
 
