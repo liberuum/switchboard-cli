@@ -54,9 +54,7 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
     let doc_type = doc_data
         .pointer("/document/document/documentType")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            anyhow::anyhow!("Could not determine document type for {}", doc_identifier)
-        })?
+        .ok_or_else(|| anyhow::anyhow!("Could not determine document type for {}", doc_identifier))?
         .to_string();
 
     // Get the actual PHID (UUID) — mutations use docId, not identifier/slug
@@ -116,51 +114,50 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
     let effective_input = input_from_file.as_deref().or(args.input.as_deref());
 
     let input_value: Value = match effective_input {
-            Some(input) => {
-                serde_json::from_str(input)
-                    .map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?
-            }
-            None => {
-                let input_args: Vec<_> = operation
-                    .args
-                    .iter()
-                    .filter(|a| a.name != "docId" && a.name != "driveId")
-                    .collect();
+        Some(input) => {
+            serde_json::from_str(input).map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?
+        }
+        None => {
+            let input_args: Vec<_> = operation
+                .args
+                .iter()
+                .filter(|a| a.name != "docId" && a.name != "driveId")
+                .collect();
 
-                if input_args.is_empty() {
-                    Value::Object(serde_json::Map::new())
-                } else {
-                    // Try field-by-field editor for the "input" arg
-                    let input_arg = input_args.iter().find(|a| a.name == "input");
-                    match try_field_editor(&client, input_arg, &doc_identifier).await {
-                        Ok(Some((val, _schema))) => val,
-                        Ok(None) => {
-                            // User cancelled or no changes
-                            println!("No changes. Aborted.");
-                            return Ok(());
+            if input_args.is_empty() {
+                Value::Object(serde_json::Map::new())
+            } else {
+                // Try field-by-field editor for the "input" arg
+                let input_arg = input_args.iter().find(|a| a.name == "input");
+                match try_field_editor(&client, input_arg, &doc_identifier).await {
+                    Ok(Some((val, _schema))) => val,
+                    Ok(None) => {
+                        // User cancelled or no changes
+                        println!("No changes. Aborted.");
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        // Fallback to raw JSON input
+                        eprintln!(
+                            "{}",
+                            "Could not introspect input type — falling back to raw JSON input."
+                                .yellow()
+                        );
+                        println!("Expected input fields:");
+                        for arg in &input_args {
+                            let req = if arg.required { " (required)" } else { "" };
+                            println!("  {} : {}{}", arg.name, arg.type_name, req);
                         }
-                        Err(_) => {
-                            // Fallback to raw JSON input
-                            eprintln!(
-                                "{}",
-                                "Could not introspect input type — falling back to raw JSON input."
-                                    .yellow()
-                            );
-                            println!("Expected input fields:");
-                            for arg in &input_args {
-                                let req = if arg.required { " (required)" } else { "" };
-                                println!("  {} : {}{}", arg.name, arg.type_name, req);
-                            }
-                            let input_json: String = dialoguer::Input::new()
-                                .with_prompt("Input JSON")
-                                .interact_text()?;
-                            serde_json::from_str(&input_json)
-                                .map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?
-                        }
+                        let input_json: String = dialoguer::Input::new()
+                            .with_prompt("Input JSON")
+                            .interact_text()?;
+                        serde_json::from_str(&input_json)
+                            .map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?
                     }
                 }
             }
-        };
+        }
+    };
 
     // Build mutation using GraphQL variables to avoid string-interpolation issues
     // (newlines, special chars in values get properly serialized by serde)

@@ -178,10 +178,7 @@ async fn get(
                     .collect();
                 println!("Revision: {}", rev_str.join(", "));
             }
-            println!(
-                "Type:     {}",
-                doc["documentType"].as_str().unwrap_or("-")
-            );
+            println!("Type:     {}", doc["documentType"].as_str().unwrap_or("-"));
 
             // Show contents as a tree with metadata from state.global.nodes
             if let Some(nodes) = doc
@@ -334,9 +331,8 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
         .map(|id| format!("\"{}\"", id.replace('"', r#"\""#)))
         .collect::<Vec<_>>()
         .join(", ");
-    let mutation = format!(
-        r#"mutation {{ deleteDocuments(identifiers: [{id_list}], propagate: CASCADE) }}"#
-    );
+    let mutation =
+        format!(r#"mutation {{ deleteDocuments(identifiers: [{id_list}], propagate: CASCADE) }}"#);
 
     match client.query(&mutation, None).await {
         Ok(_) => {

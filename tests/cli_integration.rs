@@ -299,10 +299,7 @@ fn raw_query_find_documents() {
 #[test]
 fn introspect_succeeds() {
     let (stdout, stderr, ok) = run(&["introspect"]);
-    assert!(
-        ok,
-        "introspect failed: stdout={stdout} stderr={stderr}"
-    );
+    assert!(ok, "introspect failed: stdout={stdout} stderr={stderr}");
     assert!(
         stdout.contains("models discovered") || stdout.contains("document models"),
         "expected introspection output, got: {stdout}"
@@ -337,10 +334,7 @@ fn auth_status() {
     let (stdout, _, ok) = run(&["auth", "status"]);
     assert!(ok, "auth status failed");
     // Should show either "Authenticated" or "No token" or similar
-    assert!(
-        !stdout.is_empty(),
-        "auth status should produce output"
-    );
+    assert!(!stdout.is_empty(), "auth status should produce output");
 }
 
 // ── Export (dry run — just test that the command parses) ─────────────────────
@@ -392,11 +386,16 @@ fn docs_rename_and_parents() {
 
     // Create a doc in the drive
     let (doc_out, stderr, ok) = run(&[
-        "docs", "create",
-        "--type", "powerhouse/document-model",
-        "--name", &format!("rename-test-{pid}"),
-        "--drive", drive_id,
-        "--format", "json",
+        "docs",
+        "create",
+        "--type",
+        "powerhouse/document-model",
+        "--name",
+        &format!("rename-test-{pid}"),
+        "--drive",
+        drive_id,
+        "--format",
+        "json",
     ]);
     assert!(ok, "doc create failed: {stderr}");
     let doc: serde_json::Value = serde_json::from_str(&doc_out).unwrap();
@@ -428,23 +427,42 @@ fn docs_add_to_and_remove_from() {
     let pid = std::process::id();
 
     // Create two drives
-    let (d1_out, _, ok) = run(&["drives", "create", "--name", &format!("add-src-{pid}"), "--format", "json"]);
+    let (d1_out, _, ok) = run(&[
+        "drives",
+        "create",
+        "--name",
+        &format!("add-src-{pid}"),
+        "--format",
+        "json",
+    ]);
     assert!(ok);
     let d1: serde_json::Value = serde_json::from_str(&d1_out).unwrap();
     let d1_id = d1["id"].as_str().unwrap();
 
-    let (d2_out, _, ok) = run(&["drives", "create", "--name", &format!("add-dst-{pid}"), "--format", "json"]);
+    let (d2_out, _, ok) = run(&[
+        "drives",
+        "create",
+        "--name",
+        &format!("add-dst-{pid}"),
+        "--format",
+        "json",
+    ]);
     assert!(ok);
     let d2: serde_json::Value = serde_json::from_str(&d2_out).unwrap();
     let d2_id = d2["id"].as_str().unwrap();
 
     // Create a doc in d1
     let (doc_out, _, ok) = run(&[
-        "docs", "create",
-        "--type", "powerhouse/document-model",
-        "--name", &format!("addtest-{pid}"),
-        "--drive", d1_id,
-        "--format", "json",
+        "docs",
+        "create",
+        "--type",
+        "powerhouse/document-model",
+        "--name",
+        &format!("addtest-{pid}"),
+        "--drive",
+        d1_id,
+        "--format",
+        "json",
     ]);
     assert!(ok);
     let doc: serde_json::Value = serde_json::from_str(&doc_out).unwrap();
@@ -458,7 +476,11 @@ fn docs_add_to_and_remove_from() {
     let (parents_out, _, ok) = run(&["docs", "parents", doc_id, "--format", "json"]);
     assert!(ok);
     let parents: Vec<serde_json::Value> = serde_json::from_str(&parents_out).unwrap();
-    assert!(parents.len() >= 2, "expected at least 2 parents, got {}", parents.len());
+    assert!(
+        parents.len() >= 2,
+        "expected at least 2 parents, got {}",
+        parents.len()
+    );
 
     // Remove from d2
     let (_, _, ok) = run(&["docs", "remove-from", d2_id, doc_id, "--format", "json"]);
@@ -482,30 +504,51 @@ fn docs_move_between_drives() {
     let pid = std::process::id();
 
     // Create two drives
-    let (d1_out, _, ok) = run(&["drives", "create", "--name", &format!("mv-src-{pid}"), "--format", "json"]);
+    let (d1_out, _, ok) = run(&[
+        "drives",
+        "create",
+        "--name",
+        &format!("mv-src-{pid}"),
+        "--format",
+        "json",
+    ]);
     assert!(ok);
     let d1: serde_json::Value = serde_json::from_str(&d1_out).unwrap();
     let d1_id = d1["id"].as_str().unwrap();
 
-    let (d2_out, _, ok) = run(&["drives", "create", "--name", &format!("mv-dst-{pid}"), "--format", "json"]);
+    let (d2_out, _, ok) = run(&[
+        "drives",
+        "create",
+        "--name",
+        &format!("mv-dst-{pid}"),
+        "--format",
+        "json",
+    ]);
     assert!(ok);
     let d2: serde_json::Value = serde_json::from_str(&d2_out).unwrap();
     let d2_id = d2["id"].as_str().unwrap();
 
     // Create a doc in d1
     let (doc_out, _, ok) = run(&[
-        "docs", "create",
-        "--type", "powerhouse/document-model",
-        "--name", &format!("movetest-{pid}"),
-        "--drive", d1_id,
-        "--format", "json",
+        "docs",
+        "create",
+        "--type",
+        "powerhouse/document-model",
+        "--name",
+        &format!("movetest-{pid}"),
+        "--drive",
+        d1_id,
+        "--format",
+        "json",
     ]);
     assert!(ok);
     let doc: serde_json::Value = serde_json::from_str(&doc_out).unwrap();
     let doc_id = doc["DocumentModel_createDocument"]["id"].as_str().unwrap();
 
     // Move from d1 to d2
-    let (_, _, ok) = run(&["docs", "move", doc_id, "--from", d1_id, "--to", d2_id, "--format", "json"]);
+    let (_, _, ok) = run(&[
+        "docs", "move", doc_id, "--from", d1_id, "--to", d2_id, "--format", "json",
+    ]);
     assert!(ok, "move failed");
 
     // Verify parent is now d2, not d1
@@ -558,18 +601,30 @@ fn complete_document_model_lifecycle() {
 
     // 1. Create a drive to hold the document
     let drive_name = format!("lifecycle-drive-{pid}");
-    let (drive_out, stderr, ok) = run(&["drives", "create", "--name", &drive_name, "--format", "json"]);
+    let (drive_out, stderr, ok) = run(&[
+        "drives",
+        "create",
+        "--name",
+        &drive_name,
+        "--format",
+        "json",
+    ]);
     assert!(ok, "drive create failed: {stderr}");
     let drive: serde_json::Value = serde_json::from_str(&drive_out).unwrap();
     let drive_id = drive["id"].as_str().unwrap();
 
     // 2. Create a DocumentModel document in the drive
     let (doc_out, stderr, ok) = run(&[
-        "docs", "create",
-        "--type", "powerhouse/document-model",
-        "--name", &format!("TaskTracker-{pid}"),
-        "--drive", drive_id,
-        "--format", "json",
+        "docs",
+        "create",
+        "--type",
+        "powerhouse/document-model",
+        "--name",
+        &format!("TaskTracker-{pid}"),
+        "--drive",
+        drive_id,
+        "--format",
+        "json",
     ]);
     assert!(ok, "doc create failed: {stderr}");
     let doc: serde_json::Value = serde_json::from_str(&doc_out).unwrap();
@@ -577,94 +632,154 @@ fn complete_document_model_lifecycle() {
 
     // 3. Set model metadata
     let (_, _, ok) = run(&[
-        "docs", "mutate", doc_id, "setModelName",
-        "--input", r#"{"name": "TaskTracker"}"#,
-        "--format", "json",
+        "docs",
+        "mutate",
+        doc_id,
+        "setModelName",
+        "--input",
+        r#"{"name": "TaskTracker"}"#,
+        "--format",
+        "json",
     ]);
     assert!(ok, "setModelName failed");
 
     let (_, _, ok) = run(&[
-        "docs", "mutate", doc_id, "setModelId",
-        "--input", &format!(r#"{{"id": "test/task-tracker-{pid}"}}"#),
-        "--format", "json",
+        "docs",
+        "mutate",
+        doc_id,
+        "setModelId",
+        "--input",
+        &format!(r#"{{"id": "test/task-tracker-{pid}"}}"#),
+        "--format",
+        "json",
     ]);
     assert!(ok, "setModelId failed");
 
     let (_, _, ok) = run(&[
-        "docs", "mutate", doc_id, "setModelDescription",
-        "--input", r#"{"description": "A task tracking model with title, status, assignee, and priority"}"#,
-        "--format", "json",
+        "docs",
+        "mutate",
+        doc_id,
+        "setModelDescription",
+        "--input",
+        r#"{"description": "A task tracking model with title, status, assignee, and priority"}"#,
+        "--format",
+        "json",
     ]);
     assert!(ok, "setModelDescription failed");
 
     let (_, _, ok) = run(&[
-        "docs", "mutate", doc_id, "setAuthorName",
-        "--input", r#"{"authorName": "Switchboard CLI Integration Tests"}"#,
-        "--format", "json",
+        "docs",
+        "mutate",
+        doc_id,
+        "setAuthorName",
+        "--input",
+        r#"{"authorName": "Switchboard CLI Integration Tests"}"#,
+        "--format",
+        "json",
     ]);
     assert!(ok, "setAuthorName failed");
 
     let (_, _, ok) = run(&[
-        "docs", "mutate", doc_id, "setAuthorWebsite",
-        "--input", r#"{"authorWebsite": "https://github.com/liberuum/switchboard-cli"}"#,
-        "--format", "json",
+        "docs",
+        "mutate",
+        doc_id,
+        "setAuthorWebsite",
+        "--input",
+        r#"{"authorWebsite": "https://github.com/liberuum/switchboard-cli"}"#,
+        "--format",
+        "json",
     ]);
     assert!(ok, "setAuthorWebsite failed");
 
     // 4. Set state schema — tasks with title, status, assignee, priority
     let schema = r#"{"scope": "global", "schema": "{ \"type\": \"object\", \"properties\": { \"tasks\": { \"type\": \"array\", \"items\": { \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" }, \"title\": { \"type\": \"string\" }, \"status\": { \"type\": \"string\", \"enum\": [\"todo\", \"in_progress\", \"done\"] }, \"assignee\": { \"type\": \"string\" }, \"priority\": { \"type\": \"integer\", \"minimum\": 1, \"maximum\": 5 } }, \"required\": [\"id\", \"title\", \"status\"] } }, \"nextId\": { \"type\": \"integer\" } } }"}"#;
     let (_, _, ok) = run(&[
-        "docs", "mutate", doc_id, "setStateSchema",
-        "--input", schema,
-        "--format", "json",
+        "docs",
+        "mutate",
+        doc_id,
+        "setStateSchema",
+        "--input",
+        schema,
+        "--format",
+        "json",
     ]);
     assert!(ok, "setStateSchema failed");
 
     // 5. Set initial state
     let (_, _, ok) = run(&[
-        "docs", "mutate", doc_id, "setInitialState",
-        "--input", r#"{"scope": "global", "initialValue": "{ \"tasks\": [], \"nextId\": 1 }"}"#,
-        "--format", "json",
+        "docs",
+        "mutate",
+        doc_id,
+        "setInitialState",
+        "--input",
+        r#"{"scope": "global", "initialValue": "{ \"tasks\": [], \"nextId\": 1 }"}"#,
+        "--format",
+        "json",
     ]);
     assert!(ok, "setInitialState failed");
 
     // 6. Add a module and operations
     let (_, _, ok) = run(&[
-        "docs", "mutate", doc_id, "addModule",
-        "--input", r#"{"id": "task-ops", "name": "Task Operations", "description": "CRUD operations for tasks"}"#,
-        "--format", "json",
+        "docs",
+        "mutate",
+        doc_id,
+        "addModule",
+        "--input",
+        r#"{"id": "task-ops", "name": "Task Operations", "description": "CRUD operations for tasks"}"#,
+        "--format",
+        "json",
     ]);
     assert!(ok, "addModule failed");
 
     // addTask operation
     let (_, _, ok) = run(&[
-        "docs", "mutate", doc_id, "addOperation",
-        "--input", r#"{"moduleId": "task-ops", "id": "add-task", "name": "addTask", "description": "Create a new task", "schema": "{ \"type\": \"object\", \"properties\": { \"title\": { \"type\": \"string\" }, \"assignee\": { \"type\": \"string\" }, \"priority\": { \"type\": \"integer\" } }, \"required\": [\"title\"] }", "template": "", "reducer": "", "scope": "global"}"#,
-        "--format", "json",
+        "docs",
+        "mutate",
+        doc_id,
+        "addOperation",
+        "--input",
+        r#"{"moduleId": "task-ops", "id": "add-task", "name": "addTask", "description": "Create a new task", "schema": "{ \"type\": \"object\", \"properties\": { \"title\": { \"type\": \"string\" }, \"assignee\": { \"type\": \"string\" }, \"priority\": { \"type\": \"integer\" } }, \"required\": [\"title\"] }", "template": "", "reducer": "", "scope": "global"}"#,
+        "--format",
+        "json",
     ]);
     assert!(ok, "addOperation addTask failed");
 
     // completeTask operation
     let (_, _, ok) = run(&[
-        "docs", "mutate", doc_id, "addOperation",
-        "--input", r#"{"moduleId": "task-ops", "id": "complete-task", "name": "completeTask", "description": "Mark a task as done", "schema": "{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" } }, \"required\": [\"id\"] }", "template": "", "reducer": "", "scope": "global"}"#,
-        "--format", "json",
+        "docs",
+        "mutate",
+        doc_id,
+        "addOperation",
+        "--input",
+        r#"{"moduleId": "task-ops", "id": "complete-task", "name": "completeTask", "description": "Mark a task as done", "schema": "{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" } }, \"required\": [\"id\"] }", "template": "", "reducer": "", "scope": "global"}"#,
+        "--format",
+        "json",
     ]);
     assert!(ok, "addOperation completeTask failed");
 
     // reassignTask operation
     let (_, _, ok) = run(&[
-        "docs", "mutate", doc_id, "addOperation",
-        "--input", r#"{"moduleId": "task-ops", "id": "reassign-task", "name": "reassignTask", "description": "Change task assignee", "schema": "{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" }, \"assignee\": { \"type\": \"string\" } }, \"required\": [\"id\", \"assignee\"] }", "template": "", "reducer": "", "scope": "global"}"#,
-        "--format", "json",
+        "docs",
+        "mutate",
+        doc_id,
+        "addOperation",
+        "--input",
+        r#"{"moduleId": "task-ops", "id": "reassign-task", "name": "reassignTask", "description": "Change task assignee", "schema": "{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" }, \"assignee\": { \"type\": \"string\" } }, \"required\": [\"id\", \"assignee\"] }", "template": "", "reducer": "", "scope": "global"}"#,
+        "--format",
+        "json",
     ]);
     assert!(ok, "addOperation reassignTask failed");
 
     // deleteTask operation
     let (_, _, ok) = run(&[
-        "docs", "mutate", doc_id, "addOperation",
-        "--input", r#"{"moduleId": "task-ops", "id": "delete-task", "name": "deleteTask", "description": "Remove a task by ID", "schema": "{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" } }, \"required\": [\"id\"] }", "template": "", "reducer": "", "scope": "global"}"#,
-        "--format", "json",
+        "docs",
+        "mutate",
+        doc_id,
+        "addOperation",
+        "--input",
+        r#"{"moduleId": "task-ops", "id": "delete-task", "name": "deleteTask", "description": "Remove a task by ID", "schema": "{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" } }, \"required\": [\"id\"] }", "template": "", "reducer": "", "scope": "global"}"#,
+        "--format",
+        "json",
     ]);
     assert!(ok, "addOperation deleteTask failed");
 
@@ -674,27 +789,52 @@ fn complete_document_model_lifecycle() {
     let state: serde_json::Value = serde_json::from_str(&state_out).unwrap();
 
     // Verify metadata
-    assert_eq!(state["documentType"].as_str(), Some("powerhouse/document-model"));
+    assert_eq!(
+        state["documentType"].as_str(),
+        Some("powerhouse/document-model")
+    );
     let global = &state["state"]["global"];
     assert_eq!(global["name"].as_str(), Some("TaskTracker"));
     assert!(
-        global["id"].as_str().unwrap().starts_with("test/task-tracker-"),
+        global["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("test/task-tracker-"),
         "model ID should start with test/task-tracker-"
     );
     assert!(
-        global["description"].as_str().unwrap().contains("task tracking"),
+        global["description"]
+            .as_str()
+            .unwrap()
+            .contains("task tracking"),
         "description should mention task tracking"
     );
-    assert_eq!(global["author"]["name"].as_str(), Some("Switchboard CLI Integration Tests"));
-    assert_eq!(global["author"]["website"].as_str(), Some("https://github.com/liberuum/switchboard-cli"));
+    assert_eq!(
+        global["author"]["name"].as_str(),
+        Some("Switchboard CLI Integration Tests")
+    );
+    assert_eq!(
+        global["author"]["website"].as_str(),
+        Some("https://github.com/liberuum/switchboard-cli")
+    );
 
     // Verify state schema
-    let schema_str = global["specifications"][0]["state"]["global"]["schema"].as_str().unwrap();
-    assert!(schema_str.contains("tasks"), "schema should define tasks array");
-    assert!(schema_str.contains("priority"), "schema should define priority");
+    let schema_str = global["specifications"][0]["state"]["global"]["schema"]
+        .as_str()
+        .unwrap();
+    assert!(
+        schema_str.contains("tasks"),
+        "schema should define tasks array"
+    );
+    assert!(
+        schema_str.contains("priority"),
+        "schema should define priority"
+    );
 
     // Verify initial state
-    let init = global["specifications"][0]["state"]["global"]["initialValue"].as_str().unwrap();
+    let init = global["specifications"][0]["state"]["global"]["initialValue"]
+        .as_str()
+        .unwrap();
     assert!(init.contains("tasks"), "initial state should have tasks");
     assert!(init.contains("nextId"), "initial state should have nextId");
 

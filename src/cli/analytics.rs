@@ -33,7 +33,11 @@ pub enum AnalyticsCommand {
     },
 }
 
-pub async fn run(cmd: AnalyticsCommand, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
+pub async fn run(
+    cmd: AnalyticsCommand,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+) -> Result<()> {
     match cmd {
         AnalyticsCommand::Metrics => metrics(format, profile_name).await,
         AnalyticsCommand::Dimensions => dimensions(format, profile_name).await,
@@ -44,16 +48,25 @@ pub async fn run(cmd: AnalyticsCommand, format: OutputFormat, profile_name: Opti
             granularity,
             metrics,
             currency,
-        } => series(start, end, granularity, metrics, currency, format, profile_name).await,
+        } => {
+            series(
+                start,
+                end,
+                granularity,
+                metrics,
+                currency,
+                format,
+                profile_name,
+            )
+            .await
+        }
     }
 }
 
 async fn metrics(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    let data = client
-        .query("{ analytics { metrics } }", None)
-        .await?;
+    let data = client.query("{ analytics { metrics } }", None).await?;
 
     let metrics = data
         .pointer("/analytics/metrics")
@@ -81,7 +94,10 @@ async fn dimensions(format: OutputFormat, profile_name: Option<&str>) -> Result<
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
     let data = client
-        .query("{ analytics { dimensions { name values { path label } } } }", None)
+        .query(
+            "{ analytics { dimensions { name values { path label } } } }",
+            None,
+        )
         .await?;
 
     let dims = data
@@ -105,11 +121,7 @@ async fn dimensions(format: OutputFormat, profile_name: Option<&str>) -> Result<
                         .as_array()
                         .map(|arr| {
                             arr.iter()
-                                .filter_map(|v| {
-                                    v["label"]
-                                        .as_str()
-                                        .or_else(|| v["path"].as_str())
-                                })
+                                .filter_map(|v| v["label"].as_str().or_else(|| v["path"].as_str()))
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         })
@@ -127,9 +139,7 @@ async fn dimensions(format: OutputFormat, profile_name: Option<&str>) -> Result<
 async fn currencies(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    let data = client
-        .query("{ analytics { currencies } }", None)
-        .await?;
+    let data = client.query("{ analytics { currencies } }", None).await?;
 
     let currencies = data
         .pointer("/analytics/currencies")

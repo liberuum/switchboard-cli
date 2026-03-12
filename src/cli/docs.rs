@@ -159,9 +159,8 @@ async fn fetch_drive_nodes(
     drive_identifier: &str,
 ) -> Result<(String, String, Vec<Value>)> {
     let escaped = drive_identifier.replace('"', r#"\""#);
-    let query = format!(
-        r#"{{ document(identifier: "{escaped}") {{ document {{ id name state }} }} }}"#
-    );
+    let query =
+        format!(r#"{{ document(identifier: "{escaped}") {{ document {{ id name state }} }} }}"#);
     let data = client.query(&query, None).await?;
     let doc = data
         .pointer("/document/document")
@@ -191,9 +190,8 @@ async fn list(
     let drive_ids: Vec<(String, String)> = match drive {
         Some(d) => {
             let escaped = d.replace('"', r#"\""#);
-            let query = format!(
-                r#"{{ document(identifier: "{escaped}") {{ document {{ id name }} }} }}"#
-            );
+            let query =
+                format!(r#"{{ document(identifier: "{escaped}") {{ document {{ id name }} }} }}"#);
             let data = client.query(&query, None).await?;
             let id = data
                 .pointer("/document/document/id")
@@ -675,9 +673,10 @@ async fn create(
     );
 
     let data = client.query(&mutation, None).await?;
-    let doc_id = data
-        .get(&model.create_mutation)
-        .and_then(|v| v.as_str().or_else(|| v.get("id").and_then(|id| id.as_str())));
+    let doc_id = data.get(&model.create_mutation).and_then(|v| {
+        v.as_str()
+            .or_else(|| v.get("id").and_then(|id| id.as_str()))
+    });
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
@@ -719,9 +718,8 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
         .map(|id| format!("\"{}\"", id.replace('"', r#"\""#)))
         .collect::<Vec<_>>()
         .join(", ");
-    let mutation = format!(
-        r#"mutation {{ deleteDocuments(identifiers: [{id_list}], propagate: CASCADE) }}"#
-    );
+    let mutation =
+        format!(r#"mutation {{ deleteDocuments(identifiers: [{id_list}], propagate: CASCADE) }}"#);
 
     match client.query(&mutation, None).await {
         Ok(_) => {
@@ -757,7 +755,11 @@ async fn rename(
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(doc),
         _ => {
-            println!("{} Renamed to \"{}\"", "✓".green(), doc["name"].as_str().unwrap_or(name));
+            println!(
+                "{} Renamed to \"{}\"",
+                "✓".green(),
+                doc["name"].as_str().unwrap_or(name)
+            );
         }
     }
 

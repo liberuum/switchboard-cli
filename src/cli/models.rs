@@ -92,7 +92,6 @@ fn get(type_or_prefix: &str, format: OutputFormat, profile_name: Option<&str>) -
                     .collect();
                 println!("  {}({})", op.full_name, args.join(", "));
             }
-
         }
     }
 

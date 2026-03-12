@@ -72,8 +72,7 @@ fn build_header(doc: &Value) -> PhdHeader {
     let revision = if let Some(arr) = doc["revisionsList"].as_array() {
         let mut rev_map = serde_json::Map::new();
         for entry in arr {
-            if let (Some(scope), Some(rev)) =
-                (entry["scope"].as_str(), entry["revision"].as_u64())
+            if let (Some(scope), Some(rev)) = (entry["scope"].as_str(), entry["revision"].as_u64())
             {
                 rev_map.insert(scope.to_string(), serde_json::json!(rev));
             }
@@ -369,9 +368,8 @@ async fn export_drive(
 
     // Also get the drive name
     let escaped = drive.replace('"', r#"\""#);
-    let name_query = format!(
-        r#"{{ document(identifier: "{escaped}") {{ document {{ name }} }} }}"#
-    );
+    let name_query =
+        format!(r#"{{ document(identifier: "{escaped}") {{ document {{ name }} }} }}"#);
     let name_data = client.query(&name_query, None).await?;
     let drive_name = name_data
         .pointer("/document/document/name")
@@ -487,9 +485,7 @@ const REQUEST_DELAY_MS: u64 = 200;
 /// Fetch drive nodes via the document() query on the main GraphQL endpoint.
 async fn fetch_drive_nodes(client: &GraphQLClient, drive_identifier: &str) -> Result<Vec<Value>> {
     let escaped = drive_identifier.replace('"', r#"\""#);
-    let query = format!(
-        r#"{{ document(identifier: "{escaped}") {{ document {{ state }} }} }}"#,
-    );
+    let query = format!(r#"{{ document(identifier: "{escaped}") {{ document {{ state }} }} }}"#,);
     let data = client.query(&query, None).await?;
     Ok(data
         .pointer("/document/document/state/nodes")
@@ -500,10 +496,7 @@ async fn fetch_drive_nodes(client: &GraphQLClient, drive_identifier: &str) -> Re
 
 /// Fetch a document's full data (metadata + state + operations) via the main GraphQL endpoint.
 /// Uses document() for metadata/state and documentOperations() for ops with pagination.
-async fn fetch_document(
-    client: &GraphQLClient,
-    doc_id: &str,
-) -> Result<(Value, Vec<Value>)> {
+async fn fetch_document(client: &GraphQLClient, doc_id: &str) -> Result<(Value, Vec<Value>)> {
     let escaped = doc_id.replace('"', r#"\""#);
 
     // Fetch document metadata and state
@@ -554,7 +547,10 @@ async fn fetch_document(
         .iter()
         .map(|op| {
             let action = &op["action"];
-            let input = action.get("input").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+            let input = action
+                .get("input")
+                .cloned()
+                .unwrap_or(Value::Object(serde_json::Map::new()));
             let scope = action["scope"].as_str().unwrap_or("global");
 
             serde_json::json!({
@@ -710,13 +706,8 @@ pub async fn run_import(
 
         // Step 2: Push operations via mutateDocument
         if ops_count > 0 {
-            match push_operations_via_mutate(
-                &client,
-                &new_doc_id,
-                &contents.operations,
-                quiet,
-            )
-            .await
+            match push_operations_via_mutate(&client, &new_doc_id, &contents.operations, quiet)
+                .await
             {
                 Ok(pushed) => {
                     if !quiet {
@@ -786,7 +777,10 @@ async fn push_operations_via_mutate(
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let input = action.get("input").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+                    let input = action
+                        .get("input")
+                        .cloned()
+                        .unwrap_or(Value::Object(serde_json::Map::new()));
                     let scope = action["scope"].as_str().unwrap_or("global");
 
                     serde_json::json!({
@@ -801,10 +795,7 @@ async fn push_operations_via_mutate(
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let input_text = op
-                        .get("inputText")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("{}");
+                    let input_text = op.get("inputText").and_then(|v| v.as_str()).unwrap_or("{}");
                     let input: Value = serde_json::from_str(input_text)
                         .unwrap_or(Value::Object(serde_json::Map::new()));
 
@@ -854,9 +845,7 @@ async fn verify_state(
     expected_global: &Value,
 ) -> Result<bool> {
     let escaped = doc_id.replace('"', r#"\""#);
-    let query = format!(
-        r#"{{ document(identifier: "{escaped}") {{ document {{ state }} }} }}"#,
-    );
+    let query = format!(r#"{{ document(identifier: "{escaped}") {{ document {{ state }} }} }}"#,);
     let data = client.query(&query, None).await?;
 
     let actual = data

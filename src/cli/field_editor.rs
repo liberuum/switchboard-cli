@@ -157,10 +157,7 @@ async fn fetch_enum_values(client: &GraphQLClient, type_name: &str) -> Result<Ve
 // ── Document state ───────────────────────────────────────────────────
 
 /// Fetch the current document state via document(identifier).
-pub async fn fetch_document_state(
-    client: &GraphQLClient,
-    identifier: &str,
-) -> Result<Value> {
+pub async fn fetch_document_state(client: &GraphQLClient, identifier: &str) -> Result<Value> {
     let query = format!(
         r#"{{ document(identifier: "{id}") {{ document {{ state }} }} }}"#,
         id = identifier.replace('"', r#"\""#),

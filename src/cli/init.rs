@@ -70,9 +70,8 @@ pub async fn run() -> Result<()> {
                 && !client.has_token()
             {
                 eprintln!("{} Server requires authentication.", "⚠".yellow());
-                let retry_token: String = Input::new()
-                    .with_prompt("Bearer token")
-                    .interact_text()?;
+                let retry_token: String =
+                    Input::new().with_prompt("Bearer token").interact_text()?;
                 let retry_token = strip_terminal_escapes(&retry_token);
                 if !retry_token.is_empty() {
                     token = Some(retry_token);
