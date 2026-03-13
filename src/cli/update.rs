@@ -73,7 +73,10 @@ pub fn parse_version(tag: &str) -> Option<(u32, u32, u32)> {
 
 pub fn is_newer(latest: &str, current: &str) -> bool {
     // Both staging: compare staging numbers
-    if let (Some(l), Some(c)) = (parse_staging_version(latest), parse_staging_version(current)) {
+    if let (Some(l), Some(c)) = (
+        parse_staging_version(latest),
+        parse_staging_version(current),
+    ) {
         return l > c;
     }
     // Both stable: compare semver
