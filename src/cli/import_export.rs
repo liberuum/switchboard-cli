@@ -613,7 +613,6 @@ fn format_bytes(bytes: u64) -> String {
 
 // --- Import ---
 
-
 pub async fn run_import(
     files: Vec<String>,
     drive: String,
@@ -713,8 +712,14 @@ pub async fn run_import(
 
         // Step 2: Push operations via model-specific mutations
         if ops_count > 0 {
-            match push_operations_via_mutate(&client, &new_doc_id, &contents.operations, model, quiet)
-                .await
+            match push_operations_via_mutate(
+                &client,
+                &new_doc_id,
+                &contents.operations,
+                model,
+                quiet,
+            )
+            .await
             {
                 Ok(pushed) => {
                     if !quiet {
@@ -781,8 +786,8 @@ async fn push_operations_via_mutate(
         } else {
             let t = op.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let input_text = op.get("inputText").and_then(|v| v.as_str()).unwrap_or("{}");
-            let i: Value = serde_json::from_str(input_text)
-                .unwrap_or(Value::Object(serde_json::Map::new()));
+            let i: Value =
+                serde_json::from_str(input_text).unwrap_or(Value::Object(serde_json::Map::new()));
             let s = op
                 .get("scope")
                 .and_then(|v| v.as_str())
@@ -800,11 +805,7 @@ async fn push_operations_via_mutate(
         let camel_name = screaming_snake_to_camel(&op_type);
 
         // Find the matching operation in the model's introspection cache
-        let model_op = match model
-            .operations
-            .iter()
-            .find(|o| o.operation == camel_name)
-        {
+        let model_op = match model.operations.iter().find(|o| o.operation == camel_name) {
             Some(op) => op,
             None => {
                 if !quiet {
