@@ -68,15 +68,16 @@ resolve_version() {
 
   if [ "$channel" = "staging" ]; then
     # Staging: find the latest v0.0.0-staging.* prerelease tag
+    # Use grep -o to extract each tag_name onto its own line (API may return single-line JSON)
     latest="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
-      | grep '"tag_name"' \
+      | grep -oE '"tag_name": *"[^"]+"' \
       | grep 'staging' \
       | head -1 \
       | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
   else
     # Stable: use the /releases/latest endpoint (excludes prereleases)
     latest="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-      | grep '"tag_name"' \
+      | grep -oE '"tag_name": *"[^"]+"' \
       | head -1 \
       | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
   fi
