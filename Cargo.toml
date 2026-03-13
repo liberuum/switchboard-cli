@@ -1,6 +1,6 @@
 [package]
 name = "switchboard-cli"
-version = "0.0.0-staging.4"
+version = "0.0.0-staging.5"
 edition = "2024"
 description = "A standalone CLI for interacting with Switchboard GraphQL instances"
 license = "MIT"
