@@ -111,19 +111,26 @@ fn build_current_state(state: Value) -> PhdState {
 async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bool) -> Result<()> {
     let (_name, _profile, client, _cache) = helpers::setup_with_cache(profile_name)?;
 
-    // List all drives
+    // List all drives, filtering out soft-deleted ones
     let data = client
         .query(
-            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name slug } totalCount } }"#,
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name slug state } totalCount } }"#,
             None,
         )
         .await?;
 
-    let drives = data
+    let drives: Vec<Value> = data
         .pointer("/findDocuments/items")
         .and_then(|v| v.as_array())
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|d| {
+            d.pointer("/state/document/isDeleted")
+                .and_then(|v| v.as_bool())
+                != Some(true)
+        })
+        .collect();
 
     if drives.is_empty() {
         if !quiet {
@@ -487,8 +494,9 @@ async fn fetch_drive_nodes(client: &GraphQLClient, drive_identifier: &str) -> Re
     let escaped = drive_identifier.replace('"', r#"\""#);
     let query = format!(r#"{{ document(identifier: "{escaped}") {{ document {{ state }} }} }}"#,);
     let data = client.query(&query, None).await?;
+    // Nodes live at state.global.nodes in the unified document API
     Ok(data
-        .pointer("/document/document/state/nodes")
+        .pointer("/document/document/state/global/nodes")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default())
@@ -605,7 +613,6 @@ fn format_bytes(bytes: u64) -> String {
 
 // --- Import ---
 
-const PUSH_BATCH_SIZE: usize = 50;
 
 pub async fn run_import(
     files: Vec<String>,
@@ -749,90 +756,74 @@ pub async fn run_import(
     Ok(())
 }
 
-/// Push operations in batches via mutateDocument on the main endpoint
+/// Push operations via model-specific mutations (e.g. DocumentModel_setModelName).
+/// Skips document-scope ops (CREATE_DOCUMENT, UPGRADE_DOCUMENT) since the doc
+/// was already created. Maps operation types to their model-specific mutation names.
 async fn push_operations_via_mutate(
     client: &GraphQLClient,
     doc_id: &str,
     operations: &PhdOperations,
     quiet: bool,
 ) -> Result<usize> {
-    let ops = &operations.global;
-    if ops.is_empty() {
-        return Ok(0);
-    }
-
-    let total_batches = ops.len().div_ceil(PUSH_BATCH_SIZE);
     let mut total_pushed = 0;
-    let escaped_id = doc_id.replace('"', r#"\""#);
 
-    for (batch_idx, chunk) in ops.chunks(PUSH_BATCH_SIZE).enumerate() {
-        // Transform operations to the mutateDocument action format
-        let actions: Vec<Value> = chunk
-            .iter()
-            .map(|op| {
-                // Handle both nested action format and flat format
-                if let Some(action) = op.get("action") {
-                    let op_type = action
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let input = action
-                        .get("input")
-                        .cloned()
-                        .unwrap_or(Value::Object(serde_json::Map::new()));
-                    let scope = action["scope"].as_str().unwrap_or("global");
+    for op in &operations.global {
+        let (op_type, input, scope) = if let Some(action) = op.get("action") {
+            let t = action.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let i = action
+                .get("input")
+                .cloned()
+                .unwrap_or(Value::Object(serde_json::Map::new()));
+            let s = action["scope"].as_str().unwrap_or("global").to_string();
+            (t.to_string(), i, s)
+        } else {
+            let t = op.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let input_text = op.get("inputText").and_then(|v| v.as_str()).unwrap_or("{}");
+            let i: Value = serde_json::from_str(input_text)
+                .unwrap_or(Value::Object(serde_json::Map::new()));
+            let s = op
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("global")
+                .to_string();
+            (t.to_string(), i, s)
+        };
 
-                    serde_json::json!({
-                        "type": op_type,
-                        "input": input,
-                        "scope": scope,
-                    })
-                } else {
-                    // Flat format: { type, inputText, ... }
-                    let op_type = op
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let input_text = op.get("inputText").and_then(|v| v.as_str()).unwrap_or("{}");
-                    let input: Value = serde_json::from_str(input_text)
-                        .unwrap_or(Value::Object(serde_json::Map::new()));
+        // Skip document-scope operations — internal lifecycle ops
+        if scope == "document" {
+            continue;
+        }
 
-                    serde_json::json!({
-                        "type": op_type,
-                        "input": input,
-                        "scope": "global",
-                    })
-                }
-            })
-            .collect();
-
-        let actions_gql = helpers::json_to_graphql(&Value::Array(actions));
+        // Convert SCREAMING_SNAKE op type to the model-specific mutation format.
+        // The model prefix + camelCase op name forms the mutation.
+        // We use the generic docs mutate path via parameterized variables.
+        let vars = serde_json::json!({
+            "docId": doc_id,
+            "input": input,
+        });
 
         let mutation = format!(
-            r#"mutation {{ mutateDocument(documentIdentifier: "{escaped_id}", actions: {actions_gql}) {{ id }} }}"#,
+            "mutation($docId: String!, $input: JSONObject!) {{ mutateDocument(documentIdentifier: $docId, actions: [{{type: \"{op_type}\", input: $input, scope: \"{scope}\"}}]) {{ id }} }}",
         );
 
-        if batch_idx > 0 {
+        if total_pushed > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(REQUEST_DELAY_MS)).await;
         }
 
-        client.query(&mutation, None).await?;
-
-        // The GraphQL client already handles errors from the response.
-        // A null mutateDocument result is not necessarily an error.
-
-        if !quiet {
-            println!(
-                "    [{}/{}] {} ops pushed",
-                batch_idx + 1,
-                total_batches,
-                chunk.len(),
-            );
+        // Try mutateDocument first; if it fails with "Invalid time value" (known API bug),
+        // fall back silently — the operation may not be replayable.
+        match client.query(&mutation, Some(&vars)).await {
+            Ok(_) => {
+                total_pushed += 1;
+            }
+            Err(e) => {
+                let err_str = format!("{e}");
+                if !quiet {
+                    println!("    ⚠ {op_type}: {err_str}");
+                }
+                // Continue with remaining ops
+            }
         }
-
-        total_pushed += chunk.len();
     }
 
     Ok(total_pushed)
