@@ -210,9 +210,19 @@ pub fn load_cache(profile_name: &str) -> Result<Option<IntrospectionCache>> {
     }
     let contents = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read cache: {}", path.display()))?;
-    let cache: IntrospectionCache = serde_json::from_str(&contents)
-        .with_context(|| format!("Failed to parse cache: {}", path.display()))?;
-    Ok(Some(cache))
+    match serde_json::from_str::<IntrospectionCache>(&contents) {
+        Ok(cache) => Ok(Some(cache)),
+        Err(_) => {
+            // Cache format is incompatible (e.g. written by a different version).
+            // Delete the stale file and re-introspect on next use.
+            eprintln!(
+                "Cache format outdated, removing {}. Run `switchboard introspect` to rebuild.",
+                path.display()
+            );
+            let _ = std::fs::remove_file(&path);
+            Ok(None)
+        }
+    }
 }
 
 pub fn save_cache(profile_name: &str, cache: &IntrospectionCache) -> Result<()> {

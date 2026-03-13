@@ -39,6 +39,24 @@ struct Asset {
 
 // ── Version helpers ─────────────────────────────────────────────────────────
 
+/// Returns true if the current build is a staging version (0.0.0-staging.N).
+pub fn is_staging() -> bool {
+    CURRENT_VERSION.contains("-staging.")
+}
+
+/// Parse a staging tag like "v0.0.0-staging.5" → Some(5).
+pub fn parse_staging_version(tag: &str) -> Option<u32> {
+    let v = tag.strip_prefix('v').unwrap_or(tag);
+    let suffix = v.strip_prefix("0.0.0-staging.")?;
+    suffix.parse().ok()
+}
+
+/// Returns true if `tag` is a staging release tag.
+pub fn is_staging_tag(tag: &str) -> bool {
+    let v = tag.strip_prefix('v').unwrap_or(tag);
+    v.starts_with("0.0.0-staging.")
+}
+
 pub fn parse_version(tag: &str) -> Option<(u32, u32, u32)> {
     let v = tag.strip_prefix('v').unwrap_or(tag);
     let parts: Vec<&str> = v.split('.').collect();
@@ -54,6 +72,11 @@ pub fn parse_version(tag: &str) -> Option<(u32, u32, u32)> {
 }
 
 pub fn is_newer(latest: &str, current: &str) -> bool {
+    // Both staging: compare staging numbers
+    if let (Some(l), Some(c)) = (parse_staging_version(latest), parse_staging_version(current)) {
+        return l > c;
+    }
+    // Both stable: compare semver
     match (parse_version(latest), parse_version(current)) {
         (Some(l), Some(c)) => l > c,
         _ => false,
@@ -126,7 +149,25 @@ pub async fn run(check: bool, quiet: bool) -> Result<()> {
         bail!("No releases found on GitHub");
     }
 
-    let latest = &releases[0];
+    // Filter releases by channel: staging builds only see staging releases, stable only stable
+    let staging = is_staging();
+    let channel_releases: Vec<&Release> = releases
+        .iter()
+        .filter(|r| {
+            if staging {
+                is_staging_tag(&r.tag_name)
+            } else {
+                !is_staging_tag(&r.tag_name)
+            }
+        })
+        .collect();
+
+    if channel_releases.is_empty() {
+        let channel = if staging { "staging" } else { "stable" };
+        bail!("No {channel} releases found on GitHub");
+    }
+
+    let latest = channel_releases[0];
     let latest_tag = &latest.tag_name;
     let current_tag = format!("v{CURRENT_VERSION}");
 
@@ -147,7 +188,7 @@ pub async fn run(check: bool, quiet: bool) -> Result<()> {
 
     // ── Show changelog for all intermediate versions ────────────────────
 
-    let newer_releases: Vec<&Release> = releases
+    let newer_releases: Vec<&&Release> = channel_releases
         .iter()
         .filter(|r| is_newer(&r.tag_name, &current_tag))
         .collect();
@@ -333,19 +374,39 @@ async fn update_cache_if_stale() -> Result<()> {
         .user_agent("switchboard-cli")
         .build()?;
 
-    let release: LatestRelease = client
-        .get(format!(
-            "https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-        ))
-        .send()
-        .await?
-        .json()
-        .await?;
+    let latest_tag = if is_staging() {
+        // /releases/latest skips prereleases, so fetch the list and find the first staging tag
+        let releases: Vec<LatestRelease> = client
+            .get(format!(
+                "https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=20"
+            ))
+            .send()
+            .await?
+            .json()
+            .await?;
+        releases
+            .iter()
+            .find(|r| is_staging_tag(&r.tag_name))
+            .map(|r| r.tag_name.clone())
+            .unwrap_or_default()
+    } else {
+        let release: LatestRelease = client
+            .get(format!(
+                "https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            ))
+            .send()
+            .await?
+            .json()
+            .await?;
+        release.tag_name
+    };
 
-    write_update_cache(&UpdateCache {
-        last_checked: now,
-        latest_version: release.tag_name,
-    });
+    if !latest_tag.is_empty() {
+        write_update_cache(&UpdateCache {
+            last_checked: now,
+            latest_version: latest_tag,
+        });
+    }
 
     Ok(())
 }
