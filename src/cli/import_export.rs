@@ -711,9 +711,9 @@ pub async fn run_import(
             }
         };
 
-        // Step 2: Push operations via mutateDocument
+        // Step 2: Push operations via model-specific mutations
         if ops_count > 0 {
-            match push_operations_via_mutate(&client, &new_doc_id, &contents.operations, quiet)
+            match push_operations_via_mutate(&client, &new_doc_id, &contents.operations, model, quiet)
                 .await
             {
                 Ok(pushed) => {
@@ -758,11 +758,13 @@ pub async fn run_import(
 
 /// Push operations via model-specific mutations (e.g. DocumentModel_setModelName).
 /// Skips document-scope ops (CREATE_DOCUMENT, UPGRADE_DOCUMENT) since the doc
-/// was already created. Maps operation types to their model-specific mutation names.
+/// was already created. Converts SCREAMING_SNAKE op types to camelCase and
+/// looks them up in the introspection cache for proper typed mutations.
 async fn push_operations_via_mutate(
     client: &GraphQLClient,
     doc_id: &str,
     operations: &PhdOperations,
+    model: &crate::graphql::introspection::DocumentModel,
     quiet: bool,
 ) -> Result<usize> {
     let mut total_pushed = 0;
@@ -794,24 +796,91 @@ async fn push_operations_via_mutate(
             continue;
         }
 
-        // Convert SCREAMING_SNAKE op type to the model-specific mutation format.
-        // The model prefix + camelCase op name forms the mutation.
-        // We use the generic docs mutate path via parameterized variables.
-        let vars = serde_json::json!({
-            "docId": doc_id,
-            "input": input,
-        });
+        // Convert SCREAMING_SNAKE (e.g. SET_MODEL_NAME) to camelCase (e.g. setModelName)
+        let camel_name = screaming_snake_to_camel(&op_type);
 
-        let mutation = format!(
-            "mutation($docId: String!, $input: JSONObject!) {{ mutateDocument(documentIdentifier: $docId, actions: [{{type: \"{op_type}\", input: $input, scope: \"{scope}\"}}]) {{ id }} }}",
-        );
+        // Find the matching operation in the model's introspection cache
+        let model_op = match model
+            .operations
+            .iter()
+            .find(|o| o.operation == camel_name)
+        {
+            Some(op) => op,
+            None => {
+                if !quiet {
+                    println!("    ⚠ {op_type}: no matching mutation found (tried {camel_name})");
+                }
+                continue;
+            }
+        };
+
+        // Build the mutation using the model-specific typed mutation
+        let has_input_arg = model_op.args.iter().any(|a| a.name == "input");
+
+        let (mutation, vars) = if has_input_arg {
+            let input_type = model_op
+                .args
+                .iter()
+                .find(|a| a.name == "input")
+                .map(|a| &a.type_name)
+                .unwrap();
+            let required = model_op
+                .args
+                .iter()
+                .find(|a| a.name == "input")
+                .is_some_and(|a| a.required);
+            let bang = if required { "!" } else { "" };
+
+            let query = format!(
+                "mutation($docId: PHID!, $input: {input_type}{bang}) {{ {name}(docId: $docId, input: $input) {{ id }} }}",
+                name = model_op.full_name,
+            );
+            let vars = serde_json::json!({
+                "docId": doc_id,
+                "input": input,
+            });
+            (query, vars)
+        } else {
+            // Direct args — pass input fields as top-level variables
+            let mut var_decls = vec!["$docId: PHID!".to_string()];
+            let mut arg_refs = vec!["docId: $docId".to_string()];
+            let mut vars_map = serde_json::Map::new();
+            vars_map.insert("docId".into(), Value::String(doc_id.to_string()));
+
+            if let Value::Object(map) = &input {
+                for (key, val) in map {
+                    let arg_type = model_op
+                        .args
+                        .iter()
+                        .find(|a| a.name == *key)
+                        .map(|a| a.type_name.as_str())
+                        .unwrap_or("String");
+                    let required = model_op
+                        .args
+                        .iter()
+                        .find(|a| a.name == *key)
+                        .is_some_and(|a| a.required);
+                    let bang = if required { "!" } else { "" };
+
+                    var_decls.push(format!("${key}: {arg_type}{bang}"));
+                    arg_refs.push(format!("{key}: ${key}"));
+                    vars_map.insert(key.clone(), val.clone());
+                }
+            }
+
+            let query = format!(
+                "mutation({decls}) {{ {name}({args}) {{ id }} }}",
+                decls = var_decls.join(", "),
+                name = model_op.full_name,
+                args = arg_refs.join(", "),
+            );
+            (query, Value::Object(vars_map))
+        };
 
         if total_pushed > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(REQUEST_DELAY_MS)).await;
         }
 
-        // Try mutateDocument first; if it fails with "Invalid time value" (known API bug),
-        // fall back silently — the operation may not be replayable.
         match client.query(&mutation, Some(&vars)).await {
             Ok(_) => {
                 total_pushed += 1;
@@ -827,6 +896,26 @@ async fn push_operations_via_mutate(
     }
 
     Ok(total_pushed)
+}
+
+/// Convert SCREAMING_SNAKE_CASE to camelCase.
+/// e.g. "SET_MODEL_NAME" → "setModelName"
+fn screaming_snake_to_camel(s: &str) -> String {
+    let mut result = String::new();
+    let mut capitalize_next = false;
+    for (i, c) in s.chars().enumerate() {
+        if c == '_' {
+            capitalize_next = true;
+        } else if i == 0 || (!capitalize_next && result.is_empty()) {
+            result.push(c.to_ascii_lowercase());
+        } else if capitalize_next {
+            result.push(c.to_ascii_uppercase());
+            capitalize_next = false;
+        } else {
+            result.push(c.to_ascii_lowercase());
+        }
+    }
+    result
 }
 
 /// Verify the imported document's state matches the expected state from the .phd
