@@ -26,12 +26,6 @@ pub enum DrivesCommand {
         /// Drive name
         #[arg(long)]
         name: Option<String>,
-        /// Drive slug (human-readable URL identifier)
-        #[arg(long)]
-        slug: Option<String>,
-        /// Custom drive ID (omit to let server auto-generate a UUID)
-        #[arg(long)]
-        id: Option<String>,
         /// Icon URL
         #[arg(long)]
         icon: Option<String>,
@@ -59,11 +53,9 @@ pub async fn run(
         DrivesCommand::Get { id, out } => get(&id, format, out.as_deref(), profile_name).await,
         DrivesCommand::Create {
             name,
-            slug,
-            id,
             icon,
             preferred_editor,
-        } => create(name, slug, id, icon, preferred_editor, format, profile_name).await,
+        } => create(name, icon, preferred_editor, format, profile_name).await,
         DrivesCommand::Delete { ids, yes } => delete(&ids, yes, profile_name).await,
     }
 }
@@ -78,11 +70,18 @@ async fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
         )
         .await?;
 
-    let drives = data
+    let drives: Vec<Value> = data
         .pointer("/findDocuments/items")
         .and_then(|v| v.as_array())
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|d| {
+            d.pointer("/state/document/isDeleted")
+                .and_then(|v| v.as_bool())
+                != Some(true)
+        })
+        .collect();
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&Value::Array(drives)),
@@ -208,8 +207,6 @@ async fn get(
 
 async fn create(
     name: Option<String>,
-    slug: Option<String>,
-    _id: Option<String>,
     icon: Option<String>,
     preferred_editor: Option<String>,
     format: OutputFormat,
@@ -223,28 +220,6 @@ async fn create(
     let name = match name {
         Some(n) => n,
         None => Input::new().with_prompt("Drive name").interact_text()?,
-    };
-
-    let _slug = match slug {
-        Some(s) => s,
-        None if interactive => {
-            let default_slug = name
-                .to_lowercase()
-                .replace(' ', "-")
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-                .collect::<String>();
-            Input::new()
-                .with_prompt("Slug")
-                .default(default_slug)
-                .interact_text()?
-        }
-        None => name
-            .to_lowercase()
-            .replace(' ', "-")
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-            .collect::<String>(),
     };
 
     let icon = match icon {
@@ -273,27 +248,56 @@ async fn create(
         None => None,
     };
 
-    // Step 1: Create drive document
-    let create_mutation = format!(
-        r#"mutation {{ DocumentDrive_createDocument(name: "{name}") {{ id slug name }} }}"#,
-        name = name.replace('"', r#"\""#)
-    );
-    let create_data = client.query(&create_mutation, None).await?;
-    let drive = &create_data["DocumentDrive_createDocument"];
-    let doc_id = drive["id"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("No id returned from create"))?;
+    // Derive slug from name
+    let slug: String = name
+        .to_lowercase()
+        .replace(' ', "-")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
 
-    // Step 2: Set drive name via DocumentDrive_setDriveName
-    let set_name_mutation = format!(
-        r#"mutation {{ DocumentDrive_setDriveName(docId: "{doc_id}", input: {{ name: "{name}" }}) {{ id name slug }} }}"#,
-        doc_id = doc_id.replace('"', r#"\""#),
-        name = name.replace('"', r#"\""#),
-    );
-    let name_data = client.query(&set_name_mutation, None).await?;
-    let drive = &name_data["DocumentDrive_setDriveName"];
+    // Build document header with generated UUID and custom slug.
+    // The preferred editor is stored in header.meta.preferredEditor.
+    let doc_id = uuid::Uuid::new_v4().to_string();
+    let meta = match preferred_editor {
+        Some(ref editor) => serde_json::json!({ "preferredEditor": editor }),
+        None => serde_json::json!({}),
+    };
+    let doc_header = serde_json::json!({
+        "header": {
+            "id": doc_id,
+            "documentType": "powerhouse/document-drive",
+            "name": name,
+            "slug": slug,
+            "branch": "",
+            "revision": { "global": 0 },
+            "sig": { "publicKey": "", "signature": "" },
+            "meta": meta
+        },
+        "state": {
+            "global": {
+                "name": name,
+                "nodes": [],
+                "status": "ACTIVE",
+                "documentTypes": []
+            },
+            "local": {},
+            "document": {
+                "version": 0,
+                "hash": { "algorithm": "sha1", "encoding": "base64" }
+            }
+        }
+    });
+    let vars = serde_json::json!({ "doc": doc_header });
+    let create_data = client
+        .query(
+            "mutation($doc: JSONObject!) { createDocument(document: $doc) { id slug name } }",
+            Some(&vars),
+        )
+        .await?;
+    let drive = &create_data["createDocument"];
 
-    // Step 3: Optionally set icon
+    // Optionally set icon (must use UUID for docId)
     if let Some(ref icon_url) = icon {
         let icon_mutation = format!(
             r#"mutation {{ DocumentDrive_setDriveIcon(docId: "{doc_id}", input: {{ icon: "{icon}" }}) {{ id }} }}"#,
@@ -303,23 +307,13 @@ async fn create(
         client.query(&icon_mutation, None).await?;
     }
 
-    // Step 4: Optionally set preferred editor
-    if let Some(ref editor_name) = preferred_editor {
-        let editor_mutation = format!(
-            r#"mutation {{ DocumentEditor_setEditorName(docId: "{doc_id}", input: {{ name: "{editor}" }}) {{ id }} }}"#,
-            doc_id = doc_id.replace('"', r#"\""#),
-            editor = editor_name.replace('"', r#"\""#),
-        );
-        client.query(&editor_mutation, None).await?;
-    }
-
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(drive),
         _ => {
             let slug = drive["slug"].as_str().unwrap_or("-");
             let base = helpers::base_url_from(&client.url);
             println!("{} Drive created", "✓".green());
-            println!("  ID:   {}", drive["id"].as_str().unwrap_or(doc_id));
+            println!("  ID:   {}", drive["id"].as_str().unwrap_or(&doc_id));
             println!("  Slug: {}", slug);
             println!("  Name: {}", drive["name"].as_str().unwrap_or("-"));
             if let Some(ref editor) = preferred_editor {

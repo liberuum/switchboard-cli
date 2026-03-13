@@ -124,11 +124,15 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    // Save profile
+    // Save profile — preserve default flag when overwriting an existing profile
+    let was_default = config
+        .get_profile(&name)
+        .map(|p| p.default)
+        .unwrap_or(false);
     let profile = Profile {
         url,
         token,
-        default: config.profiles.is_empty(),
+        default: config.profiles.is_empty() || was_default,
     };
     config.add_profile(name.clone(), profile);
     save_config(&config)?;
