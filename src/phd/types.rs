@@ -22,6 +22,8 @@ pub struct PhdHeader {
     pub last_modified_at_utc_iso: Option<String>,
     #[serde(default)]
     pub meta: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_versions: Option<Value>,
 }
 
 /// The state wrapper used in state.json and current-state.json

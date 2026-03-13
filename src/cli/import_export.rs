@@ -55,8 +55,9 @@ pub async fn run_export(
     }
 }
 
-/// Build the proper PhdHeader matching the reference download-drive-documents.ts format
-fn build_header(doc: &Value) -> PhdHeader {
+/// Build the proper PhdHeader matching the reference download-drive-documents.ts format.
+/// Accepts operations to extract protocolVersions from the CREATE_DOCUMENT op.
+fn build_header(doc: &Value, operations: &[Value]) -> PhdHeader {
     let doc_id = doc["id"].as_str().unwrap_or("").to_string();
     let doc_name = doc["name"]
         .as_str()
@@ -86,6 +87,19 @@ fn build_header(doc: &Value) -> PhdHeader {
         serde_json::json!({ "global": 0 })
     };
 
+    // Extract protocolVersions from the CREATE_DOCUMENT operation if present
+    let protocol_versions = operations.iter().find_map(|op| {
+        let action = op.get("action")?;
+        if action.get("type")?.as_str()? == "CREATE_DOCUMENT" {
+            action
+                .get("input")
+                .and_then(|i| i.get("protocolVersions"))
+                .cloned()
+        } else {
+            None
+        }
+    });
+
     PhdHeader {
         id: doc_id.clone(),
         sig: serde_json::json!({ "publicKey": {}, "nonce": "" }),
@@ -97,6 +111,7 @@ fn build_header(doc: &Value) -> PhdHeader {
         revision,
         last_modified_at_utc_iso: doc["lastModifiedAtUtcIso"].as_str().map(|s| s.to_string()),
         meta: Value::Object(serde_json::Map::new()),
+        protocol_versions,
     }
 }
 
@@ -260,13 +275,13 @@ async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bo
 
             match fetch_document(&client, file_id).await {
                 Ok((doc, operations)) => {
-                    let header = build_header(&doc);
+                    let header = build_header(&doc, &operations);
                     let state = extract_state(&doc);
                     let phd_ops = PhdOperations {
                         global: operations.clone(),
                     };
-                    let initial_state = PhdState::default();
                     let current_state = build_current_state(&state);
+                    let initial_state = current_state.clone();
 
                     let safe_file = sanitize_filename(file_name);
                     let file_path = file_dir.join(format!("{safe_file}.phd"));
@@ -344,13 +359,13 @@ async fn export_doc(
 
     let (doc, operations) = fetch_document(&client, &resolved_id).await?;
 
-    let header = build_header(&doc);
+    let header = build_header(&doc, &operations);
     let state = extract_state(&doc);
     let phd_ops = PhdOperations {
         global: operations.clone(),
     };
-    let initial_state = PhdState::default();
     let current_state = build_current_state(&state);
+    let initial_state = current_state.clone();
 
     // Determine output path
     let safe_name = sanitize_filename(&header.name);
@@ -447,12 +462,12 @@ async fn export_drive(
             Ok((doc, operations)) => {
                 let state = extract_state(&doc);
 
-                let header = build_header(&doc);
+                let header = build_header(&doc, &operations);
                 let phd_ops = PhdOperations {
                     global: operations.clone(),
                 };
-                let initial_state = PhdState::default();
                 let current_state = build_current_state(&state);
+                let initial_state = current_state.clone();
 
                 let safe_file = sanitize_filename(file_name);
                 let file_path = dir.join(format!("{safe_file}.phd"));
