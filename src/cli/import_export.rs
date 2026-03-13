@@ -100,11 +100,25 @@ fn build_header(doc: &Value) -> PhdHeader {
     }
 }
 
-/// Build the PhdState wrapping state under the `global` key
-fn build_current_state(state: Value) -> PhdState {
+/// Build PhdState from the API's state object.
+/// The API returns { auth, document, global, local } which maps directly to PhdState fields.
+fn build_current_state(state: &Value) -> PhdState {
     PhdState {
-        global: state,
-        ..PhdState::default()
+        auth: state
+            .get("auth")
+            .cloned()
+            .unwrap_or(Value::Object(serde_json::Map::new())),
+        document: state.get("document").cloned().unwrap_or_else(|| {
+            serde_json::json!({ "version": 0, "hash": { "algorithm": "sha1", "encoding": "base64" } })
+        }),
+        global: state
+            .get("global")
+            .cloned()
+            .unwrap_or(Value::Object(serde_json::Map::new())),
+        local: state
+            .get("local")
+            .cloned()
+            .unwrap_or(Value::Object(serde_json::Map::new())),
     }
 }
 
@@ -252,7 +266,7 @@ async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bo
                         global: operations.clone(),
                     };
                     let initial_state = PhdState::default();
-                    let current_state = build_current_state(state);
+                    let current_state = build_current_state(&state);
 
                     let safe_file = sanitize_filename(file_name);
                     let file_path = file_dir.join(format!("{safe_file}.phd"));
@@ -336,7 +350,7 @@ async fn export_doc(
         global: operations.clone(),
     };
     let initial_state = PhdState::default();
-    let current_state = build_current_state(state);
+    let current_state = build_current_state(&state);
 
     // Determine output path
     let safe_name = sanitize_filename(&header.name);
@@ -438,7 +452,7 @@ async fn export_drive(
                     global: operations.clone(),
                 };
                 let initial_state = PhdState::default();
-                let current_state = build_current_state(state);
+                let current_state = build_current_state(&state);
 
                 let safe_file = sanitize_filename(file_name);
                 let file_path = dir.join(format!("{safe_file}.phd"));
@@ -930,7 +944,7 @@ async fn verify_state(
     let data = client.query(&query, None).await?;
 
     let actual = data
-        .pointer("/document/document/state")
+        .pointer("/document/document/state/global")
         .cloned()
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
