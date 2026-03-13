@@ -365,6 +365,101 @@ async fn list(
     Ok(())
 }
 
+/// Resolve a document name to its ID by searching drive nodes.
+/// If `drive` is given, only searches that drive; otherwise searches all drives.
+async fn resolve_doc_by_name(
+    client: &crate::graphql::GraphQLClient,
+    name: &str,
+    drive: Option<&str>,
+) -> Result<String> {
+    let drive_ids: Vec<String> = match drive {
+        Some(d) => vec![d.to_string()],
+        None => {
+            let data = client
+                .query(
+                    r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id } } }"#,
+                    None,
+                )
+                .await?;
+            data.pointer("/findDocuments/items")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|d| d["id"].as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    };
+
+    let name_lower = name.to_lowercase();
+    let mut matches: Vec<(String, String)> = Vec::new(); // (id, name)
+
+    for drive_id in &drive_ids {
+        // Check drive state nodes
+        if let Ok((_, _, nodes)) = fetch_drive_nodes(client, drive_id).await {
+            for node in &nodes {
+                if node["kind"].as_str() != Some("file") {
+                    continue;
+                }
+                let node_name = node["name"].as_str().unwrap_or("");
+                if node_name.eq_ignore_ascii_case(&name_lower)
+                    && let Some(id) = node["id"].as_str()
+                {
+                    return Ok(id.to_string());
+                }
+                // Also partial/contains match as secondary
+                if node_name.to_lowercase().contains(&name_lower)
+                    && let Some(id) = node["id"].as_str()
+                {
+                    matches.push((id.to_string(), node_name.to_string()));
+                }
+            }
+        }
+
+        // Also check documentChildren as fallback
+        let escaped = drive_id.replace('"', r#"\""#);
+        let children_query = format!(
+            r#"{{ documentChildren(parentIdentifier: "{escaped}") {{ items {{ id slug name }} }} }}"#
+        );
+        if let Ok(data) = client.query(&children_query, None).await
+            && let Some(items) = data
+                .pointer("/documentChildren/items")
+                .and_then(|v| v.as_array())
+        {
+            for item in items {
+                let item_name = item["name"].as_str().unwrap_or("");
+                if item_name.eq_ignore_ascii_case(&name_lower)
+                    && let Some(id) = item["id"].as_str()
+                {
+                    return Ok(id.to_string());
+                }
+                if item_name.to_lowercase().contains(&name_lower)
+                    && let Some(id) = item["id"].as_str()
+                {
+                    matches.push((id.to_string(), item_name.to_string()));
+                }
+            }
+        }
+    }
+
+    // If we have exactly one partial match, use it
+    if matches.len() == 1 {
+        return Ok(matches[0].0.clone());
+    }
+
+    if matches.len() > 1 {
+        let list = matches
+            .iter()
+            .map(|(id, n)| format!("  - {n} ({id})"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!("Multiple documents match '{name}':\n{list}\nUse the document ID instead.");
+    }
+
+    bail!("Document '{name}' not found");
+}
+
 async fn get(
     id: &str,
     drive: Option<&str>,
@@ -380,27 +475,48 @@ async fn get(
         Some(d) => format!("{d}/{id}"),
         None => id.to_string(),
     };
-    let escaped = identifier.replace('"', r#"\""#);
 
     // Visual formats always need state
     let need_state = include_state || format.is_visual();
 
     let state_field = if need_state { "state" } else { "" };
 
-    let query = format!(
-        r#"{{ document(identifier: "{escaped}") {{ document {{ id slug name documentType {state_field} revisionsList {{ scope revision }} createdAtUtcIso lastModifiedAtUtcIso }} childIds }} }}"#
-    );
+    // Try direct lookup by ID/slug first
+    let (data, resolved_id) = {
+        let escaped = identifier.replace('"', r#"\""#);
+        let query = format!(
+            r#"{{ document(identifier: "{escaped}") {{ document {{ id slug name documentType {state_field} revisionsList {{ scope revision }} createdAtUtcIso lastModifiedAtUtcIso }} childIds }} }}"#
+        );
+        let result = client.query(&query, None).await;
+        let found = result
+            .as_ref()
+            .ok()
+            .and_then(|d| d.pointer("/document/document"))
+            .is_some_and(|d| !d.is_null());
 
-    let data = client.query(&query, None).await?;
+        if found {
+            (result.unwrap(), identifier.clone())
+        } else {
+            // Fallback: search by name across drives (or within --drive)
+            let resolved = resolve_doc_by_name(&client, id, drive).await?;
+            let escaped = resolved.replace('"', r#"\""#);
+            let query = format!(
+                r#"{{ document(identifier: "{escaped}") {{ document {{ id slug name documentType {state_field} revisionsList {{ scope revision }} createdAtUtcIso lastModifiedAtUtcIso }} childIds }} }}"#
+            );
+            (client.query(&query, None).await?, resolved)
+        }
+    };
+
     let doc = data
         .pointer("/document/document")
         .filter(|d| !d.is_null())
-        .ok_or_else(|| anyhow::anyhow!("Document '{identifier}' not found"))?;
+        .ok_or_else(|| anyhow::anyhow!("Document '{id}' not found"))?;
     let child_ids = data
         .pointer("/document/childIds")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    let _ = resolved_id; // used above for the query
 
     // Visual formats: render document state as themed SVG/PNG
     if format.is_visual() {

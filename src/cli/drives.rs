@@ -211,7 +211,7 @@ async fn create(
     slug: Option<String>,
     _id: Option<String>,
     icon: Option<String>,
-    _preferred_editor: Option<String>,
+    preferred_editor: Option<String>,
     format: OutputFormat,
     profile_name: Option<&str>,
 ) -> Result<()> {
@@ -260,6 +260,19 @@ async fn create(
         None => None,
     };
 
+    let preferred_editor = match preferred_editor {
+        Some(e) if !e.is_empty() => Some(e),
+        Some(_) => None,
+        None if interactive => {
+            let e: String = Input::new()
+                .with_prompt("Preferred editor (optional, press Enter to skip)")
+                .default(String::new())
+                .interact_text()?;
+            if e.is_empty() { None } else { Some(e) }
+        }
+        None => None,
+    };
+
     // Step 1: Create drive document
     let create_mutation = format!(
         r#"mutation {{ DocumentDrive_createDocument(name: "{name}") {{ id slug name }} }}"#,
@@ -290,6 +303,16 @@ async fn create(
         client.query(&icon_mutation, None).await?;
     }
 
+    // Step 4: Optionally set preferred editor
+    if let Some(ref editor_name) = preferred_editor {
+        let editor_mutation = format!(
+            r#"mutation {{ DocumentEditor_setEditorName(docId: "{doc_id}", input: {{ name: "{editor}" }}) {{ id }} }}"#,
+            doc_id = doc_id.replace('"', r#"\""#),
+            editor = editor_name.replace('"', r#"\""#),
+        );
+        client.query(&editor_mutation, None).await?;
+    }
+
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(drive),
         _ => {
@@ -299,6 +322,9 @@ async fn create(
             println!("  ID:   {}", drive["id"].as_str().unwrap_or(doc_id));
             println!("  Slug: {}", slug);
             println!("  Name: {}", drive["name"].as_str().unwrap_or("-"));
+            if let Some(ref editor) = preferred_editor {
+                println!("  Editor: {}", editor);
+            }
             println!("  URL:  {}/d/{}", base, slug);
         }
     }
