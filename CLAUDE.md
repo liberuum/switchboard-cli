@@ -144,13 +144,15 @@ Profiles stored at `~/.switchboard/profiles.toml`. Each profile has `url`, optio
 - GraphQL mutations use parameterized queries with `$variables` (not string interpolation) — this properly handles newlines, special characters, and enum values
 - Built-in docs live in `guide.rs` as raw string literals — update them when adding/changing commands
 
-### CRITICAL: Always Build & Install After Changes
+### CRITICAL: Always Format, Build & Install After Changes
 
-After implementing any code change, **always** run the full build and install without waiting to be asked:
+After implementing any code change, **always** run format, lint, build, and install without waiting to be asked:
 
 ```bash
-cargo clippy -- -D warnings && cargo build --release && cp target/release/switchboard ~/.cargo/bin/switchboard && codesign --force --sign - ~/.cargo/bin/switchboard
+cargo fmt && cargo clippy -- -D warnings && cargo build --release && cp target/release/switchboard ~/.cargo/bin/switchboard && codesign --force --sign - ~/.cargo/bin/switchboard
 ```
+
+**`cargo fmt` must run before every commit.** CI runs `cargo fmt --check` and will reject unformatted code. Never skip this step.
 
 The codesign step is required on macOS — without it, the OS firewall blocks network access for the copied binary. The user runs the release binary from `~/.cargo/bin/switchboard` — never the debug binary. If you don't build and install, the user can't test your changes.
 
