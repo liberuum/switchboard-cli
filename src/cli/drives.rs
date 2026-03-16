@@ -299,12 +299,16 @@ async fn create(
 
     // Optionally set icon (must use UUID for docId)
     if let Some(ref icon_url) = icon {
-        let icon_mutation = format!(
-            r#"mutation {{ DocumentDrive_setDriveIcon(docId: "{doc_id}", input: {{ icon: "{icon}" }}) {{ id }} }}"#,
-            doc_id = doc_id.replace('"', r#"\""#),
-            icon = icon_url.replace('"', r#"\""#),
-        );
-        client.query(&icon_mutation, None).await?;
+        let icon_vars = serde_json::json!({
+            "docId": doc_id,
+            "input": { "icon": icon_url }
+        });
+        client
+            .query(
+                "mutation($docId: PHID!, $input: DocumentDrive_SetDriveIconInput!) { DocumentDrive_setDriveIcon(docId: $docId, input: $input) { id } }",
+                Some(&icon_vars),
+            )
+            .await?;
     }
 
     match format {
@@ -345,16 +349,23 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
         }
     }
 
-    // Use batch deleteDocuments API
-    let id_list: String = ids
-        .iter()
-        .map(|id| format!("\"{}\"", id.replace('"', r#"\""#)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mutation =
-        format!(r#"mutation {{ deleteDocuments(identifiers: [{id_list}], propagate: CASCADE) }}"#);
+    // Resolve all identifiers to UUIDs before deletion.
+    // The server's rebuild-before-delete path fails when given a slug — it can only
+    // locate operations by UUID. Resolving here fixes deletion of slug-identified drives.
+    let mut uuids: Vec<String> = Vec::with_capacity(ids.len());
+    for id in ids {
+        let uuid = helpers::resolve_doc(&client, id)
+            .await
+            .unwrap_or_else(|_| id.clone());
+        uuids.push(uuid);
+    }
 
-    match client.query(&mutation, None).await {
+    // Use batch deleteDocuments API
+    let vars = serde_json::json!({ "ids": uuids });
+    let mutation =
+        "mutation($ids: [String!]!) { deleteDocuments(identifiers: $ids, propagate: CASCADE) }";
+
+    match client.query(mutation, Some(&vars)).await {
         Ok(_) => {
             for id in ids {
                 println!("{} Deleted drive {id}", "✓".green());
