@@ -560,7 +560,28 @@ fn shell_split(input: &str) -> Vec<String> {
     tokens
 }
 
-// ── Doc-fetching for tab completion ──────────────────────────────────────────
+// ── Drive/doc-fetching for tab completion ────────────────────────────────────
+
+async fn fetch_drive_slugs(client: &crate::graphql::GraphQLClient) -> Vec<String> {
+    match client
+        .query(
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { slug } } }"#,
+            None,
+        )
+        .await
+    {
+        Ok(data) => data
+            .pointer("/findDocuments/items")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|d| d["slug"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
 
 async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEntry> {
     let data = match client
@@ -629,24 +650,7 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
     let spinner = spawn_spinner("Loading...");
 
     // Fetch drive slugs for tab completion
-    let drive_slugs: Vec<String> = match client
-        .query(
-            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { slug } } }"#,
-            None,
-        )
-        .await
-    {
-        Ok(data) => data
-            .pointer("/findDocuments/items")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|d| d["slug"].as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
+    let drive_slugs = fetch_drive_slugs(&client).await;
 
     // Fetch document entries for tab completion
     let doc_entries = fetch_doc_entries(&client).await;
@@ -751,7 +755,9 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                         let format = parsed.format.unwrap_or(OutputFormat::Table);
                         let cmd_quiet = parsed.quiet || quiet;
 
-                        // Check if this command modifies docs (for refreshing completions)
+                        // Check which completion caches need refreshing after this command
+                        let modifies_drives =
+                            line.starts_with("drives create") || line.starts_with("drives delete");
                         let modifies_docs = line.starts_with("docs create")
                             || line.starts_with("docs delete")
                             || line.starts_with("docs rename")
@@ -767,12 +773,20 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                             eprintln!("Error: {e:#}");
                         }
 
-                        // Refresh doc completions after doc-modifying commands
-                        if modifies_docs {
+                        // Refresh completion caches after modifying commands
+                        if modifies_drives || modifies_docs {
                             let spinner = spawn_spinner("Refreshing completions...");
                             let new_docs = fetch_doc_entries(&client).await;
+                            let new_slugs = if modifies_drives {
+                                fetch_drive_slugs(&client).await
+                            } else {
+                                Vec::new() // no change needed
+                            };
                             stop_spinner(spinner);
                             if let Some(helper) = rl.helper_mut() {
+                                if modifies_drives {
+                                    helper.drive_slugs = new_slugs;
+                                }
                                 helper.update_docs(new_docs);
                             }
                         }
@@ -795,24 +809,7 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
 
                                 let spinner = spawn_spinner("Loading profile data...");
 
-                                let new_slugs: Vec<String> =
-                                    match client.query(
-                                        r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { slug } } }"#,
-                                        None,
-                                    ).await {
-                                        Ok(data) => data
-                                            .pointer("/findDocuments/items")
-                                            .and_then(|v| v.as_array())
-                                            .map(|arr| {
-                                                arr.iter()
-                                                    .filter_map(|d| {
-                                                        d["slug"].as_str().map(String::from)
-                                                    })
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default(),
-                                        Err(_) => Vec::new(),
-                                    };
+                                let new_slugs = fetch_drive_slugs(&client).await;
 
                                 let new_docs = fetch_doc_entries(&client).await;
 
