@@ -127,9 +127,9 @@ switchboard models list                    # List discovered document types
 ```bash
 switchboard docs create --type powerhouse/invoice --name "Q1 Invoice" --drive my-drive
 switchboard docs get <doc-id-or-name>             # Auto-detects drive
-switchboard docs mutate <doc-id-or-name>         # Interactive field-by-field editor
-switchboard docs mutate <doc-id> editInvoice --input '{"amount": 2000}' --drive my-drive
-switchboard docs mutate <doc-id> setStateSchema --input-file schema.json --drive my-drive
+switchboard docs mutate <doc-id-or-name>                              # Interactive field-by-field editor
+switchboard docs mutate <doc-id> --op editInvoice --input '{"amount": 2000}'
+switchboard docs mutate <doc-id> --op setStateSchema --input-file schema.json
 ```
 
 ### 4. Export and import
@@ -178,7 +178,7 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard docs add-to <parent> <ids...>` | Add documents as children of a parent |
 | `switchboard docs remove-from <parent> <ids...>` | Remove documents from a parent |
 | `switchboard docs move <ids...> --from <src> --to <dst>` | Move documents between parents |
-| `switchboard docs mutate <id-or-name> [<op>] [--input '<json>'] [--input-file <file>] [--drive <slug>]` | Apply a mutation with field-by-field editor (or pass `--input` for raw JSON, or `--input-file` to read JSON from a file / stdin with `-`) |
+| `switchboard docs mutate <id-or-name> [--op <op>] [--input '<json>'] [--input-file <file>] [--drive <slug>]` | Interactive field-by-field editor — omit `--op` for operation picker; pass `--input` / `--input-file` for scripting |
 
 ### Models & Operations
 

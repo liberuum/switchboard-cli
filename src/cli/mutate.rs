@@ -14,10 +14,11 @@ pub struct MutateArgs {
     /// Document ID or name
     pub doc_id: String,
 
-    /// Operation name (e.g., editInvoice). Omit for interactive selection.
-    pub operation: Option<String>,
+    /// Operation name (e.g., setModelName). Omit to pick interactively.
+    #[arg(long, value_name = "OPERATION")]
+    pub op: Option<String>,
 
-    /// Input JSON for the operation
+    /// Input JSON for the operation (skips interactive field editor)
     #[arg(long)]
     pub input: Option<String>,
 
@@ -25,23 +26,24 @@ pub struct MutateArgs {
     #[arg(long, value_name = "FILE")]
     pub input_file: Option<String>,
 
-    /// Drive ID or slug (omit for interactive selection)
+    /// Drive ID or slug (helps resolve document by name)
     #[arg(long)]
     pub drive: Option<String>,
-
-    /// Interactive operation selection
-    #[arg(long, short)]
-    pub interactive: bool,
 }
 
 pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
 
     // Resolve doc identifier (name or UUID).
-    // When --drive is given, use "drive/doc" format so name resolution is scoped.
-    let doc_identifier = match &args.drive {
-        Some(d) => helpers::resolve_doc(&client, &format!("{d}/{}", args.doc_id)).await?,
-        None => helpers::resolve_doc(&client, &args.doc_id).await?,
+    // When --drive is given, scope the lookup to that drive.
+    // Without --drive, try direct resolution first; if that fails, search across all drives.
+    let doc_identifier = if let Some(d) = &args.drive {
+        helpers::resolve_doc(&client, &format!("{d}/{}", args.doc_id)).await?
+    } else {
+        match helpers::resolve_doc(&client, &args.doc_id).await {
+            Ok(id) => id,
+            Err(_) => resolve_doc_across_drives(&client, &args.doc_id).await?,
+        }
     };
 
     // Query the document directly to get its type and actual PHID
@@ -79,8 +81,8 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
         bail!("No mutations available for type {doc_type}");
     }
 
-    // Select operation
-    let operation = if let Some(ref op_name) = args.operation.filter(|_| !args.interactive) {
+    // Select operation — use --op if given, otherwise show interactive picker
+    let operation = if let Some(ref op_name) = args.op {
         operations
             .iter()
             .find(|op| op.operation == *op_name)
@@ -248,6 +250,70 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
     }
 
     Ok(())
+}
+
+/// Search for a document by name across all drives.
+/// Used as a fallback when `--drive` is omitted and direct resolution fails.
+async fn resolve_doc_across_drives(client: &GraphQLClient, name: &str) -> Result<String> {
+    let data = client
+        .query(
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id } } }"#,
+            None,
+        )
+        .await?;
+
+    let drive_ids: Vec<String> = data
+        .pointer("/findDocuments/items")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|d| d["id"].as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let name_lower = name.to_lowercase();
+    let mut candidates: Vec<(String, String)> = Vec::new(); // (id, name)
+
+    for drive_id in &drive_ids {
+        let escaped = drive_id.replace('"', r#"\""#);
+        let q = format!(
+            r#"{{ documentChildren(parentIdentifier: "{escaped}") {{ items {{ id name slug }} }} }}"#
+        );
+        if let Ok(d) = client.query(&q, None).await
+            && let Some(items) = d
+                .pointer("/documentChildren/items")
+                .and_then(|v| v.as_array())
+        {
+            for item in items {
+                let item_name = item["name"].as_str().unwrap_or("");
+                let item_slug = item["slug"].as_str().unwrap_or("");
+                let item_id = item["id"].as_str().unwrap_or("");
+                if item_name.eq_ignore_ascii_case(&name_lower)
+                    || item_slug.eq_ignore_ascii_case(&name_lower)
+                {
+                    return Ok(item_id.to_string());
+                }
+                if item_name.to_lowercase().contains(&name_lower) {
+                    candidates.push((item_id.to_string(), item_name.to_string()));
+                }
+            }
+        }
+    }
+
+    if candidates.len() == 1 {
+        return Ok(candidates[0].0.clone());
+    }
+    if candidates.len() > 1 {
+        let list = candidates
+            .iter()
+            .map(|(id, n)| format!("  - {n} ({id})"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!("Multiple documents match '{name}':\n{list}\nUse the document ID instead.");
+    }
+
+    bail!("Document '{name}' not found. Pass --drive to narrow the search.")
 }
 
 /// Attempt to use the field-by-field editor for an operation's input type.

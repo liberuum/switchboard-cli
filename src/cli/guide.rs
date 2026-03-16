@@ -81,7 +81,7 @@ QUICK START
   3. Create and mutate documents:
 
      switchboard docs create --type powerhouse/invoice --name "Q1 Invoice" --drive my-drive
-     switchboard docs mutate <doc-id> editInvoice --input '{{"amount": 2000}}' --drive my-drive
+     switchboard docs mutate <doc-id> --op editInvoice --input '{{"amount": 2000}}'
 
   4. Export and import:
 
@@ -219,9 +219,8 @@ HIERARCHY MANAGEMENT
 
 MUTATIONS
 
-  switchboard docs mutate <doc-id> <operation> --input '<json>' --drive <slug>
-  switchboard docs mutate <doc-id> <operation> --input-file <file> --drive <slug>
-  switchboard docs mutate <doc-id> --interactive --drive <slug>
+  switchboard docs mutate <doc-id>                    # Interactive field-by-field editor
+  switchboard docs mutate <doc-id> --op <operation> --input '<json>'  # Scripted
 
   Operations are model-specific (discovered via introspection).
   E.g. for powerhouse/invoice: editInvoice, setStatus, addLineItem, etc.
@@ -232,8 +231,8 @@ MUTATIONS
                          that need to pass multiline content as JSON values.
 
   Example:
-    switchboard docs mutate <doc-id> setStateSchema --input-file schema.json
-    echo '{{"schema": "type Foo {{\n  bar: String\n}}"}}' | switchboard docs mutate <doc-id> setStateSchema --input-file -
+    switchboard docs mutate <doc-id> --op setStateSchema --input-file schema.json
+    echo '{{"schema": "type Foo {{\n  bar: String\n}}"}}' | switchboard docs mutate <doc-id> --op setStateSchema --input-file -
 
 OPERATIONS HISTORY
 
@@ -261,7 +260,7 @@ EXAMPLES
   switchboard docs parents abc123               # find parent drives/folders
   switchboard docs add-to my-drive abc123       # add doc to a drive
   switchboard docs move abc123 --from driveA --to driveB
-  switchboard docs mutate abc123 updateProfile --input '{{"name":"New"}}' --drive builders
+  switchboard docs mutate abc123 --op updateProfile --input '{{"name":"New"}}'
   switchboard analytics metrics                 # list all available metrics
   switchboard analytics series --granularity total --metrics Budget"#
     );
@@ -728,7 +727,7 @@ DOCUMENTS
   docs tree [<drive>]         Hierarchical tree view (all drives if omitted)
   docs create                   Create a document
   docs delete <ids...> [-y]     Delete one or more documents
-  docs mutate <id> <op>         Apply an operation (--input, --input-file)
+  docs mutate <id> [--op <op>]   Interactive field editor (--op, --input for scripting)
 
 MODELS & OPERATIONS
   models list                   List document types

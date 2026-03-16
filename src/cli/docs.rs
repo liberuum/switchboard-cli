@@ -100,7 +100,7 @@ pub enum DocsCommand {
         #[arg(long)]
         to: String,
     },
-    /// Mutate a document (apply operations)
+    /// Interactive field-by-field editor (use --op to skip operation picker, --input for scripting)
     Mutate(mutate::MutateArgs),
 }
 
