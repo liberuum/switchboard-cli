@@ -117,7 +117,8 @@ The wizard prompts for a GraphQL URL, validates the connection, discovers all do
 
 ```bash
 switchboard drives list                    # List all drives
-switchboard docs tree --drive my-drive     # Hierarchical folder/file view
+switchboard docs tree                      # Hierarchical folder/file view (all drives)
+switchboard docs tree my-drive            # Hierarchical folder/file view (single drive)
 switchboard models list                    # List discovered document types
 ```
 
@@ -169,7 +170,7 @@ switchboard import ./backup/*.phd --drive another-drive
 |---------|-------------|
 | `switchboard docs list [--drive <slug>]` | List documents (all drives, or filtered by `--drive`; add `--type` to filter) |
 | `switchboard docs get <id-or-name> [--drive <slug>] [--state] [--out <file>]` | Get document details (auto-detects drive; `--state` includes full state) |
-| `switchboard docs tree [--drive <slug>]` | Hierarchical folder/file view (interactive drive picker if omitted) |
+| `switchboard docs tree [<slug>]` | Hierarchical folder/file view — all drives if no argument, single drive if slug given |
 | `switchboard docs create` | Interactive creation with drive picker (or pass `--type`, `--name`, `--drive`) |
 | `switchboard docs delete <ids-or-names...>` | Delete one or more documents — batch API (use `-y` to skip confirmation) |
 | `switchboard docs rename <id> <name>` | Rename a document |
@@ -322,7 +323,7 @@ switchboard config use local
 
 # One-off command against a different profile
 switchboard --profile staging drives list
-switchboard -p local docs tree --drive my-drive
+switchboard -p local docs tree my-drive
 ```
 
 ## Authentication
@@ -366,8 +367,7 @@ staging> drives list
 └──────────────────┴──────────────┴──────────────┘
 
 staging> docs tree
-Select drive: liberuum
-liberum-drive/
+liberuum-drive/
 ├── liberuum (powerhouse/builder-profile)
 ├── 📁 Expense Reports/
 └── 📁 Services And Offerings/

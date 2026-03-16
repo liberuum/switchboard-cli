@@ -63,7 +63,8 @@ impl ReplHelper {
             "docs list --drive ".into(),
             "docs get ".into(),
             "docs get --state ".into(),
-            "docs tree --drive ".into(),
+            "docs tree".into(),
+            "docs tree ".into(),
             "docs create".into(),
             "docs delete ".into(),
             "docs rename ".into(),
@@ -318,6 +319,7 @@ impl Completer for ReplHelper {
             || input.starts_with("drives get ")
             || input.starts_with("drives delete ")
             || input.starts_with("export drive ")
+            || input.starts_with("docs tree ")
         {
             let matches = filter_pairs(&self.drive_slugs, partial);
             if !matches.is_empty() {

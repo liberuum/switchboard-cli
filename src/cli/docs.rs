@@ -36,10 +36,9 @@ pub enum DocsCommand {
         #[arg(long, short)]
         out: Option<String>,
     },
-    /// Show hierarchical file tree of a drive
+    /// Show hierarchical file tree of drives (all drives if no argument given)
     Tree {
-        /// Drive ID or slug (omit for interactive selection)
-        #[arg(long)]
+        /// Drive ID or slug (omit to show all drives)
         drive: Option<String>,
     },
     /// Create a new document (interactive)
@@ -636,53 +635,87 @@ async fn tree(
 ) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    let drive = match drive {
-        Some(d) => d,
+    // Collect the drives to render
+    let drive_ids: Vec<String> = match drive {
+        Some(d) => vec![d],
         None => {
-            let (id, _slug, _name) = helpers::select_drive(&client).await?;
-            id
+            let data = client
+                .query(
+                    r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id } } }"#,
+                    None,
+                )
+                .await?;
+            data.pointer("/findDocuments/items")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|d| d["id"].as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
         }
     };
 
-    let (_, drive_name, nodes) = fetch_drive_nodes(&client, &drive).await?;
+    if drive_ids.is_empty() {
+        println!("No drives found.");
+        return Ok(());
+    }
 
-    match format {
-        OutputFormat::Json | OutputFormat::Raw => {
-            let escaped = drive.replace('"', r#"\""#);
+    if matches!(format, OutputFormat::Json | OutputFormat::Raw) {
+        // JSON: array of drive objects (one per drive)
+        let mut results = Vec::new();
+        for id in &drive_ids {
+            let escaped = id.replace('"', r#"\""#);
             let query = format!(
                 r#"{{ document(identifier: "{escaped}") {{ document {{ id slug name state }} childIds }} }}"#
             );
             let data = client.query(&query, None).await?;
             let doc = data.pointer("/document").cloned().unwrap_or_default();
-            print_json(&doc);
+            results.push(doc);
         }
-        _ => {
-            let display_name = if drive_name.is_empty() {
-                &drive
-            } else {
-                &drive_name
-            };
+        if results.len() == 1 {
+            print_json(&results[0]);
+        } else {
+            print_json(&Value::Array(results));
+        }
+        return Ok(());
+    }
 
-            if !nodes.is_empty() {
-                // Use drive state nodes (same as old CLI — has folder/file hierarchy)
-                println!("{display_name}/");
-                print_tree(&nodes, None, "");
-            } else {
-                // Fallback: use documentChildren for flat listing
-                let escaped = drive.replace('"', r#"\""#);
-                let children_query = format!(
-                    r#"{{ documentChildren(parentIdentifier: "{escaped}") {{ items {{ id name documentType }} }} }}"#
-                );
-                let data = client.query(&children_query, None).await?;
-                let items = data
-                    .pointer("/documentChildren/items")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
+    // Text tree output — render each drive in sequence
+    for (i, id) in drive_ids.iter().enumerate() {
+        let (_, drive_name, nodes) = fetch_drive_nodes(&client, id).await?;
+        let display_name = if drive_name.is_empty() {
+            id
+        } else {
+            &drive_name
+        };
 
-                println!("{display_name}/");
-                for (i, item) in items.iter().enumerate() {
-                    let is_last = i == items.len() - 1;
+        if i > 0 {
+            println!();
+        }
+
+        if !nodes.is_empty() {
+            println!("{display_name}/");
+            print_tree(&nodes, None, "");
+        } else {
+            // Fallback: documentChildren API
+            let escaped = id.replace('"', r#"\""#);
+            let children_query = format!(
+                r#"{{ documentChildren(parentIdentifier: "{escaped}") {{ items {{ id name documentType }} }} }}"#
+            );
+            let data = client.query(&children_query, None).await?;
+            let items = data
+                .pointer("/documentChildren/items")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            println!("{display_name}/");
+            if items.is_empty() {
+                println!("└── (empty)");
+            } else {
+                for (j, item) in items.iter().enumerate() {
+                    let is_last = j == items.len() - 1;
                     let connector = if is_last { "└── " } else { "├── " };
                     let item_name = item["name"].as_str().unwrap_or("-");
                     let doc_type = item["documentType"].as_str().unwrap_or("");

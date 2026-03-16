@@ -76,7 +76,7 @@ QUICK START
 
      switchboard drives list
      switchboard docs list --drive my-drive
-     switchboard docs tree --drive my-drive
+     switchboard docs tree
 
   3. Create and mutate documents:
 
@@ -199,7 +199,7 @@ COMMANDS
                                        Get document metadata (searches all drives if --drive omitted)
                                        Use --state to include the full document state
                                        Use --format svg|png with --out to render state as a themed diagram
-  switchboard docs tree --drive <slug>
+  switchboard docs tree [<slug>]
                                        Hierarchical folder/file view
   switchboard docs create              Interactive document creation
   switchboard docs create --type <type> --name <name> --drive <slug>
@@ -476,7 +476,7 @@ USING THE REPL
   local> drives create --name "test" --slug test-drive
   local> drives delete drive-1 drive-2 -y
   local> docs list --drive my-drive --type powerhouse/invoice
-  local> docs tree --drive my-drive
+  local> docs tree
   local> docs create --type powerhouse/invoice --name "Q1" --drive my-drive
   local> auth status
   local> export drive my-drive --out ./backup/
@@ -531,7 +531,7 @@ EXAMPLES
 
   $ switchboard -i
   local> drives list
-  local> docs tree --drive lib<TAB>  # completes to liberuum-drive
+  local> docs tree lib<TAB>  # completes to liberuum-drive
   local> drives delete old-1 old-2 -y
   local> query {{ drives }}
   local> drives create --help
@@ -725,7 +725,7 @@ DRIVES
 DOCUMENTS
   docs list --drive <id>        List documents
   docs get <id> [--drive] [--state] [--out]  Get document metadata
-  docs tree --drive <id>        Hierarchical tree view
+  docs tree [<drive>]         Hierarchical tree view (all drives if omitted)
   docs create                   Create a document
   docs delete <ids...> [-y]     Delete one or more documents
   docs mutate <id> <op>         Apply an operation (--input, --input-file)
