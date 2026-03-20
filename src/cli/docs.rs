@@ -914,9 +914,20 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
     let remove_node_mutation = "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive_deleteNode(docId: $docId, input: $input) { id } }";
     let mut failed = false;
     for id in ids {
-        let uuid = helpers::resolve_doc(&client, id)
-            .await
-            .unwrap_or_else(|_| id.clone());
+        let uuid = match helpers::resolve_doc(&client, id).await {
+            Ok(u) => u,
+            Err(_) => {
+                // Name-based fallback: search across all drives
+                match resolve_doc_by_name(&client, id, None).await {
+                    Ok(u) => u,
+                    Err(_) => {
+                        eprintln!("{} Document '{id}' not found", "✗".red());
+                        failed = true;
+                        continue;
+                    }
+                }
+            }
+        };
 
         // Find parent drive(s) BEFORE soft-deleting so we can clean up the node list.
         let parent_drives = find_parent_drives(&client, &uuid).await;

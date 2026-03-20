@@ -565,7 +565,7 @@ fn shell_split(input: &str) -> Vec<String> {
 async fn fetch_drive_slugs(client: &crate::graphql::GraphQLClient) -> Vec<String> {
     match client
         .query(
-            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { slug state } } }"#,
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { name slug state } } }"#,
             None,
         )
         .await
@@ -574,14 +574,23 @@ async fn fetch_drive_slugs(client: &crate::graphql::GraphQLClient) -> Vec<String
             .pointer("/findDocuments/items")
             .and_then(|v| v.as_array())
             .map(|arr| {
-                arr.iter()
-                    .filter(|d| {
-                        d.pointer("/state/document/isDeleted")
-                            .and_then(|v| v.as_bool())
-                            != Some(true)
-                    })
-                    .filter_map(|d| d["slug"].as_str().map(String::from))
-                    .collect()
+                let mut slugs: Vec<String> = Vec::new();
+                for d in arr.iter().filter(|d| {
+                    d.pointer("/state/document/isDeleted")
+                        .and_then(|v| v.as_bool())
+                        != Some(true)
+                }) {
+                    if let Some(slug) = d["slug"].as_str() {
+                        slugs.push(slug.to_string());
+                    }
+                    // Also add the drive name so users can tab-complete by name
+                    if let Some(name) = d["name"].as_str() {
+                        if !name.is_empty() && d["slug"].as_str() != Some(name) {
+                            slugs.push(name.to_string());
+                        }
+                    }
+                }
+                slugs
             })
             .unwrap_or_default(),
         Err(_) => Vec::new(),
