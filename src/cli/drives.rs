@@ -349,31 +349,23 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
         }
     }
 
-    // Resolve all identifiers to UUIDs before deletion.
-    // The server's rebuild-before-delete path fails when given a slug — it can only
-    // locate operations by UUID. Resolving here fixes deletion of slug-identified drives.
-    let mut uuids: Vec<String> = Vec::with_capacity(ids.len());
+    // Soft-delete each drive with cascade propagation.
+    // deleteDocument (singular) marks isDeleted:true in document scope and propagates
+    // to child documents — no document rebuild required, so it works for all drives.
+    let mut failed = false;
     for id in ids {
-        let uuid = helpers::resolve_doc(&client, id)
-            .await
-            .unwrap_or_else(|_| id.clone());
-        uuids.push(uuid);
-    }
-
-    // Use batch deleteDocuments API
-    let vars = serde_json::json!({ "ids": uuids });
-    let mutation =
-        "mutation($ids: [String!]!) { deleteDocuments(identifiers: $ids, propagate: CASCADE) }";
-
-    match client.query(mutation, Some(&vars)).await {
-        Ok(_) => {
-            for id in ids {
-                println!("{} Deleted drive {id}", "✓".green());
+        let vars = serde_json::json!({ "identifier": id });
+        let mutation = "mutation($identifier: String!) { deleteDocument(identifier: $identifier, propagate: CASCADE) }";
+        match client.query(mutation, Some(&vars)).await {
+            Ok(_) => println!("{} Deleted drive {id}", "✓".green()),
+            Err(e) => {
+                eprintln!("{} Failed to delete drive {id}: {e}", "✗".red());
+                failed = true;
             }
         }
-        Err(e) => {
-            bail!("Failed to delete drives: {e}");
-        }
+    }
+    if failed {
+        bail!("One or more drives could not be deleted");
     }
 
     Ok(())

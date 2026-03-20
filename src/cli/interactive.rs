@@ -784,10 +784,14 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                             };
                             stop_spinner(spinner);
                             if let Some(helper) = rl.helper_mut() {
-                                if modifies_drives {
+                                // Only replace drive slugs if we got results back — don't
+                                // wipe the existing list on a transient fetch failure.
+                                if modifies_drives && !new_slugs.is_empty() {
                                     helper.drive_slugs = new_slugs;
                                 }
-                                helper.update_docs(new_docs);
+                                if !new_docs.is_empty() {
+                                    helper.update_docs(new_docs);
+                                }
                             }
                         }
 

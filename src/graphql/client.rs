@@ -33,11 +33,12 @@ impl GraphQLClient {
         // Check for env var override
         let token = std::env::var("SWITCHBOARD_TOKEN").ok().or(token);
 
-        Self {
-            client: Client::new(),
-            url,
-            token,
-        }
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("failed to build HTTP client");
+
+        Self { client, url, token }
     }
 
     pub async fn query(&self, query: &str, variables: Option<&Value>) -> Result<Value> {

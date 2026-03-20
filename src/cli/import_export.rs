@@ -515,8 +515,9 @@ async fn export_drive(
     Ok(())
 }
 
-const OP_BATCH_SIZE: usize = 100;
-const REQUEST_DELAY_MS: u64 = 200;
+const OP_BATCH_SIZE: usize = 500;
+/// Delay between write operations (import only) to avoid overwhelming the server.
+const WRITE_DELAY_MS: u64 = 100;
 
 /// Fetch drive nodes via the document() query on the main GraphQL endpoint.
 async fn fetch_drive_nodes(client: &GraphQLClient, drive_identifier: &str) -> Result<Vec<Value>> {
@@ -547,34 +548,41 @@ async fn fetch_document(client: &GraphQLClient, doc_id: &str) -> Result<(Value, 
         .ok_or_else(|| anyhow::anyhow!("Document '{doc_id}' not found"))?
         .clone();
 
-    // Fetch operations with pagination
+    // Fetch operations with pagination (no delay — reads are safe to do at full speed)
     let mut all_ops: Vec<Value> = Vec::new();
+    let mut total_count: Option<usize> = None;
     loop {
         let offset = all_ops.len();
         let ops_query = format!(
             r#"{{ documentOperations(filter: {{ documentId: "{escaped}" }}, paging: {{ limit: {OP_BATCH_SIZE}, offset: {offset} }}) {{ items {{ id index action {{ type input scope }} timestampUtcMs hash skip error }} totalCount }} }}"#,
         );
 
-        if !all_ops.is_empty() {
-            tokio::time::sleep(std::time::Duration::from_millis(REQUEST_DELAY_MS)).await;
+        let ops_data = client.query(&ops_query, None).await?;
+
+        // Capture totalCount on first batch to avoid an extra empty-fetch round trip
+        if total_count.is_none() {
+            total_count = ops_data
+                .pointer("/documentOperations/totalCount")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
         }
 
-        let ops_data = client.query(&ops_query, None).await?;
         let batch = ops_data
             .pointer("/documentOperations/items")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
 
-        if batch.is_empty() {
-            break;
-        }
-
         let batch_len = batch.len();
         all_ops.extend(batch);
 
-        // If we got fewer than the batch size, we're done
+        // Stop when we've collected everything or got a short page
         if batch_len < OP_BATCH_SIZE {
+            break;
+        }
+        if let Some(total) = total_count
+            && all_ops.len() >= total
+        {
             break;
         }
     }
@@ -765,7 +773,7 @@ pub async fn run_import(
         }
 
         // Step 3: Verify state matches the .phd current-state
-        tokio::time::sleep(std::time::Duration::from_millis(REQUEST_DELAY_MS)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(WRITE_DELAY_MS)).await;
         if !quiet {
             match verify_state(&client, &new_doc_id, &contents.current_state.global).await {
                 Ok(true) => println!("  State:  {} EXACT MATCH", "✓".green()),
@@ -908,7 +916,7 @@ async fn push_operations_via_mutate(
         };
 
         if total_pushed > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(REQUEST_DELAY_MS)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(WRITE_DELAY_MS)).await;
         }
 
         match client.query(&mutation, Some(&vars)).await {

@@ -861,24 +861,21 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
         }
     }
 
-    // Use batch deleteDocuments API
-    let id_list: String = ids
-        .iter()
-        .map(|id| format!("\"{}\"", id.replace('"', r#"\""#)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mutation =
-        format!(r#"mutation {{ deleteDocuments(identifiers: [{id_list}], propagate: CASCADE) }}"#);
-
-    match client.query(&mutation, None).await {
-        Ok(_) => {
-            for id in ids {
-                println!("{} Deleted document {id}", "✓".green());
+    // Soft-delete each document with cascade propagation using proper variables.
+    let mutation = "mutation($identifier: String!) { deleteDocument(identifier: $identifier, propagate: CASCADE) }";
+    let mut failed = false;
+    for id in ids {
+        let vars = serde_json::json!({ "identifier": id });
+        match client.query(mutation, Some(&vars)).await {
+            Ok(_) => println!("{} Deleted document {id}", "✓".green()),
+            Err(e) => {
+                eprintln!("{} Failed to delete document {id}: {e}", "✗".red());
+                failed = true;
             }
         }
-        Err(e) => {
-            bail!("Failed to delete documents: {e}");
-        }
+    }
+    if failed {
+        bail!("One or more documents could not be deleted");
     }
 
     Ok(())
