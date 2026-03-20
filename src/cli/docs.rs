@@ -632,6 +632,30 @@ async fn get(
                 println!("Modified: {modified}");
             }
 
+            // Show parent drive info
+            let doc_id = doc["id"].as_str().unwrap_or("");
+            if !doc_id.is_empty() {
+                let escaped = doc_id.replace('"', r#"\""#);
+                let parents_query = format!(
+                    r#"{{ documentParents(childIdentifier: "{escaped}") {{ items {{ id name slug documentType }} }} }}"#
+                );
+                if let Ok(parents_data) = client.query(&parents_query, None).await {
+                    if let Some(parents) = parents_data
+                        .pointer("/documentParents/items")
+                        .and_then(|v| v.as_array())
+                    {
+                        for parent in parents.iter().filter(|p| {
+                            p["documentType"].as_str() == Some("powerhouse/document-drive")
+                        }) {
+                            let pid = parent["id"].as_str().unwrap_or("-");
+                            let pname = parent["name"].as_str().unwrap_or("-");
+                            let pslug = parent["slug"].as_str().unwrap_or("-");
+                            println!("Drive:    {pname} ({pslug}) [{pid}]");
+                        }
+                    }
+                }
+            }
+
             if !child_ids.is_empty() {
                 println!("Children: {}", child_ids.len());
             }
