@@ -116,7 +116,7 @@ async fn get(
     let (name, _profile, client) = helpers::setup(profile_name)?;
 
     let query = format!(
-        r#"{{ document(identifier: "{id}") {{ document {{ id name slug documentType state revisionsList {{ scope revision }} }} childIds }} }}"#,
+        r#"{{ document(identifier: "{id}") {{ document {{ id name slug documentType preferredEditor state revisionsList {{ scope revision }} }} childIds }} }}"#,
         id = id.replace('"', r#"\""#)
     );
 
@@ -178,6 +178,9 @@ async fn get(
                 println!("Revision: {}", rev_str.join(", "));
             }
             println!("Type:     {}", doc["documentType"].as_str().unwrap_or("-"));
+            if let Some(editor) = doc["preferredEditor"].as_str().filter(|s| !s.is_empty()) {
+                println!("Editor:   {editor}");
+            }
 
             // Show contents as a tree with metadata from state.global.nodes
             if let Some(nodes) = doc
