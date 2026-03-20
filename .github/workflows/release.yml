@@ -154,6 +154,7 @@ jobs:
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           prerelease: ${{ github.ref_name == 'staging' }}
           generate_release_notes: true
           body: |
