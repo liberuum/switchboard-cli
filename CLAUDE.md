@@ -152,7 +152,7 @@ After implementing any code change, **always** run format, lint, build, and inst
 cargo fmt && cargo clippy -- -D warnings && cargo build --release && cp target/release/switchboard ~/.cargo/bin/switchboard && codesign --force --sign - ~/.cargo/bin/switchboard
 ```
 
-**`cargo fmt` must run before every commit.** CI runs `cargo fmt --check` and will reject unformatted code. Never skip this step.
+**`cargo fmt` and `cargo clippy -- -D warnings` must BOTH pass before every commit.** CI runs `cargo fmt --check` and `cargo clippy -- -D warnings` and will reject unformatted or non-lint-clean code. Never skip either step. The CI uses the latest stable Rust toolchain which may be stricter than your local version — treat clippy warnings as errors even if they compile locally.
 
 The codesign step is required on macOS — without it, the OS firewall blocks network access for the copied binary. The user runs the release binary from `~/.cargo/bin/switchboard` — never the debug binary. If you don't build and install, the user can't test your changes.
 
