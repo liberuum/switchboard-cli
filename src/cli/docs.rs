@@ -271,7 +271,7 @@ async fn list(
         if nodes.is_empty() {
             let escaped = drive_id.replace('"', r#"\""#);
             let children_query = format!(
-                r#"{{ documentChildren(parentIdentifier: "{escaped}") {{ items {{ id slug name documentType }} }} }}"#
+                r#"{{ documentChildren(parentIdentifier: "{escaped}") {{ items {{ id slug name documentType state }} }} }}"#
             );
             if let Ok(data) = client.query(&children_query, None).await
                 && let Some(items) = data
@@ -279,6 +279,14 @@ async fn list(
                     .and_then(|v| v.as_array())
             {
                 for item in items {
+                    // Skip soft-deleted documents
+                    if item
+                        .pointer("/state/document/isDeleted")
+                        .and_then(|v| v.as_bool())
+                        == Some(true)
+                    {
+                        continue;
+                    }
                     if let Some(dt) = doc_type
                         && item["documentType"].as_str() != Some(dt)
                     {
@@ -876,17 +884,32 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
         }
     }
 
-    // Soft-delete each document with cascade propagation using proper variables.
-    // Resolve to UUID first — the API's rebuild path requires UUIDs, not slugs/names.
-    let mutation = "mutation($identifier: String!) { deleteDocument(identifier: $identifier, propagate: CASCADE) }";
+    // Soft-delete each document with cascade propagation, then remove the node
+    // from its parent drive's node list so it no longer appears in listings.
+    let delete_mutation = "mutation($identifier: String!) { deleteDocument(identifier: $identifier, propagate: CASCADE) }";
+    let remove_node_mutation = "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive_deleteNode(docId: $docId, input: $input) { id } }";
     let mut failed = false;
     for id in ids {
         let uuid = helpers::resolve_doc(&client, id)
             .await
             .unwrap_or_else(|_| id.clone());
+
+        // Find parent drive(s) BEFORE soft-deleting so we can clean up the node list.
+        let parent_drives = find_parent_drives(&client, &uuid).await;
+
         let vars = serde_json::json!({ "identifier": uuid });
-        match client.query(mutation, Some(&vars)).await {
-            Ok(_) => println!("{} Deleted document {id}", "✓".green()),
+        match client.query(delete_mutation, Some(&vars)).await {
+            Ok(_) => {
+                // Remove the node from each parent drive's node list.
+                for drive_id in &parent_drives {
+                    let node_vars = serde_json::json!({
+                        "docId": drive_id,
+                        "input": { "id": uuid }
+                    });
+                    let _ = client.query(remove_node_mutation, Some(&node_vars)).await;
+                }
+                println!("{} Deleted document {id}", "✓".green());
+            }
             Err(e) => {
                 eprintln!("{} Failed to delete document {id}: {e}", "✗".red());
                 failed = true;
@@ -898,6 +921,29 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
     }
 
     Ok(())
+}
+
+/// Find parent drives of a document (returns their UUIDs).
+async fn find_parent_drives(client: &crate::graphql::GraphQLClient, doc_id: &str) -> Vec<String> {
+    let escaped = doc_id.replace('"', r#"\""#);
+    let query = format!(
+        r#"{{ documentParents(childIdentifier: "{escaped}") {{ items {{ id documentType }} }} }}"#
+    );
+    client
+        .query(&query, None)
+        .await
+        .ok()
+        .and_then(|d| {
+            d.pointer("/documentParents/items")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|p| p["documentType"].as_str() == Some("powerhouse/document-drive"))
+                        .filter_map(|p| p["id"].as_str().map(String::from))
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
 }
 
 async fn rename(
