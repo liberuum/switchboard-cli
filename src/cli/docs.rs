@@ -639,19 +639,19 @@ async fn get(
                 let parents_query = format!(
                     r#"{{ documentParents(childIdentifier: "{escaped}") {{ items {{ id name slug documentType }} }} }}"#
                 );
-                if let Ok(parents_data) = client.query(&parents_query, None).await {
-                    if let Some(parents) = parents_data
+                if let Ok(parents_data) = client.query(&parents_query, None).await
+                    && let Some(parents) = parents_data
                         .pointer("/documentParents/items")
                         .and_then(|v| v.as_array())
+                {
+                    for parent in parents
+                        .iter()
+                        .filter(|p| p["documentType"].as_str() == Some("powerhouse/document-drive"))
                     {
-                        for parent in parents.iter().filter(|p| {
-                            p["documentType"].as_str() == Some("powerhouse/document-drive")
-                        }) {
-                            let pid = parent["id"].as_str().unwrap_or("-");
-                            let pname = parent["name"].as_str().unwrap_or("-");
-                            let pslug = parent["slug"].as_str().unwrap_or("-");
-                            println!("Drive:    {pname} ({pslug}) [{pid}]");
-                        }
+                        let pid = parent["id"].as_str().unwrap_or("-");
+                        let pname = parent["name"].as_str().unwrap_or("-");
+                        let pslug = parent["slug"].as_str().unwrap_or("-");
+                        println!("Drive:    {pname} ({pslug}) [{pid}]");
                     }
                 }
             }
