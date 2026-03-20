@@ -584,10 +584,11 @@ async fn fetch_drive_slugs(client: &crate::graphql::GraphQLClient) -> Vec<String
                         slugs.push(slug.to_string());
                     }
                     // Also add the drive name so users can tab-complete by name
-                    if let Some(name) = d["name"].as_str() {
-                        if !name.is_empty() && d["slug"].as_str() != Some(name) {
-                            slugs.push(name.to_string());
-                        }
+                    if let Some(name) = d["name"].as_str()
+                        && !name.is_empty()
+                        && d["slug"].as_str() != Some(name)
+                    {
+                        slugs.push(name.to_string());
                     }
                 }
                 slugs
