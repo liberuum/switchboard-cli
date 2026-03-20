@@ -256,49 +256,29 @@ async fn create(
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect();
 
-    // Build document header with generated UUID and custom slug.
-    // The preferred editor is stored in header.meta.preferredEditor.
-    let doc_id = uuid::Uuid::new_v4().to_string();
-    let meta = match preferred_editor {
-        Some(ref editor) => serde_json::json!({ "preferredEditor": editor }),
-        None => serde_json::json!({}),
-    };
-    let doc_header = serde_json::json!({
-        "header": {
-            "id": doc_id,
-            "documentType": "powerhouse/document-drive",
-            "name": name,
-            "slug": slug,
-            "branch": "",
-            "revision": { "global": 0 },
-            "sig": { "publicKey": "", "signature": "" },
-            "meta": meta
-        },
-        "state": {
-            "global": {
-                "name": name,
-                "nodes": [],
-                "status": "ACTIVE",
-                "documentTypes": []
-            },
-            "local": {},
-            "document": {
-                "version": 0,
-                "hash": { "algorithm": "sha1", "encoding": "base64" }
-            }
-        }
+    // Use DocumentDrive_createDocument so the API records a CREATE_DOCUMENT operation,
+    // which is required for soft-delete (and hard-delete) to work later.
+    let mut vars_map = serde_json::json!({
+        "name": name,
+        "slug": slug,
     });
-    let vars = serde_json::json!({ "doc": doc_header });
+    if let Some(ref editor) = preferred_editor {
+        vars_map["preferredEditor"] = serde_json::json!(editor);
+    }
+
     let create_data = client
         .query(
-            "mutation($doc: JSONObject!) { createDocument(document: $doc) { id slug name } }",
-            Some(&vars),
+            "mutation($name: String!, $slug: String, $preferredEditor: String) { \
+             DocumentDrive_createDocument(name: $name, slug: $slug, preferredEditor: $preferredEditor) \
+             { id slug name } }",
+            Some(&vars_map),
         )
         .await?;
-    let drive = &create_data["createDocument"];
+    let drive = &create_data["DocumentDrive_createDocument"];
 
-    // Optionally set icon (must use UUID for docId)
+    // Optionally set icon
     if let Some(ref icon_url) = icon {
+        let doc_id = drive["id"].as_str().unwrap_or("");
         let icon_vars = serde_json::json!({
             "docId": doc_id,
             "input": { "icon": icon_url }
@@ -317,7 +297,7 @@ async fn create(
             let slug = drive["slug"].as_str().unwrap_or("-");
             let base = helpers::base_url_from(&client.url);
             println!("{} Drive created", "✓".green());
-            println!("  ID:   {}", drive["id"].as_str().unwrap_or(&doc_id));
+            println!("  ID:   {}", drive["id"].as_str().unwrap_or("-"));
             println!("  Slug: {}", slug);
             println!("  Name: {}", drive["name"].as_str().unwrap_or("-"));
             if let Some(ref editor) = preferred_editor {
@@ -349,13 +329,31 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
         }
     }
 
-    // Soft-delete each drive with cascade propagation.
-    // deleteDocument (singular) marks isDeleted:true in document scope and propagates
-    // to child documents — no document rebuild required, so it works for all drives.
+    // The API's rebuild-before-delete path requires UUID identifiers, not slugs.
+    // Resolve each identifier to its UUID — required by the API's delete path.
+    // Try document() lookup first, then fall back to findDocuments name search.
+    let mutation = "mutation($identifier: String!) { deleteDocument(identifier: $identifier, propagate: CASCADE) }";
     let mut failed = false;
     for id in ids {
-        let vars = serde_json::json!({ "identifier": id });
-        let mutation = "mutation($identifier: String!) { deleteDocument(identifier: $identifier, propagate: CASCADE) }";
+        // Resolve to UUID, then verify the result isn't already soft-deleted.
+        // The API's document(identifier) can match deleted docs by name, so we
+        // skip those and fall through to the name-search which filters them out.
+        let uuid = match helpers::resolve_doc(&client, id).await {
+            Ok(u) if !is_soft_deleted(&client, &u).await => u,
+            _ => {
+                // Either resolution failed or the resolved doc is already deleted —
+                // search by name among non-deleted drives.
+                match find_drive_uuid_by_name(&client, id).await {
+                    Some(u) => u,
+                    None => {
+                        eprintln!("{} Drive '{id}' not found", "✗".red());
+                        failed = true;
+                        continue;
+                    }
+                }
+            }
+        };
+        let vars = serde_json::json!({ "identifier": uuid });
         match client.query(mutation, Some(&vars)).await {
             Ok(_) => println!("{} Deleted drive {id}", "✓".green()),
             Err(e) => {
@@ -369,6 +367,51 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
     }
 
     Ok(())
+}
+
+/// Returns true if the document with the given UUID is already soft-deleted.
+async fn is_soft_deleted(client: &crate::graphql::GraphQLClient, uuid: &str) -> bool {
+    let query = format!(
+        r#"{{ document(identifier: "{uuid}") {{ document {{ state }} }} }}"#,
+        uuid = uuid.replace('"', r#"\""#)
+    );
+    client
+        .query(&query, None)
+        .await
+        .ok()
+        .and_then(|d| {
+            d.pointer("/document/document/state/document/isDeleted")
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false)
+}
+
+/// Search all drives for one whose name matches `name` (case-insensitive) and return its UUID.
+/// Skips soft-deleted drives (state.document.isDeleted == true).
+async fn find_drive_uuid_by_name(
+    client: &crate::graphql::GraphQLClient,
+    name: &str,
+) -> Option<String> {
+    let data = client
+        .query(
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name state } } }"#,
+            None,
+        )
+        .await
+        .ok()?;
+    data.pointer("/findDocuments/items")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter().find(|d| {
+                let deleted = d
+                    .pointer("/state/document/isDeleted")
+                    .and_then(|v| v.as_bool())
+                    == Some(true);
+                !deleted && d["name"].as_str().unwrap_or("").eq_ignore_ascii_case(name)
+            })
+        })
+        .and_then(|d| d["id"].as_str())
+        .map(String::from)
 }
 
 /// Print drive contents as a hybrid tree (folders) + table (documents) view.

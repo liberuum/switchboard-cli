@@ -565,7 +565,7 @@ fn shell_split(input: &str) -> Vec<String> {
 async fn fetch_drive_slugs(client: &crate::graphql::GraphQLClient) -> Vec<String> {
     match client
         .query(
-            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { slug } } }"#,
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { slug state } } }"#,
             None,
         )
         .await
@@ -575,6 +575,11 @@ async fn fetch_drive_slugs(client: &crate::graphql::GraphQLClient) -> Vec<String
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
+                    .filter(|d| {
+                        d.pointer("/state/document/isDeleted")
+                            .and_then(|v| v.as_bool())
+                            != Some(true)
+                    })
                     .filter_map(|d| d["slug"].as_str().map(String::from))
                     .collect()
             })
@@ -586,7 +591,7 @@ async fn fetch_drive_slugs(client: &crate::graphql::GraphQLClient) -> Vec<String
 async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEntry> {
     let data = match client
         .query(
-            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id slug } } }"#,
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id slug state } } }"#,
             None,
         )
         .await
@@ -595,10 +600,19 @@ async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEnt
         Err(_) => return Vec::new(),
     };
 
-    let drives = data
+    let drives: Vec<_> = data
         .pointer("/findDocuments/items")
         .and_then(|v| v.as_array())
-        .cloned()
+        .map(|arr| {
+            arr.iter()
+                .filter(|d| {
+                    d.pointer("/state/document/isDeleted")
+                        .and_then(|v| v.as_bool())
+                        != Some(true)
+                })
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut docs = Vec::new();

@@ -34,7 +34,16 @@ pub async fn run(
     let drives: Vec<Value> = drives_data
         .pointer("/findDocuments/items")
         .and_then(|v| v.as_array())
-        .cloned()
+        .map(|arr| {
+            arr.iter()
+                .filter(|d| {
+                    d.pointer("/state/document/isDeleted")
+                        .and_then(|v| v.as_bool())
+                        != Some(true)
+                })
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
 
     if drives.is_empty() {

@@ -257,7 +257,7 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
 async fn resolve_doc_across_drives(client: &GraphQLClient, name: &str) -> Result<String> {
     let data = client
         .query(
-            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id } } }"#,
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id state } } }"#,
             None,
         )
         .await?;
@@ -267,6 +267,11 @@ async fn resolve_doc_across_drives(client: &GraphQLClient, name: &str) -> Result
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
+                .filter(|d| {
+                    d.pointer("/state/document/isDeleted")
+                        .and_then(|v| v.as_bool())
+                        != Some(true)
+                })
                 .filter_map(|d| d["id"].as_str().map(|s| s.to_string()))
                 .collect()
         })

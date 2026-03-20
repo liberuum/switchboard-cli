@@ -145,7 +145,7 @@ async fn resolve_single_doc(client: &GraphQLClient, identifier: &str) -> Result<
 pub async fn select_drive(client: &GraphQLClient) -> Result<(String, String, String)> {
     let data = client
         .query(
-            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name slug } } }"#,
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name slug state } } }"#,
             None,
         )
         .await?;
@@ -155,6 +155,11 @@ pub async fn select_drive(client: &GraphQLClient) -> Result<(String, String, Str
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
+                .filter(|d| {
+                    d.pointer("/state/document/isDeleted")
+                        .and_then(|v| v.as_bool())
+                        != Some(true)
+                })
                 .map(|d| {
                     let id = d["id"].as_str().unwrap_or("").to_string();
                     let name = d["name"].as_str().unwrap_or("").to_string();

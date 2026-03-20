@@ -208,7 +208,7 @@ async fn list(
             // All drives
             let data = client
                 .query(
-                    r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name } } }"#,
+                    r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name state } } }"#,
                     None,
                 )
                 .await?;
@@ -216,6 +216,11 @@ async fn list(
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
+                        .filter(|d| {
+                            d.pointer("/state/document/isDeleted")
+                                .and_then(|v| v.as_bool())
+                                != Some(true)
+                        })
                         .map(|d| {
                             let id = d["id"].as_str().unwrap_or("").to_string();
                             let name = d["name"].as_str().unwrap_or("").to_string();
@@ -376,7 +381,7 @@ async fn resolve_doc_by_name(
         None => {
             let data = client
                 .query(
-                    r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id } } }"#,
+                    r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id state } } }"#,
                     None,
                 )
                 .await?;
@@ -384,6 +389,11 @@ async fn resolve_doc_by_name(
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
+                        .filter(|d| {
+                            d.pointer("/state/document/isDeleted")
+                                .and_then(|v| v.as_bool())
+                                != Some(true)
+                        })
                         .filter_map(|d| d["id"].as_str().map(|s| s.to_string()))
                         .collect()
                 })
@@ -641,7 +651,7 @@ async fn tree(
         None => {
             let data = client
                 .query(
-                    r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id } } }"#,
+                    r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id state } } }"#,
                     None,
                 )
                 .await?;
@@ -649,6 +659,11 @@ async fn tree(
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
+                        .filter(|d| {
+                            d.pointer("/state/document/isDeleted")
+                                .and_then(|v| v.as_bool())
+                                != Some(true)
+                        })
                         .filter_map(|d| d["id"].as_str().map(|s| s.to_string()))
                         .collect()
                 })
@@ -862,10 +877,14 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
     }
 
     // Soft-delete each document with cascade propagation using proper variables.
+    // Resolve to UUID first — the API's rebuild path requires UUIDs, not slugs/names.
     let mutation = "mutation($identifier: String!) { deleteDocument(identifier: $identifier, propagate: CASCADE) }";
     let mut failed = false;
     for id in ids {
-        let vars = serde_json::json!({ "identifier": id });
+        let uuid = helpers::resolve_doc(&client, id)
+            .await
+            .unwrap_or_else(|_| id.clone());
+        let vars = serde_json::json!({ "identifier": uuid });
         match client.query(mutation, Some(&vars)).await {
             Ok(_) => println!("{} Deleted document {id}", "✓".green()),
             Err(e) => {
