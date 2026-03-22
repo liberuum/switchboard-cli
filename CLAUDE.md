@@ -60,11 +60,14 @@ src/
 │   ├── docs.rs             Document CRUD (supports multi-delete)
 │   ├── models.rs           Model inspection from introspection cache
 │   ├── mutate.rs           Model-specific mutations (dynamic from schema)
+│   ├── field_editor.rs     Field-by-field mutation editor (introspection + prompting)
 │   ├── ops.rs              Operation history viewer
 │   ├── init.rs             First-run wizard + introspection
 │   ├── config.rs           Profile management (list/show/use/remove)
 │   ├── introspect.rs       Schema discovery + caching
 │   ├── auth.rs             Token management
+│   ├── analytics.rs        Analytics queries (metrics, dimensions, currencies, series)
+│   ├── update.rs            Self-update (GitHub Releases + binary swap)
 │   ├── access.rs           Document/operation permissions
 │   ├── groups.rs           User group management
 │   ├── import_export.rs    .phd ZIP archive import/export
