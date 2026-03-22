@@ -217,6 +217,20 @@ HIERARCHY MANAGEMENT
   switchboard docs move <ids...> --from <src> --to <dst>
                                        Move documents between parents
 
+RAW ACTION DISPATCH
+
+  switchboard docs apply <doc-id> --actions '[...]'
+  switchboard docs apply <doc-id> --file <file>
+  switchboard docs apply <doc-id> --actions '[...]' --wait
+
+  Dispatch raw actions directly via mutateDocument. Actions are provided
+  as a JSON array, either inline with --actions or from a file with --file.
+  Use --wait to block until the async mutation completes (uses WebSocket).
+
+  Example:
+    switchboard docs apply abc123 --actions '[{{"type":"SET_NAME","input":{{"name":"New"}}}}]'
+    switchboard docs apply abc123 --file actions.json --wait
+
 MUTATIONS
 
   switchboard docs mutate <doc-id>                    # Interactive field-by-field editor
@@ -282,6 +296,18 @@ EXPORT
   switchboard export doc <doc-id> --drive <slug> --out document.phd
                                        Export a single document
 
+  OPERATION FILTERS (available on all export commands):
+
+  --action-types <types>  Comma-separated list of action types to include
+                          (e.g. "SET_NAME,ADD_FILE"). Only operations with
+                          matching action types are exported.
+  --since-revision <n>    Only export operations from revision N onwards.
+                          Useful for incremental exports.
+  --from <datetime>       Only export operations created at or after this
+                          timestamp (ISO 8601 format, e.g. 2025-01-01T00:00:00Z)
+  --to <datetime>         Only export operations created at or before this
+                          timestamp (ISO 8601 format)
+
   The .phd ZIP contains:
     header.json        Document metadata (id, type, name, revision, timestamps)
     state.json         Initial empty state
@@ -312,7 +338,16 @@ EXAMPLES
 
   # Move a single doc between instances
   switchboard -p staging export doc abc123 --drive builders --out doc.phd
-  switchboard -p local import doc.phd --drive local-drive"#
+  switchboard -p local import doc.phd --drive local-drive
+
+  # Export only specific operation types
+  switchboard export drive builders --out ./backup/ --action-types SET_NAME,ADD_FILE
+
+  # Incremental export from revision 50 onwards
+  switchboard export doc abc123 --drive builders --out doc.phd --since-revision 50
+
+  # Export operations within a time range
+  switchboard export all --out ./backup/ --from 2025-01-01T00:00:00Z --to 2025-06-01T00:00:00Z"#
     );
 }
 
@@ -369,13 +404,18 @@ Watch for live changes via WebSocket (connects to /graphql/subscriptions).
 
 COMMANDS
 
-  switchboard watch docs [--type <type>] [--drive <id>] [--doc <id>]
+  switchboard watch docs [--type <type>] [--drive <id>] [--doc <id>] [--exec <cmd>]
                                        Stream document change events
   switchboard watch job <job-id>       Stream job status updates
 
 OUTPUT
 
-  Table mode shows human-readable event lines.
+  Table mode shows enriched human-readable event lines including:
+  - Document slug and name
+  - Created/updated timestamps
+  - Revisions list with index, hash, and timestamp
+  - Context metadata (signer address, skip header hash)
+
   JSON mode outputs newline-delimited JSON for piping:
 
     switchboard watch docs --format json | jq '.type'
@@ -391,13 +431,32 @@ FILTERS
   --drive <id>      Watch only documents in a specific drive
   --doc <id>        Watch a specific document by ID
 
+EVENT-DRIVEN REACTIONS (--exec)
+
+  --exec <command>  Run a shell command for each event. The event JSON is
+                    piped to the command's stdin, and the $SWITCHBOARD_EVENT
+                    environment variable is set to the event type (e.g.
+                    UPDATED, CREATED, DELETED).
+
+  This enables event-driven automation — trigger scripts, webhooks, or
+  pipelines whenever documents change on the server.
+
 EXAMPLES
 
   switchboard watch docs                                     Watch all changes
   switchboard watch docs --drive builders                    Watch a drive
   switchboard watch docs --doc abc123-uuid                   Watch one document
   switchboard watch docs --type powerhouse/invoice --format json
-  switchboard watch job abc123-job-id"#
+  switchboard watch job abc123-job-id
+
+  # Run a script on every document change
+  switchboard watch docs --exec './on-change.sh'
+
+  # Post each event to a webhook
+  switchboard watch docs --exec 'curl -X POST -d @- https://hooks.example.com/notify'
+
+  # Filter by event type inside the handler
+  switchboard watch docs --exec 'if [ "$SWITCHBOARD_EVENT" = "UPDATED" ]; then echo "updated"; fi'"#
     );
 }
 
@@ -410,13 +469,30 @@ For long-running mutations dispatched via mutateDocumentAsync.
 COMMANDS
 
   switchboard jobs status <job-id>     Get current job status
-  switchboard jobs wait <job-id>       Block until job completes
+  switchboard jobs wait <job-id>       Block until job completes (WebSocket)
   switchboard jobs watch <job-id>      Stream status updates via WebSocket
 
 OPTIONS FOR `wait`
 
-  --interval <secs>   Polling interval (default: 2)
   --timeout <secs>    Timeout in seconds, 0 = none (default: 300)
+
+WEBSOCKET-BASED WAITING
+
+  `jobs wait` uses a WebSocket subscription instead of HTTP polling.
+  It connects to the server's subscription endpoint and receives
+  real-time status updates, completing as soon as the job finishes.
+  This is more efficient and responsive than periodic polling.
+
+STATUS PROGRESSION
+
+  `jobs status`, `jobs watch`, and `jobs wait` display a visual
+  progression bar showing the job's lifecycle stages:
+
+    PENDING --> RUNNING --> COMPLETED
+
+  Each stage is color-coded: pending (yellow), running (blue),
+  completed (green), or failed (red). The bar updates in place
+  as the job progresses through its stages.
 
 EXAMPLES
 
@@ -727,6 +803,7 @@ DOCUMENTS
   docs tree [<drive>]         Hierarchical tree view (all drives if omitted)
   docs create                   Create a document
   docs delete <ids...> [-y]     Delete one or more documents
+  docs apply <id> --actions/--file Dispatch raw actions (--wait for async)
   docs mutate <id> [--op <op>]   Interactive field editor (--op, --input for scripting)
 
 MODELS & OPERATIONS
@@ -747,10 +824,10 @@ AUTH
   auth token                    Print current token
 
 REAL-TIME & ADVANCED
-  watch docs [--type] [--drive] Subscribe to document changes
+  watch docs [--type] [--drive] [--exec] Subscribe to document changes
   watch job <job-id>            Subscribe to job updates
   jobs status <job-id>          Get job status
-  jobs wait <job-id>            Block until job completes
+  jobs wait <job-id>            Block until job completes (WebSocket)
   jobs watch <job-id>           Stream job updates
   sync touch <input>            Create/update sync channel
   sync push <envelopes>         Push sync envelopes

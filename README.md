@@ -178,6 +178,7 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard docs add-to <parent> <ids...>` | Add documents as children of a parent |
 | `switchboard docs remove-from <parent> <ids...>` | Remove documents from a parent |
 | `switchboard docs move <ids...> --from <src> --to <dst>` | Move documents between parents |
+| `switchboard docs apply <id> --actions '<json>' [--file <file>] [--wait]` | Dispatch raw actions via `mutateDocument` — pass actions inline or from a file; `--wait` blocks until async completion |
 | `switchboard docs mutate <id-or-name> [--op <op>] [--input '<json>'] [--input-file <file>] [--drive <slug>]` | Interactive field-by-field editor — omit `--op` for operation picker; pass `--input` / `--input-file` for scripting |
 
 ### Models & Operations
@@ -196,6 +197,8 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard export drive <slug> --out ./dir/` | Export all documents in a drive |
 | `switchboard export doc <id> --drive <slug> --out file.phd` | Export a single document |
 | `switchboard import <files> --drive <slug>` | Import `.phd` files into a drive |
+
+All export commands support operation filters: `--action-types <types>` (comma-separated action types), `--since-revision <n>` (operations from revision N onwards), `--from <datetime>` and `--to <datetime>` (ISO 8601 time range). These enable incremental and selective exports.
 
 ### Authentication & Permissions
 
@@ -219,11 +222,11 @@ switchboard import ./backup/*.phd --drive another-drive
 
 | Command | Description |
 |---------|-------------|
-| `switchboard watch docs [--type <type>] [--drive <id>] [--doc <id>]` | Stream document change events via WebSocket |
+| `switchboard watch docs [--type <type>] [--drive <id>] [--doc <id>] [--exec <cmd>]` | Stream document change events via WebSocket. Enriched output includes slug, timestamps, revisions, and context. `--exec` runs a command for each event with JSON on stdin and `$SWITCHBOARD_EVENT` set |
 | `switchboard watch job <job-id>` | Stream job status updates |
-| `switchboard jobs status <job-id>` | Get current job status |
-| `switchboard jobs wait <job-id> [--interval <secs>] [--timeout <secs>]` | Block until a job completes |
-| `switchboard jobs watch <job-id>` | Stream job status updates via WebSocket |
+| `switchboard jobs status <job-id>` | Get current job status with visual progression bar |
+| `switchboard jobs wait <job-id> [--timeout <secs>]` | Block until a job completes via WebSocket subscription (no polling) |
+| `switchboard jobs watch <job-id>` | Stream job status updates via WebSocket with visual progression bar |
 | `switchboard sync touch <input>` | Create/update a sync channel |
 | `switchboard sync push <envelopes>` | Push sync envelopes |
 | `switchboard sync poll <channel-id> [--ack N] [--latest N]` | Poll for sync envelopes |
@@ -298,6 +301,24 @@ switchboard docs list --drive builders --format json | jq length
 for slug in $(switchboard drives list --format json | jq -r '.[].slug'); do
   switchboard export drive "$slug" --out "./backup/$slug/"
 done
+
+# Incremental export — only operations since revision 100
+switchboard export drive builders --out ./incremental/ --since-revision 100
+
+# Export only SET_NAME operations from the last month
+switchboard export all --out ./filtered/ --action-types SET_NAME --from 2025-02-01T00:00:00Z
+
+# Dispatch raw actions to a document
+switchboard docs apply abc123 --actions '[{"type":"SET_NAME","input":{"name":"New Name"}}]'
+
+# Dispatch actions from a file and wait for async completion
+switchboard docs apply abc123 --file actions.json --wait
+
+# React to document changes with a shell command
+switchboard watch docs --exec './on-change.sh'
+
+# Post every document event to a webhook
+switchboard watch docs --exec 'curl -sX POST -d @- https://hooks.example.com/notify'
 ```
 
 ## Profiles
