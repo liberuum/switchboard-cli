@@ -465,7 +465,7 @@ switchboard docs apply <id-or-name> --file <path> --wait     # Wait for async co
 Dispatches raw actions to a document via `mutateDocumentAsync`. Returns a job ID.
 With `--wait`, blocks until the job completes.
 
-The CLI automatically injects `timestampUtcMs` (Unix milliseconds) into each action if missing. This is required by the reactor's operation store but not populated by the generic `mutateDocument` resolver — without it, drive operations (ADD_FOLDER, MOVE_NODE, etc.) fail with "Invalid time value".
+The CLI automatically injects `timestampUtcMs` (ISO-8601 format, e.g. `2026-03-22T22:06:53.528Z`) into each action if missing. This is required by the reactor's operation store (which does `new Date(timestampUtcMs)`) but not populated by the generic `mutateDocument` resolver — without it, drive operations (ADD_FOLDER, MOVE_NODE, etc.) fail with "Invalid time value".
 
 ```
 $ switchboard docs apply abc123 --actions '[{"type":"SET_NAME","input":{"name":"New Name"}}]'

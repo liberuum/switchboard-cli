@@ -118,7 +118,7 @@ switchboard docs mutate <doc_id|name> --drive <slug> --op <operation> --input '<
 
 ```bash
 # Apply raw actions (async, returns job ID)
-# timestampUtcMs is auto-injected into each action if missing
+# timestampUtcMs is auto-injected as ISO-8601 into each action if missing
 switchboard docs apply <id> --actions '<json_array>' --format json
 switchboard docs apply <id> --file actions.json --format json
 switchboard docs apply <id> --file - --format json          # Read from stdin

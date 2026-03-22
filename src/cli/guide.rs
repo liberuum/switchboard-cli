@@ -231,10 +231,10 @@ RAW ACTION DISPATCH
   as a JSON array, either inline with --actions or from a file with --file.
   Use --wait to block until the async mutation completes (uses WebSocket).
 
-  The CLI automatically injects timestampUtcMs into each action if missing.
-  This is required by the reactor's operation store but not set by the generic
-  mutateDocument resolver — without it, drive operations fail with
-  "Invalid time value".
+  The CLI automatically injects timestampUtcMs (ISO-8601 format) into each
+  action if missing. This is required by the reactor's operation store but not
+  set by the generic mutateDocument resolver — without it, drive operations
+  fail with "Invalid time value".
 
   Example:
     switchboard docs apply abc123 --actions '[{{"type":"SET_NAME","input":{{"name":"New"}}}}]'
