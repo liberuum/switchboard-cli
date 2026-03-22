@@ -308,7 +308,7 @@ switchboard export drive builders --out ./incremental/ --since-revision 100
 # Export only SET_NAME operations from the last month
 switchboard export all --out ./filtered/ --action-types SET_NAME --from 2025-02-01T00:00:00Z
 
-# Dispatch raw actions to a document (timestampUtcMs auto-injected as ISO-8601 if missing)
+# Dispatch raw actions to a document (timestampUtcMs auto-injected as number if missing)
 switchboard docs apply abc123 --actions '[{"type":"SET_NAME","input":{"name":"New Name"}}]'
 
 # Dispatch actions from a file and wait for async completion

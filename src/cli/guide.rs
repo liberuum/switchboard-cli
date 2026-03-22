@@ -231,7 +231,7 @@ RAW ACTION DISPATCH
   as a JSON array, either inline with --actions or from a file with --file.
   Use --wait to block until the async mutation completes (uses WebSocket).
 
-  The CLI automatically injects timestampUtcMs (ISO-8601 format) into each
+  The CLI automatically injects timestampUtcMs (as a JSON number) into each
   action if missing. This is required by the reactor's operation store but not
   set by the generic mutateDocument resolver — without it, drive operations
   fail with "Invalid time value".
