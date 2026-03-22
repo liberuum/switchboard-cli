@@ -757,6 +757,33 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                     }
                 }
 
+                // ── Manual refresh ────────────────────────────────────
+                if line.trim() == "refresh" {
+                    let spinner = spawn_spinner("Refreshing completions...");
+                    let new_slugs = fetch_drive_slugs(&client).await;
+                    let new_docs = fetch_doc_entries(&client).await;
+                    let new_model_types: Vec<String> =
+                        crate::graphql::introspection::load_cache(&current_profile)
+                            .ok()
+                            .flatten()
+                            .map(|c| c.models.values().map(|m| m.document_type.clone()).collect())
+                            .unwrap_or_default();
+                    stop_spinner(spinner);
+                    if let Some(helper) = rl.helper_mut() {
+                        if !new_slugs.is_empty() {
+                            helper.drive_slugs = new_slugs;
+                        }
+                        if !new_docs.is_empty() {
+                            helper.update_docs(new_docs);
+                        }
+                        if !new_model_types.is_empty() {
+                            helper.model_types = new_model_types;
+                        }
+                    }
+                    eprintln!("Completions refreshed.");
+                    continue;
+                }
+
                 // ── Parse as CLI command via clap ────────────────────
                 let tokens = shell_split(line);
                 let args = std::iter::once("switchboard".to_string()).chain(tokens);
@@ -789,8 +816,8 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                             || line.starts_with("docs remove-from")
                             || line.starts_with("docs move")
                             || line.starts_with("docs mutate")
+                            || line.starts_with("docs apply")
                             || line.starts_with("import ");
-
                         if let Err(e) =
                             crate::cli::dispatch(command, format, cmd_profile, cmd_quiet).await
                         {
@@ -947,6 +974,7 @@ fn print_repl_help() {
     eprintln!("  Shortcuts:");
     eprintln!("    query {{ ... }}    Run raw GraphQL without quotes");
     eprintln!("    help | ?         Show this help");
+    eprintln!("    refresh          Reload tab-completion caches (drives, docs, models)");
     eprintln!("    exit | quit | q  Exit interactive mode");
     eprintln!();
     eprintln!("  Tip: Append --help to any command for details.");
