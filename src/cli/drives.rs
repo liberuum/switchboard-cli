@@ -115,9 +115,11 @@ async fn get(
 ) -> Result<()> {
     let (name, _profile, client) = helpers::setup(profile_name)?;
 
+    // Resolve name/slug/UUID to a UUID the API understands
+    let resolved = helpers::resolve_doc(&client, id).await?;
     let query = format!(
-        r#"{{ document(identifier: "{id}") {{ document {{ id name slug documentType preferredEditor state revisionsList {{ scope revision }} }} childIds }} }}"#,
-        id = id.replace('"', r#"\""#)
+        r#"{{ document(identifier: "{resolved}") {{ document {{ id name slug documentType preferredEditor state revisionsList {{ scope revision }} }} childIds }} }}"#,
+        resolved = resolved.replace('"', r#"\""#)
     );
 
     let data = client.query(&query, None).await?;

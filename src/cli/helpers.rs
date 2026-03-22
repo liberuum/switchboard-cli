@@ -124,20 +124,104 @@ pub async fn resolve_doc(client: &GraphQLClient, id_or_name: &str) -> Result<Str
     resolve_single_doc(client, id_or_name).await
 }
 
-/// Resolve a single identifier (UUID or slug) to its UUID via `document(identifier)`.
+/// Resolve a single identifier (UUID, slug, or name) to its UUID.
+/// First tries `document(identifier)` for UUIDs/slugs, then falls back
+/// to a name search via `findDocuments` for human-readable names.
 async fn resolve_single_doc(client: &GraphQLClient, identifier: &str) -> Result<String> {
-    let query = format!(
-        r#"{{ document(identifier: "{id}") {{ document {{ id }} }} }}"#,
-        id = identifier.replace('"', r#"\""#)
-    );
-    let data = client.query(&query, None).await?;
-    match data
-        .pointer("/document/document/id")
-        .and_then(|v| v.as_str())
+    let escaped = identifier.replace('"', r#"\""#);
+
+    // Try direct lookup (works for UUIDs and slugs)
+    let query = format!(r#"{{ document(identifier: "{escaped}") {{ document {{ id }} }} }}"#,);
+    if let Ok(data) = client.query(&query, None).await
+        && let Some(id) = data
+            .pointer("/document/document/id")
+            .and_then(|v| v.as_str())
     {
-        Some(id) => Ok(id.to_string()),
-        None => bail!("Document '{}' not found", identifier),
+        return Ok(id.to_string());
     }
+
+    // Fallback: search by name. Try drives first, then search each drive's children.
+    let mut matches: Vec<(String, String)> = Vec::new(); // (id, name)
+
+    // Search drives by name
+    let drive_query = r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name slug } } }"#;
+    if let Ok(data) = client.query(drive_query, None).await
+        && let Some(items) = data
+            .pointer("/findDocuments/items")
+            .and_then(|v| v.as_array())
+    {
+        for item in items {
+            let item_name = item["name"].as_str().unwrap_or("");
+            let item_slug = item["slug"].as_str().unwrap_or("");
+            let item_id = item["id"].as_str().unwrap_or("");
+            if item_name.eq_ignore_ascii_case(identifier)
+                || item_slug.eq_ignore_ascii_case(identifier)
+            {
+                matches.push((item_id.to_string(), item_name.to_string()));
+            }
+        }
+    }
+
+    // If no drive matched, search document children across all drives
+    if matches.is_empty()
+        && let Ok(data) = client
+            .query(
+                r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id } } }"#,
+                None,
+            )
+            .await
+        && let Some(drives) = data
+            .pointer("/findDocuments/items")
+            .and_then(|v| v.as_array())
+    {
+        for drv in drives {
+            let drv_id = drv["id"].as_str().unwrap_or("");
+            if drv_id.is_empty() {
+                continue;
+            }
+            let children_query = format!(
+                r#"{{ documentChildren(parentIdentifier: "{drv_id}") {{ items {{ id name slug }} }} }}"#,
+            );
+            if let Ok(cd) = client.query(&children_query, None).await
+                && let Some(items) = cd
+                    .pointer("/documentChildren/items")
+                    .and_then(|v| v.as_array())
+            {
+                for item in items {
+                    let item_name = item["name"].as_str().unwrap_or("");
+                    let item_slug = item["slug"].as_str().unwrap_or("");
+                    let item_id = item["id"].as_str().unwrap_or("");
+                    if item_name.eq_ignore_ascii_case(identifier)
+                        || item_slug.eq_ignore_ascii_case(identifier)
+                    {
+                        matches.push((item_id.to_string(), item_name.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    if matches.len() == 1 {
+        return Ok(matches[0].0.clone());
+    }
+    if matches.len() > 1 {
+        // Deduplicate by ID
+        matches.sort();
+        matches.dedup_by(|a, b| a.0 == b.0);
+        if matches.len() == 1 {
+            return Ok(matches[0].0.clone());
+        }
+        let list: Vec<String> = matches
+            .iter()
+            .map(|(id, name)| format!("  {id} ({name})"))
+            .collect();
+        bail!(
+            "Multiple documents match '{}'. Use an ID:\n{}",
+            identifier,
+            list.join("\n")
+        );
+    }
+
+    bail!("Document '{}' not found", identifier)
 }
 
 /// Fetch available drives and present a `Select` picker.
