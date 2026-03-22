@@ -168,8 +168,8 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
     // All typed mutations return *MutationResult which requires a selection set
     let selection = "{ id name }";
 
+    // Build the inner operation call: "opName(docId: $docId, input: $input) { id name }"
     let (mutation, variables) = if has_input_arg {
-        // Find the input type name from the operation args
         let input_type = operation
             .args
             .iter()
@@ -183,17 +183,18 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
             .is_some_and(|a| a.required);
         let bang = if required { "!" } else { "" };
 
-        let query = format!(
-            "mutation($docId: PHID!, $input: {input_type}{bang}) {{ {name}(docId: $docId, input: $input) {selection} }}",
-            name = operation.full_name,
+        let body = model.mutation_body(
+            &operation.full_name,
+            "docId: $docId, input: $input",
+            selection,
         );
+        let query = format!("mutation($docId: PHID!, $input: {input_type}{bang}) {{ {body} }}");
         let vars = serde_json::json!({
             "docId": resolved_doc_id,
             "input": input_value,
         });
         (query, vars)
     } else {
-        // Direct args — build variable declarations and references dynamically
         let mut var_decls = vec!["$docId: PHID!".to_string()];
         let mut arg_refs = vec!["docId: $docId".to_string()];
         let mut vars = serde_json::Map::new();
@@ -201,7 +202,6 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
 
         if let Value::Object(map) = &input_value {
             for (key, val) in map {
-                // Find the arg type from the operation definition
                 let arg_type = operation
                     .args
                     .iter()
@@ -221,11 +221,11 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
             }
         }
 
+        let args_str = arg_refs.join(", ");
+        let body = model.mutation_body(&operation.full_name, &args_str, selection);
         let query = format!(
-            "mutation({decls}) {{ {name}({args}) {selection} }}",
+            "mutation({decls}) {{ {body} }}",
             decls = var_decls.join(", "),
-            name = operation.full_name,
-            args = arg_refs.join(", "),
         );
         (query, Value::Object(vars))
     };

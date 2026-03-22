@@ -102,6 +102,20 @@ pub enum DocsCommand {
     },
     /// Interactive field-by-field editor (use --op to skip operation picker, --input for scripting)
     Mutate(mutate::MutateArgs),
+    /// Apply raw actions to a document (async, returns job ID)
+    Apply {
+        /// Document ID or slug
+        id: String,
+        /// JSON array of actions (or use --file)
+        #[arg(long)]
+        actions: Option<String>,
+        /// Read actions JSON from a file (- for stdin)
+        #[arg(long, value_name = "FILE")]
+        file: Option<String>,
+        /// Wait for the job to complete
+        #[arg(long)]
+        wait: bool,
+    },
 }
 
 pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
@@ -149,6 +163,12 @@ pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&s
             move_docs(&ids, &from, &to, format, profile_name).await
         }
         DocsCommand::Mutate(args) => mutate::run(args, format, profile_name).await,
+        DocsCommand::Apply {
+            id,
+            actions,
+            file,
+            wait,
+        } => apply(&id, actions, file, wait, format, profile_name).await,
     }
 }
 
@@ -859,17 +879,33 @@ async fn create(
         }
     };
 
-    let escaped_name = name.replace('"', r#"\""#);
-    let escaped_drive = drive_identifier.replace('"', r#"\""#);
+    // Use the model's typed create mutation (nested or flat format)
+    let vars = serde_json::json!({
+        "name": name,
+        "parentIdentifier": drive_identifier,
+    });
+    let mutation = if model.namespace.is_empty() {
+        // Legacy flat: Model_createDocument(name: $name, parentIdentifier: $id) { id }
+        format!(
+            "mutation($name: String!, $parentIdentifier: String) {{ {}(name: $name, parentIdentifier: $parentIdentifier) {{ id }} }}",
+            model.create_mutation,
+        )
+    } else {
+        // Nested: Model { createDocument(name: $name, parentIdentifier: $id) { id } }
+        format!(
+            "mutation($name: String!, $parentIdentifier: String) {{ {} {{ createDocument(name: $name, parentIdentifier: $parentIdentifier) {{ id }} }} }}",
+            model.namespace,
+        )
+    };
 
-    // Use the model's typed create mutation
-    let mutation = format!(
-        r#"mutation {{ {create_mutation}(name: "{escaped_name}", parentIdentifier: "{escaped_drive}") {{ id }} }}"#,
-        create_mutation = model.create_mutation,
-    );
-
-    let data = client.query(&mutation, None).await?;
-    let doc_id = data.get(&model.create_mutation).and_then(|v| {
+    let data = client.query(&mutation, Some(&vars)).await?;
+    let doc_id = if model.namespace.is_empty() {
+        data.get(&model.create_mutation)
+    } else {
+        data.get(&model.namespace)
+            .and_then(|ns| ns.get("createDocument"))
+    }
+    .and_then(|v| {
         v.as_str()
             .or_else(|| v.get("id").and_then(|id| id.as_str()))
     });
@@ -911,7 +947,12 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
     // Soft-delete each document with cascade propagation, then remove the node
     // from its parent drive's node list so it no longer appears in listings.
     let delete_mutation = "mutation($identifier: String!) { deleteDocument(identifier: $identifier, propagate: CASCADE) }";
-    let remove_node_mutation = "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive_deleteNode(docId: $docId, input: $input) { id } }";
+    let nested = helpers::is_nested_api(&client).await;
+    let remove_node_mutation = if nested {
+        "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }"
+    } else {
+        "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive_deleteNode(docId: $docId, input: $input) { id } }"
+    };
     let mut failed = false;
     for id in ids {
         let uuid = match helpers::resolve_doc(&client, id).await {
@@ -1167,6 +1208,95 @@ async fn move_docs(
                 dst
             );
         }
+    }
+
+    Ok(())
+}
+
+/// Apply raw actions to a document via mutateDocumentAsync.
+/// Returns a job ID. With --wait, blocks until the job completes.
+async fn apply(
+    id: &str,
+    actions_arg: Option<String>,
+    file_arg: Option<String>,
+    wait: bool,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+) -> Result<()> {
+    let (_name, _profile, client) = helpers::setup(profile_name)?;
+
+    // Read actions JSON from --actions, --file, or stdin
+    let actions_json = match (actions_arg, file_arg) {
+        (Some(json), _) => json,
+        (_, Some(path)) if path == "-" => {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| anyhow::anyhow!("Failed to read stdin: {e}"))?;
+            buf
+        }
+        (_, Some(path)) => std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to read file '{path}': {e}"))?,
+        (None, None) => bail!("Provide actions via --actions or --file (use - for stdin)"),
+    };
+
+    let actions: Value =
+        serde_json::from_str(&actions_json).map_err(|e| anyhow::anyhow!("Invalid JSON: {e}"))?;
+
+    if !actions.is_array() {
+        bail!("Actions must be a JSON array");
+    }
+
+    let resolved_id = helpers::resolve_doc(&client, id)
+        .await
+        .unwrap_or_else(|_| id.to_string());
+
+    let vars = serde_json::json!({
+        "documentIdentifier": resolved_id,
+        "actions": actions,
+    });
+
+    // Use async variant so we get a job ID
+    let data = client
+        .query(
+            "mutation($documentIdentifier: String!, $actions: [JSONObject!]!) { \
+             mutateDocumentAsync(documentIdentifier: $documentIdentifier, actions: $actions) }",
+            Some(&vars),
+        )
+        .await?;
+
+    let job_id = data["mutateDocumentAsync"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    if job_id.is_empty() {
+        bail!("No job ID returned from mutateDocumentAsync");
+    }
+
+    match format {
+        OutputFormat::Json | OutputFormat::Raw => {
+            print_json(&serde_json::json!({ "jobId": job_id }));
+        }
+        _ => {
+            println!("Job: {job_id}");
+        }
+    }
+
+    if wait {
+        eprintln!("Waiting for job to complete...");
+        crate::cli::jobs::run(
+            crate::cli::jobs::JobsCommand::Wait {
+                job_id,
+                interval: 2,
+                timeout: 300,
+            },
+            format,
+            profile_name,
+            false,
+        )
+        .await?;
     }
 
     Ok(())

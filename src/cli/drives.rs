@@ -259,8 +259,10 @@ async fn create(
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect();
 
-    // Use DocumentDrive_createDocument so the API records a CREATE_DOCUMENT operation,
-    // which is required for soft-delete (and hard-delete) to work later.
+    // Use the DocumentDrive createDocument mutation so the API records a
+    // CREATE_DOCUMENT operation (required for soft-delete to work later).
+    let nested = helpers::is_nested_api(&client).await;
+
     let mut vars_map = serde_json::json!({
         "name": name,
         "slug": slug,
@@ -269,15 +271,22 @@ async fn create(
         vars_map["preferredEditor"] = serde_json::json!(editor);
     }
 
-    let create_data = client
-        .query(
-            "mutation($name: String!, $slug: String, $preferredEditor: String) { \
-             DocumentDrive_createDocument(name: $name, slug: $slug, preferredEditor: $preferredEditor) \
-             { id slug name } }",
-            Some(&vars_map),
-        )
-        .await?;
-    let drive = &create_data["DocumentDrive_createDocument"];
+    let create_mutation = if nested {
+        "mutation($name: String!, $slug: String, $preferredEditor: String) { \
+         DocumentDrive { createDocument(name: $name, slug: $slug, preferredEditor: $preferredEditor) \
+         { id slug name } } }"
+    } else {
+        "mutation($name: String!, $slug: String, $preferredEditor: String) { \
+         DocumentDrive_createDocument(name: $name, slug: $slug, preferredEditor: $preferredEditor) \
+         { id slug name } }"
+    };
+
+    let create_data = client.query(create_mutation, Some(&vars_map)).await?;
+    let drive = if nested {
+        &create_data["DocumentDrive"]["createDocument"]
+    } else {
+        &create_data["DocumentDrive_createDocument"]
+    };
 
     // Optionally set icon
     if let Some(ref icon_url) = icon {
@@ -286,12 +295,12 @@ async fn create(
             "docId": doc_id,
             "input": { "icon": icon_url }
         });
-        client
-            .query(
-                "mutation($docId: PHID!, $input: DocumentDrive_SetDriveIconInput!) { DocumentDrive_setDriveIcon(docId: $docId, input: $input) { id } }",
-                Some(&icon_vars),
-            )
-            .await?;
+        let icon_mutation = if nested {
+            "mutation($docId: PHID!, $input: DocumentDrive_SetDriveIconInput!) { DocumentDrive { setDriveIcon(docId: $docId, input: $input) { id } } }"
+        } else {
+            "mutation($docId: PHID!, $input: DocumentDrive_SetDriveIconInput!) { DocumentDrive_setDriveIcon(docId: $docId, input: $input) { id } }"
+        };
+        client.query(icon_mutation, Some(&icon_vars)).await?;
     }
 
     match format {

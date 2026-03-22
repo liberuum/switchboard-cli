@@ -6,6 +6,20 @@ use crate::cli::helpers;
 use crate::graphql::websocket;
 use crate::output::OutputFormat;
 
+/// Simple HH:MM:SS.mmm timestamp from system clock.
+fn ts() -> String {
+    use std::time::SystemTime;
+    let d = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = d.as_secs() % 86400; // seconds within current day (UTC)
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    let ms = d.subsec_millis();
+    format!("{h:02}:{m:02}:{s:02}.{ms:03}")
+}
+
 #[derive(Subcommand)]
 pub enum WatchCommand {
     /// Watch for document changes in real-time
@@ -19,6 +33,9 @@ pub enum WatchCommand {
         /// Filter by document ID
         #[arg(long)]
         doc: Option<String>,
+        /// Execute a shell command for each event (receives JSON on stdin)
+        #[arg(long)]
+        exec: Option<String>,
     },
     /// Watch a job's status updates
     Job {
@@ -50,13 +67,19 @@ pub async fn run(
     let ws_url = format!("{ws_scheme}://{host}/graphql/subscriptions");
 
     match cmd {
-        WatchCommand::Docs { r#type, drive, doc } => {
+        WatchCommand::Docs {
+            r#type,
+            drive,
+            doc,
+            exec,
+        } => {
             watch_docs(
                 &ws_url,
                 profile.token.as_deref(),
                 r#type,
                 drive,
                 doc,
+                exec,
                 format,
                 quiet,
             )
@@ -68,12 +91,14 @@ pub async fn run(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn watch_docs(
     ws_url: &str,
     token: Option<&str>,
     doc_type: Option<String>,
     drive: Option<String>,
     doc: Option<String>,
+    exec: Option<String>,
     format: OutputFormat,
     quiet: bool,
 ) -> Result<()> {
@@ -92,7 +117,7 @@ async fn watch_docs(
 
     let search_inner = search_parts.join(", ");
     let subscription = format!(
-        r#"subscription {{ documentChanges(search: {{ {search_inner} }}) {{ type documents {{ id name documentType }} context {{ parentId childId }} }} }}"#
+        r#"subscription {{ documentChanges(search: {{ {search_inner} }}) {{ type documents {{ id slug name documentType createdAtUtcIso lastModifiedAtUtcIso revisionsList {{ scope revision }} }} context {{ parentId childId }} }} }}"#
     );
 
     if !quiet && matches!(format, OutputFormat::Table) {
@@ -100,24 +125,88 @@ async fn watch_docs(
         eprintln!("Press Ctrl+C to stop.\n");
     }
 
-    websocket::subscribe(ws_url, token, &subscription, |data: Value| {
+    websocket::subscribe(ws_url, token, &subscription, move |data: Value| {
         if let Some(change) = data.get("documentChanges") {
+            // Execute shell command if --exec is set
+            if let Some(ref cmd) = exec {
+                let json = serde_json::to_string(change).unwrap_or_default();
+                let _ = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .env("SWITCHBOARD_EVENT", &json)
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .and_then(|mut child| {
+                        if let Some(ref mut stdin) = child.stdin {
+                            use std::io::Write;
+                            let _ = stdin.write_all(json.as_bytes());
+                        }
+                        child.wait()
+                    });
+            }
             match format {
                 OutputFormat::Json | OutputFormat::Raw => {
                     println!("{}", serde_json::to_string(change).unwrap_or_default());
                 }
                 _ => {
                     let event = change["type"].as_str().unwrap_or("?");
+                    let ts = ts();
                     let docs = change["documents"].as_array();
                     if let Some(docs) = docs {
                         for doc in docs {
                             let id = doc["id"].as_str().unwrap_or("?");
                             let name = doc["name"].as_str().unwrap_or("?");
                             let dtype = doc["documentType"].as_str().unwrap_or("?");
-                            println!("[{event}] {name} ({dtype}) {id}");
+                            let slug = doc["slug"].as_str().filter(|s| !s.is_empty() && *s != id);
+                            let modified = doc["lastModifiedAtUtcIso"]
+                                .as_str()
+                                .map(|s| s.get(11..23).unwrap_or(s))
+                                .unwrap_or("");
+                            let rev_str = doc["revisionsList"]
+                                .as_array()
+                                .map(|arr| {
+                                    arr.iter()
+                                        .map(|r| {
+                                            format!(
+                                                "{}:{}",
+                                                r["scope"].as_str().unwrap_or("?"),
+                                                r["revision"].as_u64().unwrap_or(0)
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(",")
+                                })
+                                .unwrap_or_default();
+
+                            let slug_part = slug.map(|s| format!(" ({s})")).unwrap_or_default();
+                            let rev_part = if rev_str.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" rev=[{rev_str}]")
+                            };
+                            let mod_part = if modified.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" @{modified}")
+                            };
+                            println!(
+                                "[{ts}] [{event}] {name}{slug_part} ({dtype}) {id}{rev_part}{mod_part}"
+                            );
                         }
                     } else {
-                        println!("[{event}]");
+                        println!("[{ts}] [{event}]");
+                    }
+                    // Show context if present
+                    if let Some(ctx) = change.get("context").filter(|c| !c.is_null()) {
+                        let parent = ctx["parentId"].as_str().unwrap_or("");
+                        let child = ctx["childId"].as_str().unwrap_or("");
+                        if !parent.is_empty() || !child.is_empty() {
+                            println!(
+                                "         context: parent={} child={}",
+                                if parent.is_empty() { "-" } else { parent },
+                                if child.is_empty() { "-" } else { child },
+                            );
+                        }
                     }
                 }
             }

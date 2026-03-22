@@ -7,11 +7,19 @@ use std::path::PathBuf;
 use super::client::GraphQLClient;
 use crate::config::profiles;
 
+/// Introspection query for the nested mutation API (dev.104+).
+/// Top-level mutation fields like `DocumentModel` return a `*Mutations` object
+/// whose sub-fields are the actual operations (e.g. `setModelName`).
 const INTROSPECTION_QUERY: &str = r#"{
   __schema {
     mutationType {
       fields {
         name
+        type {
+          name
+          kind
+          ofType { name kind }
+        }
         args {
           name
           type {
@@ -19,6 +27,23 @@ const INTROSPECTION_QUERY: &str = r#"{
             kind
             ofType { name kind ofType { name kind ofType { name kind } } }
           }
+        }
+      }
+    }
+  }
+}"#;
+
+/// Query to fetch sub-fields of a nested mutations type (e.g. DocumentModelMutations).
+const NESTED_FIELDS_QUERY: &str = r#"query($typeName: String!) {
+  __type(name: $typeName) {
+    fields {
+      name
+      args {
+        name
+        type {
+          name
+          kind
+          ofType { name kind ofType { name kind ofType { name kind } } }
         }
       }
     }
@@ -44,6 +69,9 @@ pub struct DocumentModel {
     pub prefix: String,
     pub document_type: String,
     pub create_mutation: String,
+    /// The top-level mutation namespace (e.g. "DocumentModel").
+    /// Mutations are called as `namespace { operation(args) { ... } }`.
+    pub namespace: String,
     pub operations: Vec<ModelOperation>,
 }
 
@@ -52,6 +80,27 @@ pub struct IntrospectionCache {
     pub models: BTreeMap<String, DocumentModel>,
     pub timestamp: String,
     pub url: String,
+}
+
+impl DocumentModel {
+    /// Build a mutation query body for this model.
+    /// Nested format: `Namespace { operation(args) { ... } }`
+    /// Legacy format: `Namespace_operation(args) { ... }`
+    pub fn mutation_body(&self, operation: &str, args: &str, selection: &str) -> String {
+        if self.namespace.is_empty() {
+            // Legacy flat format
+            format!(
+                "{prefix}_{operation}({args}) {selection}",
+                prefix = self.prefix
+            )
+        } else {
+            // Nested format
+            format!(
+                "{ns} {{ {operation}({args}) {selection} }}",
+                ns = self.namespace
+            )
+        }
+    }
 }
 
 impl IntrospectionCache {
@@ -85,13 +134,88 @@ pub async fn run_introspection(client: &GraphQLClient) -> Result<IntrospectionCa
 
     let mut models: BTreeMap<String, DocumentModel> = BTreeMap::new();
 
-    // Parse mutations to find _createDocument and other model-specific mutations
-    if let Some(fields) = data
+    let fields = data
         .pointer("/__schema/mutationType/fields")
         .and_then(|v| v.as_array())
-    {
-        // First pass: find all _createDocument mutations to discover model prefixes
-        for field in fields {
+        .cloned()
+        .unwrap_or_default();
+
+    // Detect schema format: nested (dev.104+) vs flat (legacy).
+    // Nested format: top-level fields return `*Mutations` object types.
+    // Flat format: top-level fields are named `Prefix_operation`.
+    let mut namespace_types: Vec<(String, String)> = Vec::new(); // (field_name, type_name)
+    for field in &fields {
+        let name = field["name"].as_str().unwrap_or_default();
+        let type_name = field
+            .pointer("/type/ofType/name")
+            .or_else(|| field.pointer("/type/name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if type_name.ends_with("Mutations") {
+            namespace_types.push((name.to_string(), type_name.to_string()));
+        }
+    }
+
+    if !namespace_types.is_empty() {
+        // Nested mutation format (dev.104+)
+        for (ns_name, type_name) in &namespace_types {
+            // Skip DocumentDrive — it's infrastructure, not a user document model
+            if ns_name == "DocumentDrive" {
+                continue;
+            }
+
+            let vars = serde_json::json!({ "typeName": type_name });
+            let type_data = match client.query(NESTED_FIELDS_QUERY, Some(&vars)).await {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            let sub_fields = type_data
+                .pointer("/__type/fields")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            // Look for createDocument to confirm this is a document model
+            let has_create = sub_fields
+                .iter()
+                .any(|f| f["name"].as_str() == Some("createDocument"));
+            if !has_create {
+                continue;
+            }
+
+            let doc_type = prefix_to_document_type(ns_name);
+            let mut operations = Vec::new();
+
+            for sub_field in &sub_fields {
+                let op_name = sub_field["name"].as_str().unwrap_or_default();
+                // Skip Async variants — they duplicate the sync ones
+                if op_name.ends_with("Async") || op_name == "createEmptyDocument" {
+                    continue;
+                }
+                let args = parse_args(sub_field);
+                operations.push(ModelOperation {
+                    full_name: op_name.to_string(),
+                    operation: op_name.to_string(),
+                    args,
+                });
+            }
+
+            models.insert(
+                doc_type.clone(),
+                DocumentModel {
+                    prefix: ns_name.clone(),
+                    document_type: doc_type,
+                    create_mutation: "createDocument".to_string(),
+                    namespace: ns_name.clone(),
+                    operations,
+                },
+            );
+        }
+    } else {
+        // Legacy flat mutation format (pre-dev.104)
+        // First pass: find all _createDocument mutations
+        for field in &fields {
             let name = field["name"].as_str().unwrap_or_default();
             if let Some(prefix) = name.strip_suffix("_createDocument") {
                 let doc_type = prefix_to_document_type(prefix);
@@ -102,6 +226,7 @@ pub async fn run_introspection(client: &GraphQLClient) -> Result<IntrospectionCa
                         prefix: prefix.to_string(),
                         document_type: doc_type,
                         create_mutation: name.to_string(),
+                        namespace: String::new(),
                         operations: vec![ModelOperation {
                             full_name: name.to_string(),
                             operation: "createDocument".to_string(),
@@ -113,13 +238,11 @@ pub async fn run_introspection(client: &GraphQLClient) -> Result<IntrospectionCa
         }
 
         // Second pass: find all other model-specific mutations
-        for field in fields {
+        for field in &fields {
             let name = field["name"].as_str().unwrap_or_default();
             if name.ends_with("_createDocument") {
-                continue; // Already handled
+                continue;
             }
-
-            // Check if this mutation belongs to a known prefix
             for model in models.values_mut() {
                 if let Some(op_name) = name.strip_prefix(&format!("{}_", model.prefix)) {
                     let args = parse_args(field);

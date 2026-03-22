@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use colored::Colorize;
 use serde_json::Value;
 use std::path::Path;
@@ -9,6 +9,50 @@ use crate::graphql::GraphQLClient;
 use crate::output::OutputFormat;
 use crate::phd::{self, PhdHeader, PhdOperations, PhdState};
 
+/// Shared operation filter options for export commands.
+#[derive(Args, Clone, Default)]
+pub struct OpFilterArgs {
+    /// Only include operations with these action types (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub action_types: Option<Vec<String>>,
+    /// Only include operations since this revision index
+    #[arg(long)]
+    pub since_revision: Option<u64>,
+    /// Only include operations from this timestamp (ISO-8601)
+    #[arg(long)]
+    pub from: Option<String>,
+    /// Only include operations up to this timestamp (ISO-8601)
+    #[arg(long)]
+    pub to: Option<String>,
+}
+
+impl OpFilterArgs {
+    fn has_filters(&self) -> bool {
+        self.action_types.is_some()
+            || self.since_revision.is_some()
+            || self.from.is_some()
+            || self.to.is_some()
+    }
+
+    fn build_filter_clause(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(ref types) = self.action_types {
+            let quoted: Vec<String> = types.iter().map(|t| format!("\"{t}\"")).collect();
+            parts.push(format!("actionTypes: [{}]", quoted.join(", ")));
+        }
+        if let Some(rev) = self.since_revision {
+            parts.push(format!("sinceRevision: {rev}"));
+        }
+        if let Some(ref from) = self.from {
+            parts.push(format!("timestampFrom: \"{from}\""));
+        }
+        if let Some(ref to) = self.to {
+            parts.push(format!("timestampTo: \"{to}\""));
+        }
+        parts.join(", ")
+    }
+}
+
 #[derive(Subcommand)]
 pub enum ExportCommand {
     /// Export everything: all drives and their documents
@@ -16,6 +60,8 @@ pub enum ExportCommand {
         /// Output directory (defaults to ./switchboard-export/)
         #[arg(long, short)]
         out: Option<String>,
+        #[command(flatten)]
+        filter: OpFilterArgs,
     },
     /// Export a single document as .phd file
     Doc {
@@ -27,6 +73,8 @@ pub enum ExportCommand {
         /// Output file path (defaults to <name>.phd)
         #[arg(long, short)]
         out: Option<String>,
+        #[command(flatten)]
+        filter: OpFilterArgs,
     },
     /// Export all documents in a drive as .phd files
     Drive {
@@ -35,6 +83,8 @@ pub enum ExportCommand {
         /// Output directory (defaults to ./<drive-name>/)
         #[arg(long, short)]
         out: Option<String>,
+        #[command(flatten)]
+        filter: OpFilterArgs,
     },
 }
 
@@ -45,12 +95,27 @@ pub async fn run_export(
     quiet: bool,
 ) -> Result<()> {
     match cmd {
-        ExportCommand::All { out } => export_all(out.as_deref(), profile_name, quiet).await,
-        ExportCommand::Doc { doc_id, drive, out } => {
-            export_doc(&doc_id, &drive, out.as_deref(), profile_name, quiet).await
+        ExportCommand::All { out, filter } => {
+            export_all(out.as_deref(), &filter, profile_name, quiet).await
         }
-        ExportCommand::Drive { drive, out } => {
-            export_drive(&drive, out.as_deref(), profile_name, quiet).await
+        ExportCommand::Doc {
+            doc_id,
+            drive,
+            out,
+            filter,
+        } => {
+            export_doc(
+                &doc_id,
+                &drive,
+                out.as_deref(),
+                &filter,
+                profile_name,
+                quiet,
+            )
+            .await
+        }
+        ExportCommand::Drive { drive, out, filter } => {
+            export_drive(&drive, out.as_deref(), &filter, profile_name, quiet).await
         }
     }
 }
@@ -137,7 +202,12 @@ fn build_current_state(state: &Value) -> PhdState {
     }
 }
 
-async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bool) -> Result<()> {
+async fn export_all(
+    out_dir: Option<&str>,
+    filter: &OpFilterArgs,
+    profile_name: Option<&str>,
+    quiet: bool,
+) -> Result<()> {
     let (_name, _profile, client, _cache) = helpers::setup_with_cache(profile_name)?;
 
     // List all drives, filtering out soft-deleted ones
@@ -273,7 +343,7 @@ async fn export_all(out_dir: Option<&str>, profile_name: Option<&str>, quiet: bo
                 file_dir = folder_dir;
             }
 
-            match fetch_document(&client, file_id).await {
+            match fetch_document(&client, file_id, filter).await {
                 Ok((doc, operations)) => {
                     let header = build_header(&doc, &operations);
                     let state = extract_state(&doc);
@@ -348,6 +418,7 @@ async fn export_doc(
     doc_id: &str,
     drive: &str,
     out_path: Option<&str>,
+    filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
 ) -> Result<()> {
@@ -357,7 +428,7 @@ async fn export_doc(
     let identifier = format!("{drive}/{doc_id}");
     let resolved_id = helpers::resolve_doc(&client, &identifier).await?;
 
-    let (doc, operations) = fetch_document(&client, &resolved_id).await?;
+    let (doc, operations) = fetch_document(&client, &resolved_id, filter).await?;
 
     let header = build_header(&doc, &operations);
     let state = extract_state(&doc);
@@ -394,6 +465,7 @@ async fn export_doc(
 async fn export_drive(
     drive: &str,
     out_dir: Option<&str>,
+    filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
 ) -> Result<()> {
@@ -458,7 +530,7 @@ async fn export_drive(
         let file_name = file_node["name"].as_str().unwrap_or("document");
         let file_type = file_node["documentType"].as_str().unwrap_or("unknown");
 
-        match fetch_document(&client, file_id).await {
+        match fetch_document(&client, file_id, filter).await {
             Ok((doc, operations)) => {
                 let state = extract_state(&doc);
 
@@ -534,7 +606,11 @@ async fn fetch_drive_nodes(client: &GraphQLClient, drive_identifier: &str) -> Re
 
 /// Fetch a document's full data (metadata + state + operations) via the main GraphQL endpoint.
 /// Uses document() for metadata/state and documentOperations() for ops with pagination.
-async fn fetch_document(client: &GraphQLClient, doc_id: &str) -> Result<(Value, Vec<Value>)> {
+async fn fetch_document(
+    client: &GraphQLClient,
+    doc_id: &str,
+    filter: &OpFilterArgs,
+) -> Result<(Value, Vec<Value>)> {
     let escaped = doc_id.replace('"', r#"\""#);
 
     // Fetch document metadata and state
@@ -548,13 +624,20 @@ async fn fetch_document(client: &GraphQLClient, doc_id: &str) -> Result<(Value, 
         .ok_or_else(|| anyhow::anyhow!("Document '{doc_id}' not found"))?
         .clone();
 
+    // Build operation filter clause
+    let extra_filter = if filter.has_filters() {
+        format!(", {}", filter.build_filter_clause())
+    } else {
+        String::new()
+    };
+
     // Fetch operations with pagination (no delay — reads are safe to do at full speed)
     let mut all_ops: Vec<Value> = Vec::new();
     let mut total_count: Option<usize> = None;
     loop {
         let offset = all_ops.len();
         let ops_query = format!(
-            r#"{{ documentOperations(filter: {{ documentId: "{escaped}" }}, paging: {{ limit: {OP_BATCH_SIZE}, offset: {offset} }}) {{ items {{ id index action {{ type input scope }} timestampUtcMs hash skip error }} totalCount }} }}"#,
+            r#"{{ documentOperations(filter: {{ documentId: "{escaped}"{extra_filter} }}, paging: {{ limit: {OP_BATCH_SIZE}, offset: {offset} }}) {{ items {{ id index action {{ type input scope }} timestampUtcMs hash skip error }} totalCount }} }}"#,
         );
 
         let ops_data = client.query(&ops_query, None).await?;
@@ -717,13 +800,23 @@ pub async fn run_import(
         };
 
         // Step 1: Create the document via model-specific mutation
-        let mutation = format!(
-            r#"mutation {{ {create}(name: "{name}", parentIdentifier: "{drive_id}") {{ id }} }}"#,
-            create = model.create_mutation,
-            name = doc_name.replace('"', r#"\""#),
-        );
+        let vars = serde_json::json!({
+            "name": doc_name,
+            "parentIdentifier": drive_id,
+        });
+        let mutation = if model.namespace.is_empty() {
+            format!(
+                "mutation($name: String!, $parentIdentifier: String) {{ {}(name: $name, parentIdentifier: $parentIdentifier) {{ id }} }}",
+                model.create_mutation,
+            )
+        } else {
+            format!(
+                "mutation($name: String!, $parentIdentifier: String) {{ {} {{ createDocument(name: $name, parentIdentifier: $parentIdentifier) {{ id }} }} }}",
+                model.namespace,
+            )
+        };
 
-        let data = match client.query(&mutation, None).await {
+        let data = match client.query(&mutation, Some(&vars)).await {
             Ok(d) => d,
             Err(e) => {
                 println!("  {} Failed to create document: {e}", "✗".red());
@@ -731,7 +824,13 @@ pub async fn run_import(
             }
         };
 
-        let new_doc_id = match data.get(&model.create_mutation).and_then(|v| {
+        let create_result = if model.namespace.is_empty() {
+            data.get(&model.create_mutation)
+        } else {
+            data.get(&model.namespace)
+                .and_then(|ns| ns.get("createDocument"))
+        };
+        let new_doc_id = match create_result.and_then(|v| {
             v.as_str()
                 .or_else(|| v.get("id").and_then(|id| id.as_str()))
         }) {
@@ -852,8 +951,9 @@ async fn push_operations_via_mutate(
             }
         };
 
-        // Build the mutation using the model-specific typed mutation
+        // Build the mutation using the model's namespace-aware helper
         let has_input_arg = model_op.args.iter().any(|a| a.name == "input");
+        let selection = "{ id }";
 
         let (mutation, vars) = if has_input_arg {
             let input_type = model_op
@@ -869,17 +969,15 @@ async fn push_operations_via_mutate(
                 .is_some_and(|a| a.required);
             let bang = if required { "!" } else { "" };
 
-            let query = format!(
-                "mutation($docId: PHID!, $input: {input_type}{bang}) {{ {name}(docId: $docId, input: $input) {{ id }} }}",
-                name = model_op.full_name,
-            );
+            let args_str = "docId: $docId, input: $input";
+            let body = model.mutation_body(&model_op.full_name, args_str, selection);
+            let query = format!("mutation($docId: PHID!, $input: {input_type}{bang}) {{ {body} }}");
             let vars = serde_json::json!({
                 "docId": doc_id,
                 "input": input,
             });
             (query, vars)
         } else {
-            // Direct args — pass input fields as top-level variables
             let mut var_decls = vec!["$docId: PHID!".to_string()];
             let mut arg_refs = vec!["docId: $docId".to_string()];
             let mut vars_map = serde_json::Map::new();
@@ -906,11 +1004,11 @@ async fn push_operations_via_mutate(
                 }
             }
 
+            let args_str = arg_refs.join(", ");
+            let body = model.mutation_body(&model_op.full_name, &args_str, selection);
             let query = format!(
-                "mutation({decls}) {{ {name}({args}) {{ id }} }}",
+                "mutation({decls}) {{ {body} }}",
                 decls = var_decls.join(", "),
-                name = model_op.full_name,
-                args = arg_refs.join(", "),
             );
             (query, Value::Object(vars_map))
         };

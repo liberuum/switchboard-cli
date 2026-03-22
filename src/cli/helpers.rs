@@ -205,6 +205,22 @@ pub fn base_url_from(graphql_url: &str) -> String {
         .to_string()
 }
 
+/// Detect whether the API uses nested mutations (dev.104+).
+/// Returns true if `DocumentDriveMutations` type exists.
+pub async fn is_nested_api(client: &GraphQLClient) -> bool {
+    let q = r#"{ __type(name: "DocumentDriveMutations") { name } }"#;
+    client
+        .query(q, None)
+        .await
+        .ok()
+        .and_then(|d| {
+            d.pointer("/__type/name")
+                .and_then(|v| v.as_str())
+                .map(|_| true)
+        })
+        .unwrap_or(false)
+}
+
 pub fn is_uuid(s: &str) -> bool {
     // Simple UUID check: 8-4-4-4-12 hex pattern
     let parts: Vec<&str> = s.split('-').collect();
