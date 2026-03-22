@@ -1327,9 +1327,9 @@ async fn apply(
 }
 
 /// Inject `timestampUtcMs` into each action object that doesn't already have one.
-/// Uses ISO-8601 format (e.g. "2026-03-22T22:06:53.528Z") — the reactor's
-/// operation store does `new Date(timestampUtcMs)` which only works with ISO
-/// strings, not Unix millisecond strings.
+/// Uses a JSON number (not string) — the reactor's operation store does
+/// `new Date(timestampUtcMs)` which needs a number. `new Date(1774218664353)` works,
+/// `new Date("1774218664353")` produces Invalid Date.
 fn stamp_actions(actions: Value) -> Value {
     use std::time::SystemTime;
 
@@ -1337,49 +1337,18 @@ fn stamp_actions(actions: Value) -> Value {
         return actions;
     };
 
-    // Generate ISO-8601 timestamp matching the reactor's internal format.
-    // The reactor does `new Date(op.timestampUtcMs)` in the operation store,
-    // which requires an ISO string — Unix millis as a string produces Invalid Date.
-    let duration = SystemTime::now()
+    let now_ms = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs();
-    let millis = duration.subsec_millis();
-    // Manual ISO-8601 formatting without chrono dependency
-    let days_since_epoch = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-    // Simple date calculation from days since epoch
-    let (year, month, day) = days_to_ymd(days_since_epoch);
-    let now_iso =
-        format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{millis:03}Z");
+        .unwrap_or_default()
+        .as_millis() as u64;
 
     for action in &mut arr {
         if let Value::Object(map) = action
             && !map.contains_key("timestampUtcMs")
         {
-            map.insert("timestampUtcMs".to_string(), Value::String(now_iso.clone()));
+            map.insert("timestampUtcMs".to_string(), serde_json::json!(now_ms));
         }
     }
 
     Value::Array(arr)
-}
-
-/// Convert days since Unix epoch to (year, month, day).
-/// Civil calendar calculation (Gregorian).
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
-    let z = days + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
 }
