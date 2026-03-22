@@ -34,7 +34,7 @@ These apply to every command:
 switchboard init                               # Interactive first-run wizard (URL, profile, token, introspect)
 switchboard ping                               # Health check
 switchboard info --format json                 # Instance info (drive count, model count)
-switchboard introspect                         # Re-discover schema from current instance
+switchboard introspect                         # Re-discover schema (includes DocumentDrive; auto-runs on model miss)
 switchboard schema --format json               # Dump the full GraphQL schema
 switchboard update                             # Update CLI to latest version
 switchboard update --check                     # Check for updates without installing
@@ -118,6 +118,7 @@ switchboard docs mutate <doc_id|name> --drive <slug> --op <operation> --input '<
 
 ```bash
 # Apply raw actions (async, returns job ID)
+# timestampUtcMs is auto-injected into each action if missing
 switchboard docs apply <id> --actions '<json_array>' --format json
 switchboard docs apply <id> --file actions.json --format json
 switchboard docs apply <id> --file - --format json          # Read from stdin

@@ -32,7 +32,7 @@ pub struct MutateArgs {
 }
 
 pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
-    let (_name, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
+    let (pname, _profile, client, mut cache) = helpers::setup_with_cache(profile_name)?;
 
     // Resolve doc identifier (name or UUID).
     // When --drive is given, scope the lookup to that drive.
@@ -66,8 +66,16 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
         .unwrap_or(&doc_identifier)
         .to_string();
 
+    // Auto-introspect once if the model isn't in the cache (handles stale caches
+    // after reactor restarts or newly loaded packages).
+    if cache.find_model(&doc_type).is_none() {
+        eprintln!("Model '{doc_type}' not in cache — re-introspecting...");
+        cache = crate::graphql::introspection::run_introspection(&client).await?;
+        crate::graphql::introspection::save_cache(&pname, &cache)?;
+    }
+
     let model = cache.find_model(&doc_type).ok_or_else(|| {
-        anyhow::anyhow!("No model found for type {doc_type}. Run `switchboard introspect`.")
+        anyhow::anyhow!("No model found for type {doc_type} even after re-introspection.")
     })?;
 
     // Get available operations (exclude createDocument)

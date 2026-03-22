@@ -44,8 +44,10 @@ On `switchboard init` or `switchboard introspect`:
 3. Extract all *_<operation> mutations → derive available operations per model
    e.g. "Invoice_editInvoice", "Invoice_setStatus" → operations for Invoice
 4. Cache the schema locally in ~/.switchboard/cache/<profile>.json
-5. Re-introspect on demand (`switchboard introspect`) or when a query fails
+5. Re-introspect on demand (`switchboard introspect`) or automatically when a model is missing
 ```
+
+The cache includes all document models, including `DocumentDrive` (type `powerhouse/document-drive`), enabling drive mutations via `docs mutate`. Commands like `docs mutate` and `docs create` will automatically re-introspect if the required model is missing from the cache (e.g., after a reactor restart that loads new packages).
 
 This cache powers:
 - Tab completion for document types and operations
@@ -462,6 +464,8 @@ switchboard docs apply <id-or-name> --file <path> --wait     # Wait for async co
 
 Dispatches raw actions to a document via `mutateDocumentAsync`. Returns a job ID.
 With `--wait`, blocks until the job completes.
+
+The CLI automatically injects `timestampUtcMs` (Unix milliseconds) into each action if missing. This is required by the reactor's operation store but not populated by the generic `mutateDocument` resolver — without it, drive operations (ADD_FOLDER, MOVE_NODE, etc.) fail with "Invalid time value".
 
 ```
 $ switchboard docs apply abc123 --actions '[{"type":"SET_NAME","input":{"name":"New Name"}}]'

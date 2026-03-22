@@ -159,11 +159,6 @@ pub async fn run_introspection(client: &GraphQLClient) -> Result<IntrospectionCa
     if !namespace_types.is_empty() {
         // Nested mutation format (dev.104+)
         for (ns_name, type_name) in &namespace_types {
-            // Skip DocumentDrive — it's infrastructure, not a user document model
-            if ns_name == "DocumentDrive" {
-                continue;
-            }
-
             let vars = serde_json::json!({ "typeName": type_name });
             let type_data = match client.query(NESTED_FIELDS_QUERY, Some(&vars)).await {
                 Ok(d) => d,

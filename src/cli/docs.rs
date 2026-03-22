@@ -841,17 +841,29 @@ async fn create(
     format: OutputFormat,
     profile_name: Option<&str>,
 ) -> Result<()> {
-    let (_pname, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
+    let (pname, _profile, client, mut cache) = helpers::setup_with_cache(profile_name)?;
 
+    // Auto-introspect if cache is empty (stale cache after reactor restart)
     if cache.models.is_empty() {
-        bail!("No document models found. Run `switchboard introspect` first.");
+        eprintln!("No models in cache — re-introspecting...");
+        cache = crate::graphql::introspection::run_introspection(&client).await?;
+        crate::graphql::introspection::save_cache(&pname, &cache)?;
+        if cache.models.is_empty() {
+            bail!("No document models found even after re-introspection.");
+        }
     }
 
     // Select document type
     let doc_type = match doc_type {
         Some(t) => t,
         None => {
-            let types: Vec<String> = cache.models.keys().cloned().collect();
+            // Exclude document-drive — drives have their own `drives create` command
+            let types: Vec<String> = cache
+                .models
+                .keys()
+                .filter(|k| k.as_str() != "powerhouse/document-drive")
+                .cloned()
+                .collect();
             let selection = Select::new()
                 .with_prompt("Select document type")
                 .items(&types)
@@ -859,6 +871,13 @@ async fn create(
             types[selection].clone()
         }
     };
+
+    // Auto-introspect if the specific type is missing from cache
+    if cache.find_model(&doc_type).is_none() {
+        eprintln!("Model '{doc_type}' not in cache — re-introspecting...");
+        cache = crate::graphql::introspection::run_introspection(&client).await?;
+        crate::graphql::introspection::save_cache(&pname, &cache)?;
+    }
 
     let model = cache
         .find_model(&doc_type)
@@ -1248,6 +1267,11 @@ async fn apply(
         bail!("Actions must be a JSON array");
     }
 
+    // Auto-populate timestampUtcMs on each action if missing.
+    // The reactor's operation store requires this field but the generic
+    // mutateDocument resolver doesn't inject it (unlike model-specific resolvers).
+    let actions = stamp_actions(actions);
+
     let resolved_id = helpers::resolve_doc(&client, id)
         .await
         .unwrap_or_else(|_| id.to_string());
@@ -1300,4 +1324,31 @@ async fn apply(
     }
 
     Ok(())
+}
+
+/// Inject `timestampUtcMs` into each action object that doesn't already have one.
+/// Uses the current time as Unix milliseconds (string), which is the format the
+/// reactor's operation store expects.
+fn stamp_actions(actions: Value) -> Value {
+    use std::time::SystemTime;
+
+    let Value::Array(mut arr) = actions else {
+        return actions;
+    };
+
+    let now_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .to_string();
+
+    for action in &mut arr {
+        if let Value::Object(map) = action
+            && !map.contains_key("timestampUtcMs")
+        {
+            map.insert("timestampUtcMs".to_string(), Value::String(now_ms.clone()));
+        }
+    }
+
+    Value::Array(arr)
 }

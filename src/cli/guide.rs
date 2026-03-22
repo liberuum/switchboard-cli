@@ -143,7 +143,11 @@ PROFILE FILE FORMAT
 SCHEMA CACHE
 
   Each profile has a cached schema at ~/.switchboard/cache/<profile>.json.
-  Refresh it with: switchboard introspect"#
+  Refresh it with: switchboard introspect
+
+  The cache includes all document models, including document-drive (for drive
+  mutations). Commands like `docs mutate` and `docs create` will automatically
+  re-introspect if the required model is missing from the cache."#
     );
 }
 
@@ -226,6 +230,11 @@ RAW ACTION DISPATCH
   Dispatch raw actions directly via mutateDocument. Actions are provided
   as a JSON array, either inline with --actions or from a file with --file.
   Use --wait to block until the async mutation completes (uses WebSocket).
+
+  The CLI automatically injects timestampUtcMs into each action if missing.
+  This is required by the reactor's operation store but not set by the generic
+  mutateDocument resolver — without it, drive operations fail with
+  "Invalid time value".
 
   Example:
     switchboard docs apply abc123 --actions '[{{"type":"SET_NAME","input":{{"name":"New"}}}}]'

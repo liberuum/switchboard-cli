@@ -308,7 +308,7 @@ switchboard export drive builders --out ./incremental/ --since-revision 100
 # Export only SET_NAME operations from the last month
 switchboard export all --out ./filtered/ --action-types SET_NAME --from 2025-02-01T00:00:00Z
 
-# Dispatch raw actions to a document
+# Dispatch raw actions to a document (timestampUtcMs auto-injected if missing)
 switchboard docs apply abc123 --actions '[{"type":"SET_NAME","input":{"name":"New Name"}}]'
 
 # Dispatch actions from a file and wait for async completion
@@ -490,7 +490,9 @@ When you run `switchboard init` or `switchboard introspect`:
 3. It maps mutation prefixes to operations (e.g., `Invoice_editInvoice` → `editInvoice` on the `Invoice` model)
 4. The result is cached locally at `~/.switchboard/cache/<profile>.json`
 
-This cache powers tab completion, `models list`, `docs create` type selection, and `docs mutate` operation discovery. Re-run `switchboard introspect` whenever the server schema changes.
+This cache powers tab completion, `models list`, `docs create` type selection, and `docs mutate` operation discovery. The cache includes all document models, including `document-drive` (for drive mutations via `docs mutate`).
+
+Commands like `docs mutate` and `docs create` will automatically re-introspect if the required model is missing from the cache (e.g., after a reactor restart that loads new packages). You can also manually refresh with `switchboard introspect`.
 
 ## Project Structure
 
