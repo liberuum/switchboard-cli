@@ -290,6 +290,23 @@ async fn create(
         &create_data["DocumentDrive_createDocument"]
     };
 
+    // Set the state-level drive name (state.global.name).
+    // createDocument only sets the metadata name — the /d/<slug> endpoint
+    // and Connect UI read from state.global.name which defaults to "".
+    let doc_id = drive["id"].as_str().unwrap_or("");
+    if !doc_id.is_empty() {
+        let name_vars = serde_json::json!({
+            "docId": doc_id,
+            "input": { "name": name }
+        });
+        let name_mutation = if nested {
+            "mutation($docId: PHID!, $input: DocumentDrive_SetDriveNameInput!) { DocumentDrive { setDriveName(docId: $docId, input: $input) { id } } }"
+        } else {
+            "mutation($docId: PHID!, $input: DocumentDrive_SetDriveNameInput!) { DocumentDrive_setDriveName(docId: $docId, input: $input) { id } }"
+        };
+        let _ = client.query(name_mutation, Some(&name_vars)).await;
+    }
+
     // Optionally set icon
     if let Some(ref icon_url) = icon {
         let doc_id = drive["id"].as_str().unwrap_or("");
