@@ -66,7 +66,7 @@ pub async fn run(
         .map(|d| {
             let id = d["id"].as_str().unwrap_or("").to_string();
             let state_nodes = d
-                .pointer("/state/nodes")
+                .pointer("/state/global/nodes")
                 .and_then(|v| v.as_array())
                 .cloned();
             let client = client.clone();
