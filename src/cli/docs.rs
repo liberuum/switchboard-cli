@@ -1119,29 +1119,50 @@ async fn add_to(
 ) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    let escaped_parent = parent.replace('"', r#"\""#);
-    let id_list: String = ids
-        .iter()
-        .map(|id| format!("\"{}\"", id.replace('"', r#"\""#)))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let drive_id = helpers::resolve_doc(&client, parent)
+        .await
+        .unwrap_or_else(|_| parent.to_string());
+    let mut added = Vec::new();
 
-    let mutation = format!(
-        r#"mutation {{ addChildren(parentIdentifier: "{escaped_parent}", documentIdentifiers: [{id_list}]) {{ id name }} }}"#
-    );
+    for id in ids {
+        // Fetch doc info (name + documentType) so we can register it in the drive
+        let resolved = helpers::resolve_doc(&client, id)
+            .await
+            .unwrap_or_else(|_| id.clone());
+        let escaped = resolved.replace('"', r#"\""#);
+        let info_query = format!(
+            r#"{{ document(identifier: "{escaped}") {{ document {{ id name documentType }} }} }}"#
+        );
+        let info = client.query(&info_query, None).await?;
+        let doc = info
+            .pointer("/document/document")
+            .ok_or_else(|| anyhow::anyhow!("Document '{id}' not found"))?;
+        let doc_name = doc["name"].as_str().unwrap_or("unknown");
+        let doc_type = doc["documentType"].as_str().unwrap_or("unknown");
+        let doc_id = doc["id"].as_str().unwrap_or(&resolved);
 
-    let data = client.query(&mutation, None).await?;
-    let doc = &data["addChildren"];
+        let vars = serde_json::json!({
+            "docId": drive_id,
+            "input": { "id": doc_id, "name": doc_name, "documentType": doc_type }
+        });
+        client
+            .query(
+                "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { \
+                 DocumentDrive { addFile(docId: $docId, input: $input) { id name } } }",
+                Some(&vars),
+            )
+            .await?;
+        added.push(doc_name.to_string());
+    }
 
     match format {
-        OutputFormat::Json | OutputFormat::Raw => print_json(doc),
+        OutputFormat::Json | OutputFormat::Raw => {
+            print_json(&serde_json::json!({ "added": added, "parent": drive_id }));
+        }
         _ => {
-            println!(
-                "{} Added {} document(s) to {}",
-                "✓".green(),
-                ids.len(),
-                doc["name"].as_str().unwrap_or(parent)
-            );
+            for name in &added {
+                println!("{} Added {} to {}", "✓".green(), name, parent);
+            }
         }
     }
 
@@ -1156,28 +1177,39 @@ async fn remove_from(
 ) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    let escaped_parent = parent.replace('"', r#"\""#);
-    let id_list: String = ids
-        .iter()
-        .map(|id| format!("\"{}\"", id.replace('"', r#"\""#)))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let drive_id = helpers::resolve_doc(&client, parent)
+        .await
+        .unwrap_or_else(|_| parent.to_string());
+    let mut removed = Vec::new();
 
-    let mutation = format!(
-        r#"mutation {{ removeChildren(parentIdentifier: "{escaped_parent}", documentIdentifiers: [{id_list}]) {{ id name }} }}"#
-    );
-
-    let data = client.query(&mutation, None).await?;
-    let doc = &data["removeChildren"];
+    for id in ids {
+        let resolved = helpers::resolve_doc(&client, id)
+            .await
+            .unwrap_or_else(|_| id.clone());
+        let vars = serde_json::json!({
+            "docId": drive_id,
+            "input": { "id": resolved }
+        });
+        client
+            .query(
+                "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { \
+                 DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }",
+                Some(&vars),
+            )
+            .await?;
+        removed.push(resolved);
+    }
 
     match format {
-        OutputFormat::Json | OutputFormat::Raw => print_json(doc),
+        OutputFormat::Json | OutputFormat::Raw => {
+            print_json(&serde_json::json!({ "removed": removed, "parent": drive_id }));
+        }
         _ => {
             println!(
                 "{} Removed {} document(s) from {}",
                 "✓".green(),
-                ids.len(),
-                doc["name"].as_str().unwrap_or(parent)
+                removed.len(),
+                parent
             );
         }
     }
@@ -1194,38 +1226,69 @@ async fn move_docs(
 ) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    let escaped_from = from.replace('"', r#"\""#);
-    let escaped_to = to.replace('"', r#"\""#);
-    let id_list: String = ids
-        .iter()
-        .map(|id| format!("\"{}\"", id.replace('"', r#"\""#)))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let from_id = helpers::resolve_doc(&client, from)
+        .await
+        .unwrap_or_else(|_| from.to_string());
+    let to_id = helpers::resolve_doc(&client, to)
+        .await
+        .unwrap_or_else(|_| to.to_string());
+    let mut moved = Vec::new();
 
-    let mutation = format!(
-        r#"mutation {{ moveChildren(sourceParentIdentifier: "{escaped_from}", targetParentIdentifier: "{escaped_to}", documentIdentifiers: [{id_list}]) {{ source {{ id name }} target {{ id name }} }} }}"#
-    );
+    for id in ids {
+        let resolved = helpers::resolve_doc(&client, id)
+            .await
+            .unwrap_or_else(|_| id.clone());
 
-    let data = client.query(&mutation, None).await?;
+        // Fetch doc info for the addFile call
+        let escaped = resolved.replace('"', r#"\""#);
+        let info_query = format!(
+            r#"{{ document(identifier: "{escaped}") {{ document {{ id name documentType }} }} }}"#
+        );
+        let info = client.query(&info_query, None).await?;
+        let doc = info
+            .pointer("/document/document")
+            .ok_or_else(|| anyhow::anyhow!("Document '{id}' not found"))?;
+        let doc_name = doc["name"].as_str().unwrap_or("unknown");
+        let doc_type = doc["documentType"].as_str().unwrap_or("unknown");
+        let doc_id = doc["id"].as_str().unwrap_or(&resolved);
+
+        // Remove from source drive
+        let del_vars = serde_json::json!({
+            "docId": from_id,
+            "input": { "id": doc_id }
+        });
+        client
+            .query(
+                "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { \
+                 DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }",
+                Some(&del_vars),
+            )
+            .await?;
+
+        // Add to target drive
+        let add_vars = serde_json::json!({
+            "docId": to_id,
+            "input": { "id": doc_id, "name": doc_name, "documentType": doc_type }
+        });
+        client
+            .query(
+                "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { \
+                 DocumentDrive { addFile(docId: $docId, input: $input) { id } } }",
+                Some(&add_vars),
+            )
+            .await?;
+
+        moved.push(doc_name.to_string());
+    }
 
     match format {
-        OutputFormat::Json | OutputFormat::Raw => print_json(&data["moveChildren"]),
+        OutputFormat::Json | OutputFormat::Raw => {
+            print_json(&serde_json::json!({ "moved": moved, "from": from_id, "to": to_id }));
+        }
         _ => {
-            let src = data
-                .pointer("/moveChildren/source/name")
-                .and_then(|v| v.as_str())
-                .unwrap_or(from);
-            let dst = data
-                .pointer("/moveChildren/target/name")
-                .and_then(|v| v.as_str())
-                .unwrap_or(to);
-            println!(
-                "{} Moved {} document(s) from {} to {}",
-                "✓".green(),
-                ids.len(),
-                src,
-                dst
-            );
+            for name in &moved {
+                println!("{} Moved {} from {} to {}", "✓".green(), name, from, to);
+            }
         }
     }
 

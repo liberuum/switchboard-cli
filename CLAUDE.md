@@ -41,6 +41,16 @@ cargo test --test cli_integration
 cargo test
 ```
 
+### CRITICAL: Always Use Local Profile for Testing
+
+When testing CLI commands against a local Switchboard API, always switch to the `local` profile first:
+
+```bash
+switchboard config use local
+```
+
+The `local` profile targets `http://localhost:4001/graphql`. Never run destructive tests (create/delete drives/docs) against staging or production profiles.
+
 ## Architecture
 
 ### Entry point
