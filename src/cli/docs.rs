@@ -1006,8 +1006,55 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
                 println!("{} Deleted document {id}", "✓".green());
             }
             Err(e) => {
-                eprintln!("{} Failed to delete document {id}: {e}", "✗".red());
-                failed = true;
+                let err_str = format!("{e}");
+                let is_not_found = err_str.contains("not found")
+                    || err_str.contains("Not found")
+                    || err_str.contains("Document not found");
+
+                if is_not_found {
+                    // Ghost node: document doesn't exist in reactor but may be
+                    // referenced in a drive's node tree. Try to clean up.
+                    let ghost_drives = find_drives_referencing_node(&client, &uuid).await;
+                    if ghost_drives.is_empty() {
+                        eprintln!(
+                            "{} Document '{id}' not found in reactor or any drive",
+                            "✗".red()
+                        );
+                        failed = true;
+                    } else {
+                        let mut cleaned = false;
+                        for (drive_id, drive_name) in &ghost_drives {
+                            let node_vars = serde_json::json!({
+                                "docId": drive_id,
+                                "input": { "id": uuid }
+                            });
+                            if client
+                                .query(remove_node_mutation, Some(&node_vars))
+                                .await
+                                .is_ok()
+                            {
+                                cleaned = true;
+                                eprintln!(
+                                    "  {} Removed ghost node from drive \"{}\"",
+                                    "↳".dimmed(),
+                                    drive_name
+                                );
+                            }
+                        }
+                        if cleaned {
+                            println!(
+                                "{} Cleaned up ghost node {id} (document was missing from reactor)",
+                                "✓".green()
+                            );
+                        } else {
+                            eprintln!("{} Failed to clean up ghost node {id}", "✗".red());
+                            failed = true;
+                        }
+                    }
+                } else {
+                    eprintln!("{} Failed to delete document {id}: {e}", "✗".red());
+                    failed = true;
+                }
             }
         }
     }
@@ -1039,6 +1086,86 @@ async fn find_parent_drives(client: &crate::graphql::GraphQLClient, doc_id: &str
                 })
         })
         .unwrap_or_default()
+}
+
+/// Scan all drives for file nodes referencing the given doc ID.
+/// Returns (drive_id, drive_name) pairs.
+/// Used for ghost node cleanup when the document doesn't exist in the reactor.
+async fn find_drives_referencing_node(
+    client: &crate::graphql::GraphQLClient,
+    doc_id: &str,
+) -> Vec<(String, String)> {
+    let query = r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name state } } }"#;
+    let Ok(data) = client.query(query, None).await else {
+        return Vec::new();
+    };
+    let Some(drives) = data
+        .pointer("/findDocuments/items")
+        .and_then(|v| v.as_array())
+    else {
+        return Vec::new();
+    };
+
+    let mut results = Vec::new();
+    for drive in drives {
+        let nodes = drive
+            .pointer("/state/global/nodes")
+            .and_then(|v| v.as_array());
+        if let Some(nodes) = nodes {
+            for node in nodes {
+                if node["id"].as_str() == Some(doc_id) && node["kind"].as_str() == Some("file") {
+                    let drive_id = drive["id"].as_str().unwrap_or("").to_string();
+                    let drive_name = drive["name"].as_str().unwrap_or("").to_string();
+                    results.push((drive_id, drive_name));
+                    break;
+                }
+            }
+        }
+    }
+    results
+}
+
+/// Scan a drive's node tree and return file nodes whose documents don't exist.
+pub async fn find_ghost_nodes(
+    client: &crate::graphql::GraphQLClient,
+    drive_id: &str,
+) -> Result<Vec<(String, String, String)>> {
+    let escaped = drive_id.replace('"', r#"\""#);
+    let query =
+        format!(r#"{{ document(identifier: "{escaped}") {{ document {{ id name state }} }} }}"#);
+    let data = client.query(&query, None).await?;
+    let doc = data
+        .pointer("/document/document")
+        .ok_or_else(|| anyhow::anyhow!("Drive '{drive_id}' not found"))?;
+
+    let nodes = doc
+        .pointer("/state/global/nodes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut ghosts = Vec::new();
+    for node in &nodes {
+        if node["kind"].as_str() != Some("file") {
+            continue;
+        }
+        let node_id = node["id"].as_str().unwrap_or("");
+        if node_id.is_empty() {
+            continue;
+        }
+        let node_name = node["name"].as_str().unwrap_or("?").to_string();
+        let node_type = node["documentType"].as_str().unwrap_or("?").to_string();
+
+        // Try to fetch the document — if it fails, it's a ghost
+        let check_escaped = node_id.replace('"', r#"\""#);
+        let check_query =
+            format!(r#"{{ document(identifier: "{check_escaped}") {{ document {{ id }} }} }}"#);
+        if client.query(&check_query, None).await.is_err() {
+            ghosts.push((node_id.to_string(), node_name, node_type));
+        }
+    }
+
+    Ok(ghosts)
 }
 
 async fn rename(

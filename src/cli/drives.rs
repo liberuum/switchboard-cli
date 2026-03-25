@@ -41,6 +41,19 @@ pub enum DrivesCommand {
         #[arg(long, short = 'y')]
         yes: bool,
     },
+    /// Check a drive for ghost nodes (orphan file references with no document)
+    Check {
+        /// Drive ID or slug
+        id: String,
+    },
+    /// Fix a drive by removing ghost nodes
+    Fix {
+        /// Drive ID or slug
+        id: String,
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 pub async fn run(
@@ -57,6 +70,8 @@ pub async fn run(
             preferred_editor,
         } => create(name, icon, preferred_editor, format, profile_name).await,
         DrivesCommand::Delete { ids, yes } => delete(&ids, yes, profile_name).await,
+        DrivesCommand::Check { id } => check(&id, format, profile_name).await,
+        DrivesCommand::Fix { id, yes } => fix(&id, yes, format, profile_name).await,
     }
 }
 
@@ -507,4 +522,138 @@ fn print_drive_tree(nodes: &[Value], parent: Option<&str>, indent: &str) {
         println!("{indent}{connector}\u{1f4c1} {name}/");
         print_drive_tree(nodes, Some(id), &format!("{indent}{child_indent}"));
     }
+}
+
+async fn check(id: &str, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
+    let (_name, _profile, client) = helpers::setup(profile_name)?;
+
+    let resolved = helpers::resolve_doc(&client, id)
+        .await
+        .unwrap_or_else(|_| id.to_string());
+
+    eprintln!("Scanning drive for ghost nodes...");
+    let ghosts = crate::cli::docs::find_ghost_nodes(&client, &resolved).await?;
+
+    match format {
+        OutputFormat::Json | OutputFormat::Raw => {
+            let items: Vec<Value> = ghosts
+                .iter()
+                .map(|(id, name, dtype)| {
+                    serde_json::json!({ "id": id, "name": name, "documentType": dtype })
+                })
+                .collect();
+            crate::output::print_json(&Value::Array(items));
+        }
+        _ => {
+            if ghosts.is_empty() {
+                println!("{} No ghost nodes found — drive is clean", "✓".green());
+            } else {
+                println!("{} {} ghost node(s) found:", "⚠".yellow(), ghosts.len());
+                for (ghost_id, name, dtype) in &ghosts {
+                    println!("  {} {} ({}) [{}]", "✗".red(), name, dtype, ghost_id);
+                }
+                println!();
+                println!(
+                    "Run {} to remove orphan nodes",
+                    format!("drives fix {id}").bold()
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn fix(
+    id: &str,
+    skip_confirm: bool,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+) -> Result<()> {
+    let (_name, _profile, client) = helpers::setup(profile_name)?;
+
+    let resolved = helpers::resolve_doc(&client, id)
+        .await
+        .unwrap_or_else(|_| id.to_string());
+
+    eprintln!("Scanning drive for ghost nodes...");
+    let ghosts = crate::cli::docs::find_ghost_nodes(&client, &resolved).await?;
+
+    if ghosts.is_empty() {
+        println!("{} No ghost nodes found — drive is clean", "✓".green());
+        return Ok(());
+    }
+
+    println!("{} {} ghost node(s) found:", "⚠".yellow(), ghosts.len());
+    for (ghost_id, name, dtype) in &ghosts {
+        println!("  {} ({}) [{}]", name, dtype, ghost_id);
+    }
+
+    if !skip_confirm {
+        let confirm = dialoguer::Confirm::new()
+            .with_prompt(format!("Remove {} ghost node(s)?", ghosts.len()))
+            .default(false)
+            .interact()?;
+        if !confirm {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let nested = helpers::is_nested_api(&client).await;
+    let remove_mutation = if nested {
+        "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }"
+    } else {
+        "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive_deleteNode(docId: $docId, input: $input) { id } }"
+    };
+
+    let mut fixed = 0;
+    let mut results = Vec::new();
+    for (ghost_id, name, dtype) in &ghosts {
+        let vars = serde_json::json!({
+            "docId": resolved,
+            "input": { "id": ghost_id }
+        });
+        match client.query(remove_mutation, Some(&vars)).await {
+            Ok(_) => {
+                println!(
+                    "{} Removed ghost node \"{}\" ({})",
+                    "✓".green(),
+                    name,
+                    ghost_id
+                );
+                fixed += 1;
+                results.push(serde_json::json!({
+                    "id": ghost_id, "name": name, "documentType": dtype, "status": "removed"
+                }));
+            }
+            Err(e) => {
+                eprintln!("{} Failed to remove \"{}\": {e}", "✗".red(), name);
+                results.push(serde_json::json!({
+                    "id": ghost_id, "name": name, "documentType": dtype, "status": "failed"
+                }));
+            }
+        }
+    }
+
+    match format {
+        OutputFormat::Json | OutputFormat::Raw => {
+            crate::output::print_json(&Value::Array(results));
+        }
+        _ => {
+            println!();
+            println!(
+                "{} Fixed {}/{} ghost nodes",
+                if fixed == ghosts.len() {
+                    "✓".green()
+                } else {
+                    "⚠".yellow()
+                },
+                fixed,
+                ghosts.len()
+            );
+        }
+    }
+
+    Ok(())
 }
