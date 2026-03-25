@@ -60,20 +60,20 @@ This CLI is a standalone tool — it doesn't share code with the TypeScript mono
 ### One-line install (macOS / Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/staging/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/main/install.sh | bash
 ```
 
-This downloads the latest staging prerelease binary for your platform and installs it to `/usr/local/bin`. You can customize the install:
+This downloads the latest release binary for your platform and installs it to `/usr/local/bin`. You can customize the install:
 
 ```bash
 # Install to a custom directory
-curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/staging/install.sh | INSTALL_DIR=~/.local/bin bash
+curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/main/install.sh | INSTALL_DIR=~/.local/bin bash
 
 # Install a specific version
-curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/staging/install.sh | VERSION=v0.0.0-staging.5 bash
+curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/main/install.sh | VERSION=v1.0.0 bash
 
-# Install stable (main branch) release instead
-curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/main/install.sh | CHANNEL=stable bash
+# Install staging (pre-release) instead
+curl -fsSL https://raw.githubusercontent.com/liberuum/switchboard-cli/staging/install.sh | CHANNEL=staging bash
 ```
 
 See [How the install script works](#how-the-install-script-works) for details.
