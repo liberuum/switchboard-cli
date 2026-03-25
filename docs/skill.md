@@ -95,10 +95,12 @@ switchboard docs create --type <type> --name <name> --drive <drive> --format jso
 switchboard docs rename <id|name> <new-name>
 switchboard docs delete <id|name> [<id>...] -y              # Delete one or more documents
 
-switchboard docs add-to <parent> <id> [<id>...]             # Add as children of a parent
-switchboard docs remove-from <parent> <id> [<id>...]        # Remove from a parent
-switchboard docs move <id> [<id>...] --from <a> --to <b>    # Move between parents
+switchboard docs add-to <parent> <id> [<id>...]             # Add doc to a drive (DocumentDrive addFile)
+switchboard docs remove-from <parent> <id> [<id>...]        # Unlink doc from a drive (DocumentDrive deleteNode)
+switchboard docs move <id> [<id>...] --from <a> --to <b>    # Cross-drive move (deleteNode + addFile)
 ```
+
+> **Note**: `add-to`, `remove-from`, and `move` use DocumentDrive model mutations (`addFile`, `deleteNode`) internally. The top-level `addChildren`/`removeChildren`/`moveChildren` GraphQL mutations exist but are no-ops on current API versions.
 
 ### Documents — Mutate
 
@@ -521,7 +523,7 @@ switchboard docs apply $DOC_ID --file actions.json --wait --format json
 | `addFile` | `id: ID!`, `name: String!`, `documentType: String!`, `parentFolder: ID` |
 | `addFolder` | `id: ID!`, `name: String!`, `parentFolder: ID` |
 | `deleteNode` | `id: ID!` |
-| `moveNode` | `srcFolder: ID`, `targetFolder: ID`, `id: ID!` |
+| `moveNode` | `srcFolder: ID!`, `targetParentFolder: ID` (moves a node within the same drive) |
 | `setDriveName` | `name: String!` |
 
 ### Discovering unknown input types
