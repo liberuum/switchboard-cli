@@ -963,9 +963,11 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
         }
     }
 
-    // Soft-delete each document with cascade propagation, then remove the node
-    // from its parent drive's node list so it no longer appears in listings.
-    let delete_mutation = "mutation($identifier: String!) { deleteDocument(identifier: $identifier, propagate: CASCADE) }";
+    // Soft-delete the document WITHOUT cascade — CASCADE would propagate to
+    // parent drives and delete them too (the bug that nuked Genesis drive).
+    // We handle drive node cleanup separately via DocumentDrive deleteNode.
+    let delete_mutation =
+        "mutation($identifier: String!) { deleteDocument(identifier: $identifier) }";
     let nested = helpers::is_nested_api(&client).await;
     let remove_node_mutation = if nested {
         "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }"
