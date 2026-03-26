@@ -600,19 +600,25 @@ async fn fix(
         }
     }
 
-    let nested = helpers::is_nested_api(&client).await;
-    let remove_mutation = if nested {
-        "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }"
-    } else {
-        "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive_deleteNode(docId: $docId, input: $input) { id } }"
-    };
+    // Use mutateDocument with a raw DELETE_NODE action instead of the
+    // model-specific deleteNode mutation. The model mutation goes through
+    // the reactor job queue and may silently fail for ghost nodes (the
+    // reactor tries to validate the referenced document which doesn't exist).
+    // mutateDocument applies the action directly to the drive's state.
+    let remove_mutation = "mutation($id: String!, $actions: [DocumentAction!]!) { mutateDocument(documentIdentifier: $id, actions: $actions) { id name } }";
 
     let mut fixed = 0;
     let mut results = Vec::new();
     for (ghost_id, name, dtype) in &ghosts {
+        let ts = crate::cli::docs::iso_now();
         let vars = serde_json::json!({
-            "docId": resolved,
-            "input": { "id": ghost_id }
+            "id": resolved,
+            "actions": [{
+                "type": "DELETE_NODE",
+                "input": { "id": ghost_id },
+                "scope": "global",
+                "timestampUtcMs": ts
+            }]
         });
         match client.query(remove_mutation, Some(&vars)).await {
             Ok(_) => {

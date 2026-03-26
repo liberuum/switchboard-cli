@@ -965,15 +965,14 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
 
     // Soft-delete the document WITHOUT cascade — CASCADE would propagate to
     // parent drives and delete them too (the bug that nuked Genesis drive).
-    // We handle drive node cleanup separately via DocumentDrive deleteNode.
+    // We handle drive node cleanup separately via mutateDocument + DELETE_NODE.
     let delete_mutation =
         "mutation($identifier: String!) { deleteDocument(identifier: $identifier) }";
-    let nested = helpers::is_nested_api(&client).await;
-    let remove_node_mutation = if nested {
-        "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }"
-    } else {
-        "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive_deleteNode(docId: $docId, input: $input) { id } }"
-    };
+    // Use mutateDocument with raw DELETE_NODE action instead of the model-specific
+    // deleteNode mutation. The model mutation goes through the reactor job queue
+    // and may silently fail for ghost nodes (reactor tries to validate the
+    // referenced document which doesn't exist). mutateDocument applies directly.
+    let remove_node_mutation = "mutation($id: String!, $actions: [DocumentAction!]!) { mutateDocument(documentIdentifier: $id, actions: $actions) { id name } }";
     let mut failed = false;
     for id in ids {
         let uuid = match helpers::resolve_doc(&client, id).await {
@@ -999,9 +998,15 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
             Ok(_) => {
                 // Remove the node from each parent drive's node list.
                 for drive_id in &parent_drives {
+                    let ts = iso_now();
                     let node_vars = serde_json::json!({
-                        "docId": drive_id,
-                        "input": { "id": uuid }
+                        "id": drive_id,
+                        "actions": [{
+                            "type": "DELETE_NODE",
+                            "input": { "id": uuid },
+                            "scope": "global",
+                            "timestampUtcMs": ts
+                        }]
                     });
                     let _ = client.query(remove_node_mutation, Some(&node_vars)).await;
                 }
@@ -1026,9 +1031,15 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
                     } else {
                         let mut cleaned = false;
                         for (drive_id, drive_name) in &ghost_drives {
+                            let ts = iso_now();
                             let node_vars = serde_json::json!({
-                                "docId": drive_id,
-                                "input": { "id": uuid }
+                                "id": drive_id,
+                                "actions": [{
+                                    "type": "DELETE_NODE",
+                                    "input": { "id": uuid },
+                                    "scope": "global",
+                                    "timestampUtcMs": ts
+                                }]
                             });
                             if client
                                 .query(remove_node_mutation, Some(&node_vars))
@@ -1516,17 +1527,9 @@ async fn apply(
     Ok(())
 }
 
-/// Inject `timestampUtcMs` into each action object that doesn't already have one.
-/// Uses ISO-8601 format (e.g. "2026-03-22T22:06:53.528Z") — the reactor's
-/// operation store does `new Date(timestampUtcMs)` which works with ISO strings
-/// but NOT with numeric strings like "1774218664353".
-fn stamp_actions(actions: Value) -> Value {
+/// Generate an ISO-8601 timestamp string (e.g. "2026-03-22T22:06:53.528Z").
+pub fn iso_now() -> String {
     use std::time::SystemTime;
-
-    let Value::Array(mut arr) = actions else {
-        return actions;
-    };
-
     let duration = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
@@ -1538,8 +1541,19 @@ fn stamp_actions(actions: Value) -> Value {
     let minutes = (time_of_day % 3600) / 60;
     let seconds = time_of_day % 60;
     let (year, month, day) = days_to_ymd(days_since_epoch);
-    let now_iso =
-        format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{millis:03}Z");
+    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{millis:03}Z")
+}
+
+/// Inject `timestampUtcMs` into each action object that doesn't already have one.
+/// Uses ISO-8601 format — the reactor's operation store does
+/// `new Date(timestampUtcMs)` which works with ISO strings but NOT with
+/// numeric strings like "1774218664353".
+fn stamp_actions(actions: Value) -> Value {
+    let Value::Array(mut arr) = actions else {
+        return actions;
+    };
+
+    let now_iso = iso_now();
 
     for action in &mut arr {
         if let Value::Object(map) = action
