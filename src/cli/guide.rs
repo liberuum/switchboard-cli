@@ -169,22 +169,32 @@ COMMANDS
 DRIVE CREATION (all flags)
 
   --name <name>                 Drive name (required)
-  --slug <slug>                 Human-readable URL identifier
-  --id <id>                     Custom ID (default: auto-generated UUID)
   --icon <url>                  Icon URL
-  --preferred-editor <editor>   Preferred editor
+  --preferred-editor <editor>   Preferred editor type
+
+DRIVE HEALTH
+
+  switchboard drives check <id-or-slug>       Scan for ghost nodes
+  switchboard drives fix <id-or-slug> [-y]    Remove ghost nodes
+
+  Ghost nodes are file entries in a drive's node tree that reference
+  documents that no longer exist in the reactor. They can occur when
+  document creation fails mid-way, documents are deleted without
+  cascading to the drive, or sync operations fail to deliver all data.
 
 SLUG RESOLUTION
 
-  Most commands accept either a drive UUID or a slug. The API's
-  `document(identifier)` query accepts both formats directly.
+  Most commands accept either a drive UUID, slug, or name. The CLI
+  resolves names by searching findDocuments for a matching drive.
 
 EXAMPLES
 
   switchboard drives list --format json | jq '.[].slug'
-  switchboard drives create --name "test" --slug "test-drive"
+  switchboard drives create --name "test"
   switchboard drives delete test-drive -y
-  switchboard drives delete drive-1 drive-2 drive-3 -y"#
+  switchboard drives delete drive-1 drive-2 drive-3 -y
+  switchboard drives check my-drive           # scan for orphan nodes
+  switchboard drives fix my-drive -y          # auto-remove orphans"#
     );
 }
 
@@ -805,6 +815,8 @@ DRIVES
   drives get <id>               Get drive details
   drives create                 Create a drive
   drives delete <ids...> [-y]   Delete one or more drives
+  drives check <id>             Scan drive for ghost nodes
+  drives fix <id> [-y]          Remove ghost nodes from drive
 
 DOCUMENTS
   docs list --drive <id>        List documents
@@ -812,6 +824,11 @@ DOCUMENTS
   docs tree [<drive>]         Hierarchical tree view (all drives if omitted)
   docs create                   Create a document
   docs delete <ids...> [-y]     Delete one or more documents
+  docs rename <id> <name>       Rename a document
+  docs parents <id>             Show parent documents
+  docs add-to <parent> <ids>   Add documents to a drive
+  docs remove-from <parent> <ids>  Remove documents from a drive
+  docs move <ids> --from --to  Move documents between drives
   docs apply <id> --actions/--file Dispatch raw actions (--wait for async)
   docs mutate <id> [--op <op>]   Interactive field editor (--op, --input for scripting)
 

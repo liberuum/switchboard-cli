@@ -161,8 +161,10 @@ switchboard import ./backup/*.phd --drive another-drive
 |---------|-------------|
 | `switchboard drives list` | List all drives |
 | `switchboard drives get <id-or-slug>` | Get drive details and file tree |
-| `switchboard drives create` | Interactive drive creation (or pass `--name`, `--slug`, etc.) |
+| `switchboard drives create` | Interactive drive creation (or pass `--name`, `--icon`, `--preferred-editor`) |
 | `switchboard drives delete <ids...>` | Delete one or more drives (use `-y` to skip confirmation) |
+| `switchboard drives check <id-or-slug>` | Scan a drive for ghost nodes (orphan file references) |
+| `switchboard drives fix <id-or-slug>` | Remove ghost nodes from a drive (use `-y` to skip confirmation) |
 
 ### Documents
 

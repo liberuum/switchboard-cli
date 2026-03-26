@@ -68,6 +68,8 @@ switchboard drives get <id> --format svg --out diagram.svg  # Visual diagram
 switchboard drives create --name <name> --format json       # Create a drive
 switchboard drives create --name <name> --icon <url> --preferred-editor <editor>
 switchboard drives delete <id> [<id>...] -y                 # Delete one or more drives
+switchboard drives check <id|slug|name>                      # Scan for ghost nodes (orphan file refs)
+switchboard drives fix <id|slug|name> -y                     # Remove ghost nodes from a drive
 ```
 
 ### Documents — Read
@@ -219,7 +221,7 @@ switchboard watch job <job_id> --format json
 ```bash
 switchboard jobs status <job_id> --format json              # Get job status
 switchboard jobs wait <job_id> --format json                # Block until job completes
-switchboard jobs wait <job_id> --interval 5 --timeout 600 --format json  # Custom polling
+switchboard jobs wait <job_id> --timeout 600 --format json  # Custom timeout
 switchboard jobs watch <job_id> --format json               # Stream updates via WebSocket
 ```
 

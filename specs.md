@@ -245,6 +245,8 @@ switchboard drives list
 switchboard drives get <id-or-slug>                          # Also supports --format svg/png/mermaid --out <file>
 switchboard drives create [--name <name>] [--icon <url>] [--preferred-editor <editor>]
 switchboard drives delete <ids...> [-y]
+switchboard drives check <id-or-slug>                        # Scan for ghost nodes
+switchboard drives fix <id-or-slug> [-y]                     # Remove ghost nodes
 ```
 
 **`drives create` is interactive** — if `--name` is omitted, the user is prompted.
@@ -379,9 +381,9 @@ Maps to GraphQL (all on `/graphql`):
 - `mutation { deleteDocument(id:) }` → delete
 - `renameDocument(documentIdentifier, name)` → rename
 - `documentParents(childIdentifier)` → reverse tree traversal
-- `addChildren(parentIdentifier, documentIdentifiers)` → add children
-- `removeChildren(parentIdentifier, documentIdentifiers)` → remove children
-- `moveChildren(sourceParentIdentifier, targetParentIdentifier, documentIdentifiers)` → move
+- `DocumentDrive { addFile(docId, input: { id, name, documentType }) }` → add doc to drive
+- `DocumentDrive { deleteNode(docId, input: { id }) }` → remove doc from drive
+- Remove from source + add to target → move between drives
 
 ---
 

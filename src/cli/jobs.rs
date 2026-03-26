@@ -13,13 +13,10 @@ pub enum JobsCommand {
         /// Job ID
         job_id: String,
     },
-    /// Block until a job completes, then print the result
+    /// Block until a job completes, then print the result (uses WebSocket)
     Wait {
         /// Job ID
         job_id: String,
-        /// Polling interval in seconds
-        #[arg(long, default_value = "2")]
-        interval: u64,
         /// Timeout in seconds (0 = no timeout)
         #[arg(long, default_value = "300")]
         timeout: u64,
@@ -39,11 +36,9 @@ pub async fn run(
 ) -> Result<()> {
     match cmd {
         JobsCommand::Status { job_id } => status(&job_id, format, profile_name).await,
-        JobsCommand::Wait {
-            job_id,
-            interval,
-            timeout,
-        } => wait(&job_id, interval, timeout, format, profile_name, quiet).await,
+        JobsCommand::Wait { job_id, timeout } => {
+            wait(&job_id, timeout, format, profile_name, quiet).await
+        }
         JobsCommand::Watch { job_id } => watch(&job_id, format, profile_name, quiet).await,
     }
 }
@@ -100,7 +95,6 @@ async fn status(job_id: &str, format: OutputFormat, profile_name: Option<&str>) 
 
 async fn wait(
     job_id: &str,
-    _interval: u64,
     timeout: u64,
     format: OutputFormat,
     profile_name: Option<&str>,

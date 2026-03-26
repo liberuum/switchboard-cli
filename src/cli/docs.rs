@@ -1274,13 +1274,13 @@ async fn add_to(
             "docId": drive_id,
             "input": { "id": doc_id, "name": doc_name, "documentType": doc_type }
         });
-        client
-            .query(
-                "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { \
-                 DocumentDrive { addFile(docId: $docId, input: $input) { id name } } }",
-                Some(&vars),
-            )
-            .await?;
+        let nested = helpers::is_nested_api(&client).await;
+        let add_file_mutation = if nested {
+            "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { DocumentDrive { addFile(docId: $docId, input: $input) { id name } } }"
+        } else {
+            "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { DocumentDrive_addFile(docId: $docId, input: $input) { id name } }"
+        };
+        client.query(add_file_mutation, Some(&vars)).await?;
         added.push(doc_name.to_string());
     }
 
@@ -1319,13 +1319,13 @@ async fn remove_from(
             "docId": drive_id,
             "input": { "id": resolved }
         });
-        client
-            .query(
-                "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { \
-                 DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }",
-                Some(&vars),
-            )
-            .await?;
+        let nested = helpers::is_nested_api(&client).await;
+        let del_node_mutation = if nested {
+            "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }"
+        } else {
+            "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive_deleteNode(docId: $docId, input: $input) { id } }"
+        };
+        client.query(del_node_mutation, Some(&vars)).await?;
         removed.push(resolved);
     }
 
@@ -1382,30 +1382,29 @@ async fn move_docs(
         let doc_id = doc["id"].as_str().unwrap_or(&resolved);
 
         // Remove from source drive
+        let nested = helpers::is_nested_api(&client).await;
         let del_vars = serde_json::json!({
             "docId": from_id,
             "input": { "id": doc_id }
         });
-        client
-            .query(
-                "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { \
-                 DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }",
-                Some(&del_vars),
-            )
-            .await?;
+        let del_node_mutation = if nested {
+            "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }"
+        } else {
+            "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive_deleteNode(docId: $docId, input: $input) { id } }"
+        };
+        client.query(del_node_mutation, Some(&del_vars)).await?;
 
         // Add to target drive
         let add_vars = serde_json::json!({
             "docId": to_id,
             "input": { "id": doc_id, "name": doc_name, "documentType": doc_type }
         });
-        client
-            .query(
-                "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { \
-                 DocumentDrive { addFile(docId: $docId, input: $input) { id } } }",
-                Some(&add_vars),
-            )
-            .await?;
+        let add_file_mutation = if nested {
+            "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { DocumentDrive { addFile(docId: $docId, input: $input) { id } } }"
+        } else {
+            "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { DocumentDrive_addFile(docId: $docId, input: $input) { id } }"
+        };
+        client.query(add_file_mutation, Some(&add_vars)).await?;
 
         moved.push(doc_name.to_string());
     }
@@ -1505,7 +1504,6 @@ async fn apply(
         crate::cli::jobs::run(
             crate::cli::jobs::JobsCommand::Wait {
                 job_id,
-                interval: 2,
                 timeout: 300,
             },
             format,

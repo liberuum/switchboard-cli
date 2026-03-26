@@ -78,8 +78,6 @@ src/
 │   ├── auth.rs             Token management
 │   ├── analytics.rs        Analytics queries (metrics, dimensions, currencies, series)
 │   ├── update.rs            Self-update (GitHub Releases + binary swap)
-│   ├── access.rs           Document/operation permissions
-│   ├── groups.rs           User group management
 │   ├── import_export.rs    .phd ZIP archive import/export
 │   ├── query.rs            Raw GraphQL execution
 │   ├── schema.rs           Full schema dump
