@@ -605,7 +605,7 @@ async fn fix(
     // the reactor job queue and may silently fail for ghost nodes (the
     // reactor tries to validate the referenced document which doesn't exist).
     // mutateDocument applies the action directly to the drive's state.
-    let remove_mutation = "mutation($id: String!, $actions: [DocumentAction!]!) { mutateDocument(documentIdentifier: $id, actions: $actions) { id name } }";
+    let remove_mutation = "mutation($id: String!, $actions: [JSONObject!]!) { mutateDocument(documentIdentifier: $id, actions: $actions) { id name } }";
 
     let mut fixed = 0;
     let mut results = Vec::new();

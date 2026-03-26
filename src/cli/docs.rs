@@ -972,7 +972,7 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
     // deleteNode mutation. The model mutation goes through the reactor job queue
     // and may silently fail for ghost nodes (reactor tries to validate the
     // referenced document which doesn't exist). mutateDocument applies directly.
-    let remove_node_mutation = "mutation($id: String!, $actions: [DocumentAction!]!) { mutateDocument(documentIdentifier: $id, actions: $actions) { id name } }";
+    let remove_node_mutation = "mutation($id: String!, $actions: [JSONObject!]!) { mutateDocument(documentIdentifier: $id, actions: $actions) { id name } }";
     let mut failed = false;
     for id in ids {
         let uuid = match helpers::resolve_doc(&client, id).await {
@@ -982,8 +982,50 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
                 match resolve_doc_by_name(&client, id, None).await {
                     Ok(u) => u,
                     Err(_) => {
-                        eprintln!("{} Document '{id}' not found", "✗".red());
-                        failed = true;
+                        // Document can't be resolved — might be a ghost node
+                        // (exists in a drive's node list but not in the reactor).
+                        // Check all drives for a file node with this ID.
+                        let ghost_drives = find_drives_referencing_node(&client, id).await;
+                        if ghost_drives.is_empty() {
+                            eprintln!("{} Document '{id}' not found", "✗".red());
+                            failed = true;
+                            continue;
+                        }
+                        // Ghost found — clean up the orphan nodes.
+                        let mut cleaned = false;
+                        for (drive_id, drive_name) in &ghost_drives {
+                            let ts = iso_now();
+                            let node_vars = serde_json::json!({
+                                "id": drive_id,
+                                "actions": [{
+                                    "type": "DELETE_NODE",
+                                    "input": { "id": id },
+                                    "scope": "global",
+                                    "timestampUtcMs": ts
+                                }]
+                            });
+                            if client
+                                .query(remove_node_mutation, Some(&node_vars))
+                                .await
+                                .is_ok()
+                            {
+                                cleaned = true;
+                                eprintln!(
+                                    "  {} Removed ghost node from drive \"{}\"",
+                                    "↳".dimmed(),
+                                    drive_name
+                                );
+                            }
+                        }
+                        if cleaned {
+                            println!(
+                                "{} Cleaned up ghost node {id} (document was missing from reactor)",
+                                "✓".green()
+                            );
+                        } else {
+                            eprintln!("{} Failed to clean up ghost node {id}", "✗".red());
+                            failed = true;
+                        }
                         continue;
                     }
                 }
