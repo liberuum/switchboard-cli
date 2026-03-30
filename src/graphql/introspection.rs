@@ -132,6 +132,11 @@ pub async fn run_introspection(client: &GraphQLClient) -> Result<IntrospectionCa
         .await
         .context("Introspection query failed")?;
 
+    // Fetch the real document type IDs from the documentModels query.
+    // This gives us the actual namespace (e.g. "bai/research-claim" not "powerhouse/research-claim")
+    // and maps the mutation prefix (namespace field) to the real document type.
+    let doc_model_map = fetch_document_model_map(client).await;
+
     let mut models: BTreeMap<String, DocumentModel> = BTreeMap::new();
 
     let fields = data
@@ -179,7 +184,13 @@ pub async fn run_introspection(client: &GraphQLClient) -> Result<IntrospectionCa
                 continue;
             }
 
-            let doc_type = prefix_to_document_type(ns_name);
+            // Use the real document type from documentModels if available,
+            // otherwise fall back to the PascalCase-derived guess.
+            let doc_type = doc_model_map
+                .get(ns_name.as_str())
+                .cloned()
+                .unwrap_or_else(|| prefix_to_document_type(ns_name));
+
             let mut operations = Vec::new();
 
             for sub_field in &sub_fields {
@@ -213,7 +224,10 @@ pub async fn run_introspection(client: &GraphQLClient) -> Result<IntrospectionCa
         for field in &fields {
             let name = field["name"].as_str().unwrap_or_default();
             if let Some(prefix) = name.strip_suffix("_createDocument") {
-                let doc_type = prefix_to_document_type(prefix);
+                let doc_type = doc_model_map
+                    .get(prefix)
+                    .cloned()
+                    .unwrap_or_else(|| prefix_to_document_type(prefix));
                 let args = parse_args(field);
                 models.insert(
                     doc_type.clone(),
@@ -259,6 +273,39 @@ pub async fn run_introspection(client: &GraphQLClient) -> Result<IntrospectionCa
     };
 
     Ok(cache)
+}
+
+/// Fetch document model IDs from the `documentModels` query.
+/// Returns a map of mutation namespace (e.g. "ResearchClaim") → real document type (e.g. "bai/research-claim").
+/// The namespace field in documentModels may contain spaces (e.g. "App Module") so we also
+/// try stripping spaces to match PascalCase mutation prefixes (e.g. "AppModule").
+async fn fetch_document_model_map(
+    client: &GraphQLClient,
+) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let query = r#"{ documentModels { items { id namespace } } }"#;
+    let Ok(data) = client.query(query, None).await else {
+        return map;
+    };
+    let Some(items) = data
+        .pointer("/documentModels/items")
+        .and_then(|v| v.as_array())
+    else {
+        return map;
+    };
+    for item in items {
+        let id = item["id"].as_str().unwrap_or_default();
+        let ns = item["namespace"].as_str().unwrap_or_default();
+        if !id.is_empty() && !ns.is_empty() {
+            // Map both the raw namespace and the space-stripped version
+            map.insert(ns.to_string(), id.to_string());
+            let no_spaces: String = ns.chars().filter(|c| *c != ' ').collect();
+            if no_spaces != ns {
+                map.insert(no_spaces, id.to_string());
+            }
+        }
+    }
+    map
 }
 
 fn parse_args(field: &Value) -> Vec<OperationArg> {

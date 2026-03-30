@@ -611,9 +611,11 @@ async fn fix(
     let mut results = Vec::new();
     for (ghost_id, name, dtype) in &ghosts {
         let ts = crate::cli::docs::iso_now();
+        let action_id = crate::cli::docs::gen_action_id();
         let vars = serde_json::json!({
             "id": resolved,
             "actions": [{
+                "id": action_id,
                 "type": "DELETE_NODE",
                 "input": { "id": ghost_id },
                 "scope": "global",

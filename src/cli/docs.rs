@@ -52,6 +52,9 @@ pub enum DocsCommand {
         /// Drive ID or slug
         #[arg(long)]
         drive: Option<String>,
+        /// Parent folder ID (place document inside a folder)
+        #[arg(long)]
+        parent_folder: Option<String>,
     },
     /// Delete one or more documents
     Delete {
@@ -151,7 +154,8 @@ pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&s
             r#type,
             name,
             drive,
-        } => create(r#type, name, drive, format, profile_name).await,
+            parent_folder,
+        } => create(r#type, name, drive, parent_folder, format, profile_name).await,
         DocsCommand::Delete { ids, yes } => delete(&ids, yes, profile_name).await,
         DocsCommand::Rename { id, name } => rename(&id, &name, format, profile_name).await,
         DocsCommand::Parents { id } => parents(&id, format, profile_name).await,
@@ -729,16 +733,27 @@ async fn tree(
     }
 
     if matches!(format, OutputFormat::Json | OutputFormat::Raw) {
-        // JSON: array of drive objects (one per drive)
+        // JSON: flat node list per drive with id, name, kind, documentType, parentFolder
         let mut results = Vec::new();
         for id in &drive_ids {
-            let escaped = id.replace('"', r#"\""#);
-            let query = format!(
-                r#"{{ document(identifier: "{escaped}") {{ document {{ id slug name state }} childIds }} }}"#
-            );
-            let data = client.query(&query, None).await?;
-            let doc = data.pointer("/document").cloned().unwrap_or_default();
-            results.push(doc);
+            let (drive_id, drive_name, nodes) = fetch_drive_nodes(&client, id).await?;
+            let clean_nodes: Vec<Value> = nodes
+                .iter()
+                .map(|n| {
+                    serde_json::json!({
+                        "id": n["id"],
+                        "name": n["name"],
+                        "kind": n["kind"],
+                        "documentType": n.get("documentType").unwrap_or(&Value::Null),
+                        "parentFolder": n.get("parentFolder").unwrap_or(&Value::Null),
+                    })
+                })
+                .collect();
+            results.push(serde_json::json!({
+                "id": drive_id,
+                "name": drive_name,
+                "nodes": clean_nodes,
+            }));
         }
         if results.len() == 1 {
             print_json(&results[0]);
@@ -838,6 +853,7 @@ async fn create(
     doc_type: Option<String>,
     name: Option<String>,
     drive: Option<String>,
+    parent_folder: Option<String>,
     format: OutputFormat,
     profile_name: Option<&str>,
 ) -> Result<()> {
@@ -872,17 +888,6 @@ async fn create(
         }
     };
 
-    // Auto-introspect if the specific type is missing from cache
-    if cache.find_model(&doc_type).is_none() {
-        eprintln!("Model '{doc_type}' not in cache — re-introspecting...");
-        cache = crate::graphql::introspection::run_introspection(&client).await?;
-        crate::graphql::introspection::save_cache(&pname, &cache)?;
-    }
-
-    let model = cache
-        .find_model(&doc_type)
-        .ok_or_else(|| anyhow::anyhow!("Unknown document type: {doc_type}"))?;
-
     // Get document name
     let name = match name {
         Some(n) => n,
@@ -898,46 +903,79 @@ async fn create(
         }
     };
 
-    // Use the model's typed create mutation (nested or flat format)
-    let vars = serde_json::json!({
+    // Use the model-specific createDocument(parentIdentifier) mutation.
+    // This goes through the reactor's proper creation pipeline (createDocumentInDrive
+    // equivalent) which ensures Connect sync works — the reactor creates the document,
+    // adds it to the drive, and establishes the relationship edge atomically.
+    let drive_id = helpers::resolve_doc(&client, &drive_identifier).await?;
+
+    // Look up the model namespace from the introspection cache for the mutation format
+    let namespace = cache.find_model(&doc_type).map(|m| m.namespace.clone());
+
+    let mut vars = serde_json::json!({
         "name": name,
-        "parentIdentifier": drive_identifier,
+        "parentIdentifier": drive_id,
     });
-    let mutation = if model.namespace.is_empty() {
-        // Legacy flat: Model_createDocument(name: $name, parentIdentifier: $id) { id }
-        format!(
-            "mutation($name: String!, $parentIdentifier: String) {{ {}(name: $name, parentIdentifier: $parentIdentifier) {{ id }} }}",
-            model.create_mutation,
-        )
-    } else {
-        // Nested: Model { createDocument(name: $name, parentIdentifier: $id) { id } }
-        format!(
+    if let Some(ref folder_id) = parent_folder {
+        vars["slug"] = serde_json::json!(folder_id); // parentFolder not directly supported
+    }
+
+    let mutation = match &namespace {
+        Some(ns) if !ns.is_empty() => format!(
             "mutation($name: String!, $parentIdentifier: String) {{ {} {{ createDocument(name: $name, parentIdentifier: $parentIdentifier) {{ id }} }} }}",
-            model.namespace,
-        )
+            ns,
+        ),
+        _ => format!(
+            "mutation($name: String!, $parentIdentifier: String) {{ createEmptyDocument(documentType: \"{doc_type}\") {{ id }} }}",
+        ),
     };
 
-    let data = client.query(&mutation, Some(&vars)).await?;
-    let doc_id = if model.namespace.is_empty() {
-        data.get(&model.create_mutation)
-    } else {
-        data.get(&model.namespace)
-            .and_then(|ns| ns.get("createDocument"))
+    let create_data = client.query(&mutation, Some(&vars)).await?;
+
+    let doc_id = match &namespace {
+        Some(ns) if !ns.is_empty() => create_data
+            .get(ns.as_str())
+            .and_then(|ns_val| ns_val.get("createDocument"))
+            .and_then(|v| v.get("id").and_then(|id| id.as_str())),
+        _ => create_data
+            .pointer("/createEmptyDocument/id")
+            .and_then(|v| v.as_str()),
     }
-    .and_then(|v| {
-        v.as_str()
-            .or_else(|| v.get("id").and_then(|id| id.as_str()))
-    });
+    .ok_or_else(|| anyhow::anyhow!("createDocument returned no ID"))?
+    .to_string();
+
+    // Move into folder if --parent-folder was specified.
+    if let Some(ref folder_id) = parent_folder {
+        let move_mutation = match &namespace {
+            Some(_) => {
+                "mutation($docId: PHID!, $input: DocumentDrive_MoveNodeInput!) { DocumentDrive { moveNode(docId: $docId, input: $input) { id } } }"
+            }
+            None => {
+                "mutation($docId: PHID!, $input: DocumentDrive_MoveNodeInput!) { DocumentDrive_moveNode(docId: $docId, input: $input) { id } }"
+            }
+        };
+        let move_vars = serde_json::json!({
+            "docId": drive_id,
+            "input": {
+                "srcFolder": doc_id,
+                "targetParentFolder": folder_id,
+            }
+        });
+        let _ = client.query(move_mutation, Some(&move_vars)).await;
+    }
+
+    let data = serde_json::json!({ "id": doc_id });
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&data),
         _ => {
             println!("{} Document created", "✓".green());
-            if let Some(id) = doc_id {
-                println!("  ID: {id}");
-            }
+            println!("  ID: {doc_id}");
             println!("  Type: {doc_type}");
             println!("  Name: {name}");
+            if let Some(folder) = &parent_folder {
+                println!("  Folder: {folder}");
+            }
         }
     }
 
@@ -998,6 +1036,7 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
                             let node_vars = serde_json::json!({
                                 "id": drive_id,
                                 "actions": [{
+                                    "id": gen_action_id(),
                                     "type": "DELETE_NODE",
                                     "input": { "id": id },
                                     "scope": "global",
@@ -1044,6 +1083,7 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
                     let node_vars = serde_json::json!({
                         "id": drive_id,
                         "actions": [{
+                            "id": gen_action_id(),
                             "type": "DELETE_NODE",
                             "input": { "id": uuid },
                             "scope": "global",
@@ -1586,10 +1626,24 @@ pub fn iso_now() -> String {
     format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{millis:03}Z")
 }
 
-/// Inject `timestampUtcMs` into each action object that doesn't already have one.
-/// Uses ISO-8601 format — the reactor's operation store does
-/// `new Date(timestampUtcMs)` which works with ISO strings but NOT with
-/// numeric strings like "1774218664353".
+/// Generate a random action ID (hex string matching the reactor's format).
+pub fn gen_action_id() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::SystemTime;
+    let mut hasher = DefaultHasher::new();
+    SystemTime::now().hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    let h1 = hasher.finish();
+    // Second hash with different seed for more entropy
+    h1.hash(&mut hasher);
+    let h2 = hasher.finish();
+    format!("{h1:016x}{h2:016x}")
+}
+
+/// Inject `timestampUtcMs` and `id` into each action object that doesn't already have them.
+/// The `id` field is required by Connect's sync — actions without it cause
+/// "Cannot return null for non-nullable field Action.id" errors.
 fn stamp_actions(actions: Value) -> Value {
     let Value::Array(mut arr) = actions else {
         return actions;
@@ -1598,10 +1652,13 @@ fn stamp_actions(actions: Value) -> Value {
     let now_iso = iso_now();
 
     for action in &mut arr {
-        if let Value::Object(map) = action
-            && !map.contains_key("timestampUtcMs")
-        {
-            map.insert("timestampUtcMs".to_string(), Value::String(now_iso.clone()));
+        if let Value::Object(map) = action {
+            if !map.contains_key("timestampUtcMs") {
+                map.insert("timestampUtcMs".to_string(), Value::String(now_iso.clone()));
+            }
+            if !map.contains_key("id") {
+                map.insert("id".to_string(), Value::String(gen_action_id()));
+            }
         }
     }
 

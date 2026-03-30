@@ -34,7 +34,7 @@ impl GraphQLClient {
         let token = std::env::var("SWITCHBOARD_TOKEN").ok().or(token);
 
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(120))
             .build()
             .expect("failed to build HTTP client");
 
