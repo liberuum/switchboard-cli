@@ -60,9 +60,9 @@ pub enum ExportCommand {
         /// Output directory (defaults to ./switchboard-export/)
         #[arg(long, short)]
         out: Option<String>,
-        /// Include full operation history (default: state-only, compatible with Connect import)
+        /// Exclude operation history (state-only export, for Connect drag-drop compatibility)
         #[arg(long)]
-        with_ops: bool,
+        no_ops: bool,
         #[command(flatten)]
         filter: OpFilterArgs,
     },
@@ -76,9 +76,9 @@ pub enum ExportCommand {
         /// Output file path (defaults to <name>.phd)
         #[arg(long, short)]
         out: Option<String>,
-        /// Include full operation history (default: state-only, compatible with Connect import)
+        /// Exclude operation history (state-only export, for Connect drag-drop compatibility)
         #[arg(long)]
-        with_ops: bool,
+        no_ops: bool,
         #[command(flatten)]
         filter: OpFilterArgs,
     },
@@ -89,9 +89,9 @@ pub enum ExportCommand {
         /// Output directory (defaults to ./<drive-name>/)
         #[arg(long, short)]
         out: Option<String>,
-        /// Include full operation history (default: state-only, compatible with Connect import)
+        /// Exclude operation history (state-only export, for Connect drag-drop compatibility)
         #[arg(long)]
-        with_ops: bool,
+        no_ops: bool,
         #[command(flatten)]
         filter: OpFilterArgs,
     },
@@ -106,21 +106,21 @@ pub async fn run_export(
     match cmd {
         ExportCommand::All {
             out,
-            with_ops,
+            no_ops,
             filter,
-        } => export_all(out.as_deref(), with_ops, &filter, profile_name, quiet).await,
+        } => export_all(out.as_deref(), no_ops, &filter, profile_name, quiet).await,
         ExportCommand::Doc {
             doc_id,
             drive,
             out,
-            with_ops,
+            no_ops,
             filter,
         } => {
             export_doc(
                 &doc_id,
                 &drive,
                 out.as_deref(),
-                with_ops,
+                no_ops,
                 &filter,
                 profile_name,
                 quiet,
@@ -130,19 +130,9 @@ pub async fn run_export(
         ExportCommand::Drive {
             drive,
             out,
-            with_ops,
+            no_ops,
             filter,
-        } => {
-            export_drive(
-                &drive,
-                out.as_deref(),
-                with_ops,
-                &filter,
-                profile_name,
-                quiet,
-            )
-            .await
-        }
+        } => export_drive(&drive, out.as_deref(), no_ops, &filter, profile_name, quiet).await,
     }
 }
 
@@ -230,7 +220,7 @@ fn build_current_state(state: &Value) -> PhdState {
 
 async fn export_all(
     out_dir: Option<&str>,
-    with_ops: bool,
+    no_ops: bool,
     filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
@@ -374,7 +364,7 @@ async fn export_all(
                 Ok((doc, operations)) => {
                     let header = build_header(&doc, &operations);
                     let state = extract_state(&doc);
-                    let phd_ops = if with_ops {
+                    let phd_ops = if !no_ops {
                         split_ops_by_scope(&operations)
                     } else {
                         empty_ops()
@@ -448,7 +438,7 @@ async fn export_doc(
     doc_id: &str,
     drive: &str,
     out_path: Option<&str>,
-    with_ops: bool,
+    no_ops: bool,
     filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
@@ -463,7 +453,7 @@ async fn export_doc(
 
     let header = build_header(&doc, &operations);
     let state = extract_state(&doc);
-    let phd_ops = if with_ops {
+    let phd_ops = if !no_ops {
         split_ops_by_scope(&operations)
     } else {
         empty_ops()
@@ -498,7 +488,7 @@ async fn export_doc(
 async fn export_drive(
     drive: &str,
     out_dir: Option<&str>,
-    with_ops: bool,
+    no_ops: bool,
     filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
@@ -572,7 +562,7 @@ async fn export_drive(
                 let state = extract_state(&doc);
 
                 let header = build_header(&doc, &operations);
-                let phd_ops = if with_ops {
+                let phd_ops = if !no_ops {
                     split_ops_by_scope(&operations)
                 } else {
                     empty_ops()
