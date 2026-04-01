@@ -59,7 +59,7 @@ impl Default for PhdState {
 /// go in `document`, user ops go in `global`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhdOperations {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub global: Vec<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub document: Vec<Value>,

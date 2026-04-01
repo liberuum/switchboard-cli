@@ -60,6 +60,9 @@ pub enum ExportCommand {
         /// Output directory (defaults to ./switchboard-export/)
         #[arg(long, short)]
         out: Option<String>,
+        /// Include full operation history (default: state-only, compatible with Connect import)
+        #[arg(long)]
+        with_ops: bool,
         #[command(flatten)]
         filter: OpFilterArgs,
     },
@@ -73,6 +76,9 @@ pub enum ExportCommand {
         /// Output file path (defaults to <name>.phd)
         #[arg(long, short)]
         out: Option<String>,
+        /// Include full operation history (default: state-only, compatible with Connect import)
+        #[arg(long)]
+        with_ops: bool,
         #[command(flatten)]
         filter: OpFilterArgs,
     },
@@ -83,6 +89,9 @@ pub enum ExportCommand {
         /// Output directory (defaults to ./<drive-name>/)
         #[arg(long, short)]
         out: Option<String>,
+        /// Include full operation history (default: state-only, compatible with Connect import)
+        #[arg(long)]
+        with_ops: bool,
         #[command(flatten)]
         filter: OpFilterArgs,
     },
@@ -95,27 +104,44 @@ pub async fn run_export(
     quiet: bool,
 ) -> Result<()> {
     match cmd {
-        ExportCommand::All { out, filter } => {
-            export_all(out.as_deref(), &filter, profile_name, quiet).await
-        }
+        ExportCommand::All {
+            out,
+            with_ops,
+            filter,
+        } => export_all(out.as_deref(), with_ops, &filter, profile_name, quiet).await,
         ExportCommand::Doc {
             doc_id,
             drive,
             out,
+            with_ops,
             filter,
         } => {
             export_doc(
                 &doc_id,
                 &drive,
                 out.as_deref(),
+                with_ops,
                 &filter,
                 profile_name,
                 quiet,
             )
             .await
         }
-        ExportCommand::Drive { drive, out, filter } => {
-            export_drive(&drive, out.as_deref(), &filter, profile_name, quiet).await
+        ExportCommand::Drive {
+            drive,
+            out,
+            with_ops,
+            filter,
+        } => {
+            export_drive(
+                &drive,
+                out.as_deref(),
+                with_ops,
+                &filter,
+                profile_name,
+                quiet,
+            )
+            .await
         }
     }
 }
@@ -204,6 +230,7 @@ fn build_current_state(state: &Value) -> PhdState {
 
 async fn export_all(
     out_dir: Option<&str>,
+    with_ops: bool,
     filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
@@ -347,12 +374,17 @@ async fn export_all(
                 Ok((doc, operations)) => {
                     let header = build_header(&doc, &operations);
                     let state = extract_state(&doc);
-                    let phd_ops = split_ops_by_scope(&operations);
+                    let phd_ops = if with_ops {
+                        split_ops_by_scope(&operations)
+                    } else {
+                        empty_ops()
+                    };
                     let current_state = build_current_state(&state);
                     let initial_state = current_state.clone();
 
                     let safe_file = sanitize_filename(file_name);
-                    let file_path = file_dir.join(format!("{safe_file}.phd"));
+                    let type_suffix = file_type.rsplit('/').next().unwrap_or("phd");
+                    let file_path = file_dir.join(format!("{safe_file}.{type_suffix}.zip"));
 
                     match phd::write_phd(
                         &file_path,
@@ -416,6 +448,7 @@ async fn export_doc(
     doc_id: &str,
     drive: &str,
     out_path: Option<&str>,
+    with_ops: bool,
     filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
@@ -430,7 +463,11 @@ async fn export_doc(
 
     let header = build_header(&doc, &operations);
     let state = extract_state(&doc);
-    let phd_ops = split_ops_by_scope(&operations);
+    let phd_ops = if with_ops {
+        split_ops_by_scope(&operations)
+    } else {
+        empty_ops()
+    };
     let current_state = build_current_state(&state);
     let initial_state = current_state.clone();
 
@@ -461,6 +498,7 @@ async fn export_doc(
 async fn export_drive(
     drive: &str,
     out_dir: Option<&str>,
+    with_ops: bool,
     filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
@@ -534,7 +572,11 @@ async fn export_drive(
                 let state = extract_state(&doc);
 
                 let header = build_header(&doc, &operations);
-                let phd_ops = split_ops_by_scope(&operations);
+                let phd_ops = if with_ops {
+                    split_ops_by_scope(&operations)
+                } else {
+                    empty_ops()
+                };
                 let current_state = build_current_state(&state);
                 let initial_state = current_state.clone();
 
@@ -757,6 +799,14 @@ async fn fetch_document(
 }
 
 /// Extract state from a document value. In the new API, state is a JSONObject directly.
+/// Empty operations — matches Connect's export format (`operations.json: {}`)
+fn empty_ops() -> PhdOperations {
+    PhdOperations {
+        global: vec![],
+        document: vec![],
+    }
+}
+
 /// Split operations into document-scope and global-scope for the .phd format.
 /// Connect expects `{ "document": [...], "global": [...] }` — mixing scopes
 /// causes import failures ("missing index 0 operations").
