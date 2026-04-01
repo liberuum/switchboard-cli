@@ -1071,27 +1071,30 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
             }
         };
 
-        // Find parent drive(s) BEFORE soft-deleting so we can clean up the node list.
+        // CRITICAL: Remove the file node from parent drives BEFORE deleting the document.
+        // If we delete the document first and the node removal fails, we get a ghost node
+        // that crashes Connect ("Document not found" errors). If we remove the node first
+        // and the delete fails, we get an orphan — invisible but harmless.
         let parent_drives = find_parent_drives(&client, &uuid).await;
+        for drive_id in &parent_drives {
+            let ts = iso_now();
+            let node_vars = serde_json::json!({
+                "id": drive_id,
+                "actions": [{
+                    "id": gen_action_id(),
+                    "type": "DELETE_NODE",
+                    "input": { "id": uuid },
+                    "scope": "global",
+                    "timestampUtcMs": ts
+                }]
+            });
+            let _ = client.query(remove_node_mutation, Some(&node_vars)).await;
+        }
 
+        // Now delete the document itself (node already removed from drives)
         let vars = serde_json::json!({ "identifier": uuid });
         match client.query(delete_mutation, Some(&vars)).await {
             Ok(_) => {
-                // Remove the node from each parent drive's node list.
-                for drive_id in &parent_drives {
-                    let ts = iso_now();
-                    let node_vars = serde_json::json!({
-                        "id": drive_id,
-                        "actions": [{
-                            "id": gen_action_id(),
-                            "type": "DELETE_NODE",
-                            "input": { "id": uuid },
-                            "scope": "global",
-                            "timestampUtcMs": ts
-                        }]
-                    });
-                    let _ = client.query(remove_node_mutation, Some(&node_vars)).await;
-                }
                 println!("{} Deleted document {id}", "✓".green());
             }
             Err(e) => {
