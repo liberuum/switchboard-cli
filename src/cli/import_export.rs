@@ -525,6 +525,9 @@ async fn export_drive(
     let mut success = 0;
     let total = files.len();
 
+    // Build folder ID → path map for preserving directory structure
+    let folder_path_map = build_folder_paths(&nodes);
+
     for (i, file_node) in files.iter().enumerate() {
         let file_id = file_node["id"].as_str().unwrap_or("");
         let file_name = file_node["name"].as_str().unwrap_or("document");
@@ -541,8 +544,21 @@ async fn export_drive(
                 let current_state = build_current_state(&state);
                 let initial_state = current_state.clone();
 
+                // Resolve the folder path for this file
                 let safe_file = sanitize_filename(file_name);
-                let file_path = dir.join(format!("{safe_file}.phd"));
+                let sub_dir = file_node["parentFolder"]
+                    .as_str()
+                    .and_then(|pf| folder_path_map.get(pf))
+                    .cloned()
+                    .unwrap_or_default();
+                let target_dir = if sub_dir.is_empty() {
+                    dir.clone()
+                } else {
+                    let d = dir.join(&sub_dir);
+                    std::fs::create_dir_all(&d).ok();
+                    d
+                };
+                let file_path = target_dir.join(format!("{safe_file}.phd"));
 
                 match phd::write_phd(
                     &file_path,
@@ -585,6 +601,50 @@ async fn export_drive(
         );
     }
     Ok(())
+}
+
+/// Build a map of folder ID → relative filesystem path by walking the node tree.
+/// e.g., folder "notes" inside "knowledge" at root → "knowledge/notes"
+fn build_folder_paths(nodes: &[Value]) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+
+    // Build folder ID → (name, parentFolder) map
+    let mut folder_info: HashMap<String, (String, Option<String>)> = HashMap::new();
+    for node in nodes {
+        if node["kind"].as_str() == Some("folder") {
+            let id = node["id"].as_str().unwrap_or("").to_string();
+            let name = node["name"].as_str().unwrap_or("").to_string();
+            let parent = node["parentFolder"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            folder_info.insert(id, (name, parent));
+        }
+    }
+
+    // Resolve each folder's full path by walking up the parent chain
+    let mut result: HashMap<String, String> = HashMap::new();
+    for id in folder_info.keys().cloned().collect::<Vec<_>>() {
+        let mut parts = Vec::new();
+        let mut current = Some(id.clone());
+        // Walk up (with cycle guard)
+        let mut depth = 0;
+        while let Some(ref cur_id) = current {
+            if depth > 20 {
+                break;
+            }
+            if let Some((name, parent)) = folder_info.get(cur_id) {
+                parts.push(sanitize_filename(name));
+                current = parent.clone();
+            } else {
+                break;
+            }
+            depth += 1;
+        }
+        parts.reverse();
+        result.insert(id, parts.join("/"));
+    }
+    result
 }
 
 const OP_BATCH_SIZE: usize = 500;
