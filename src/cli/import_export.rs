@@ -347,9 +347,7 @@ async fn export_all(
                 Ok((doc, operations)) => {
                     let header = build_header(&doc, &operations);
                     let state = extract_state(&doc);
-                    let phd_ops = PhdOperations {
-                        global: operations.clone(),
-                    };
+                    let phd_ops = split_ops_by_scope(&operations);
                     let current_state = build_current_state(&state);
                     let initial_state = current_state.clone();
 
@@ -432,9 +430,7 @@ async fn export_doc(
 
     let header = build_header(&doc, &operations);
     let state = extract_state(&doc);
-    let phd_ops = PhdOperations {
-        global: operations.clone(),
-    };
+    let phd_ops = split_ops_by_scope(&operations);
     let current_state = build_current_state(&state);
     let initial_state = current_state.clone();
 
@@ -538,9 +534,7 @@ async fn export_drive(
                 let state = extract_state(&doc);
 
                 let header = build_header(&doc, &operations);
-                let phd_ops = PhdOperations {
-                    global: operations.clone(),
-                };
+                let phd_ops = split_ops_by_scope(&operations);
                 let current_state = build_current_state(&state);
                 let initial_state = current_state.clone();
 
@@ -763,6 +757,26 @@ async fn fetch_document(
 }
 
 /// Extract state from a document value. In the new API, state is a JSONObject directly.
+/// Split operations into document-scope and global-scope for the .phd format.
+/// Connect expects `{ "document": [...], "global": [...] }` — mixing scopes
+/// causes import failures ("missing index 0 operations").
+fn split_ops_by_scope(operations: &[Value]) -> PhdOperations {
+    let mut global = Vec::new();
+    let mut document = Vec::new();
+    for op in operations {
+        let scope = op
+            .pointer("/action/scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("global");
+        if scope == "document" {
+            document.push(op.clone());
+        } else {
+            global.push(op.clone());
+        }
+    }
+    PhdOperations { global, document }
+}
+
 fn extract_state(doc: &Value) -> Value {
     doc.get("state")
         .cloned()

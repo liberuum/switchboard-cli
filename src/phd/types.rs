@@ -54,9 +54,13 @@ impl Default for PhdState {
     }
 }
 
-/// The operations.json file inside a .phd archive
+/// The operations.json file inside a .phd archive.
+/// Operations are grouped by scope: document-scope ops (CREATE_DOCUMENT, UPGRADE_DOCUMENT)
+/// go in `document`, user ops go in `global`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhdOperations {
     #[serde(default)]
     pub global: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub document: Vec<Value>,
 }

@@ -28,8 +28,11 @@ pub fn read_phd(path: &Path) -> Result<PhdContents> {
     let current_state: PhdState =
         read_json_entry(&mut archive, "current-state.json").unwrap_or_default();
 
-    let operations: PhdOperations = read_json_entry(&mut archive, "operations.json")
-        .unwrap_or(PhdOperations { global: vec![] });
+    let operations: PhdOperations =
+        read_json_entry(&mut archive, "operations.json").unwrap_or(PhdOperations {
+            global: vec![],
+            document: vec![],
+        });
 
     Ok(PhdContents {
         header,
