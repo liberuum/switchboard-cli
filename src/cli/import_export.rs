@@ -60,9 +60,9 @@ pub enum ExportCommand {
         /// Output directory (defaults to ./switchboard-export/)
         #[arg(long, short)]
         out: Option<String>,
-        /// Exclude operation history (state-only export, for Connect drag-drop compatibility)
+        /// Include operation history (for CLI archival/roundtrips via switchboard import)
         #[arg(long)]
-        no_ops: bool,
+        with_ops: bool,
         #[command(flatten)]
         filter: OpFilterArgs,
     },
@@ -76,9 +76,9 @@ pub enum ExportCommand {
         /// Output file path (defaults to <name>.phd)
         #[arg(long, short)]
         out: Option<String>,
-        /// Exclude operation history (state-only export, for Connect drag-drop compatibility)
+        /// Include operation history (for CLI archival/roundtrips via switchboard import)
         #[arg(long)]
-        no_ops: bool,
+        with_ops: bool,
         #[command(flatten)]
         filter: OpFilterArgs,
     },
@@ -89,9 +89,9 @@ pub enum ExportCommand {
         /// Output directory (defaults to ./<drive-name>/)
         #[arg(long, short)]
         out: Option<String>,
-        /// Exclude operation history (state-only export, for Connect drag-drop compatibility)
+        /// Include operation history (for CLI archival/roundtrips via switchboard import)
         #[arg(long)]
-        no_ops: bool,
+        with_ops: bool,
         #[command(flatten)]
         filter: OpFilterArgs,
     },
@@ -106,21 +106,21 @@ pub async fn run_export(
     match cmd {
         ExportCommand::All {
             out,
-            no_ops,
+            with_ops,
             filter,
-        } => export_all(out.as_deref(), no_ops, &filter, profile_name, quiet).await,
+        } => export_all(out.as_deref(), with_ops, &filter, profile_name, quiet).await,
         ExportCommand::Doc {
             doc_id,
             drive,
             out,
-            no_ops,
+            with_ops,
             filter,
         } => {
             export_doc(
                 &doc_id,
                 &drive,
                 out.as_deref(),
-                no_ops,
+                with_ops,
                 &filter,
                 profile_name,
                 quiet,
@@ -130,9 +130,19 @@ pub async fn run_export(
         ExportCommand::Drive {
             drive,
             out,
-            no_ops,
+            with_ops,
             filter,
-        } => export_drive(&drive, out.as_deref(), no_ops, &filter, profile_name, quiet).await,
+        } => {
+            export_drive(
+                &drive,
+                out.as_deref(),
+                with_ops,
+                &filter,
+                profile_name,
+                quiet,
+            )
+            .await
+        }
     }
 }
 
@@ -220,7 +230,7 @@ fn build_current_state(state: &Value) -> PhdState {
 
 async fn export_all(
     out_dir: Option<&str>,
-    no_ops: bool,
+    with_ops: bool,
     filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
@@ -364,7 +374,7 @@ async fn export_all(
                 Ok((doc, operations)) => {
                     let header = build_header(&doc, &operations);
                     let state = extract_state(&doc);
-                    let phd_ops = if !no_ops {
+                    let phd_ops = if with_ops {
                         split_ops_by_scope(&operations)
                     } else {
                         empty_ops()
@@ -438,7 +448,7 @@ async fn export_doc(
     doc_id: &str,
     drive: &str,
     out_path: Option<&str>,
-    no_ops: bool,
+    with_ops: bool,
     filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
@@ -453,7 +463,7 @@ async fn export_doc(
 
     let header = build_header(&doc, &operations);
     let state = extract_state(&doc);
-    let phd_ops = if !no_ops {
+    let phd_ops = if with_ops {
         split_ops_by_scope(&operations)
     } else {
         empty_ops()
@@ -488,7 +498,7 @@ async fn export_doc(
 async fn export_drive(
     drive: &str,
     out_dir: Option<&str>,
-    no_ops: bool,
+    with_ops: bool,
     filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
@@ -562,7 +572,7 @@ async fn export_drive(
                 let state = extract_state(&doc);
 
                 let header = build_header(&doc, &operations);
-                let phd_ops = if !no_ops {
+                let phd_ops = if with_ops {
                     split_ops_by_scope(&operations)
                 } else {
                     empty_ops()
@@ -723,7 +733,7 @@ async fn fetch_document(
     loop {
         let offset = all_ops.len();
         let ops_query = format!(
-            r#"{{ documentOperations(filter: {{ documentId: "{escaped}"{extra_filter} }}, paging: {{ limit: {OP_BATCH_SIZE}, offset: {offset} }}) {{ items {{ id index action {{ type input scope }} timestampUtcMs hash skip error }} totalCount }} }}"#,
+            r#"{{ documentOperations(filter: {{ documentId: "{escaped}"{extra_filter} }}, paging: {{ limit: {OP_BATCH_SIZE}, offset: {offset} }}) {{ items {{ id index action {{ id type input scope timestampUtcMs attachments {{ data mimeType hash extension fileName }} context {{ signer {{ user {{ address networkId chainId }} app {{ name key }} signatures }} }} }} timestampUtcMs hash skip error }} totalCount }} }}"#,
         );
 
         let ops_data = client.query(&ops_query, None).await?;
@@ -756,36 +766,24 @@ async fn fetch_document(
         }
     }
 
-    // Transform operations to the nested action format expected by .phd
-    let transformed_ops: Vec<Value> = all_ops
-        .iter()
-        .map(|op| {
-            let action = &op["action"];
-            let input = action
-                .get("input")
-                .cloned()
-                .unwrap_or(Value::Object(serde_json::Map::new()));
-            let scope = action["scope"].as_str().unwrap_or("global");
-
-            serde_json::json!({
-                "id": op.get("id"),
-                "index": op.get("index"),
-                "skip": op.get("skip").and_then(|v| v.as_u64()).unwrap_or(0),
-                "hash": op.get("hash"),
-                "timestampUtcMs": op.get("timestampUtcMs"),
-                "error": op.get("error").cloned().unwrap_or(Value::Null),
-                "action": {
-                    "id": op.get("id"),
-                    "type": action.get("type"),
-                    "timestampUtcMs": op.get("timestampUtcMs"),
-                    "input": input,
-                    "scope": scope,
-                }
-            })
+    // Strip context.signer from exported operations. Signatures are bound to
+    // the original document ID — when imported into a new document, the reactor
+    // would reject them with "signature verification returned false". Stripping
+    // the signer lets the importing reactor re-sign with its own key.
+    let cleaned_ops: Vec<Value> = all_ops
+        .into_iter()
+        .map(|mut op| {
+            if let Some(action) = op.get_mut("action")
+                && let Some(ctx) = action.get_mut("context")
+                && let Some(obj) = ctx.as_object_mut()
+            {
+                obj.remove("signer");
+            }
+            op
         })
         .collect();
 
-    Ok((doc, transformed_ops))
+    Ok((doc, cleaned_ops))
 }
 
 /// Extract state from a document value. In the new API, state is a JSONObject directly.
