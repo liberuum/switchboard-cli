@@ -383,8 +383,7 @@ async fn export_all(
                     let initial_state = current_state.clone();
 
                     let safe_file = sanitize_filename(file_name);
-                    let type_suffix = file_type.rsplit('/').next().unwrap_or("phd");
-                    let file_path = file_dir.join(format!("{safe_file}.{type_suffix}.zip"));
+                    let file_path = file_dir.join(format!("{safe_file}.phd"));
 
                     match phd::write_phd(
                         &file_path,
