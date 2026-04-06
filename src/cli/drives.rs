@@ -375,29 +375,19 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
         }
     }
 
-    // The API's rebuild-before-delete path requires UUID identifiers, not slugs.
-    // Resolve each identifier to its UUID — required by the API's delete path.
-    // Try document() lookup first, then fall back to findDocuments name search.
     let mutation = "mutation($identifier: String!) { deleteDocument(identifier: $identifier, propagate: CASCADE) }";
     let mut failed = false;
     for id in ids {
-        // Resolve to UUID, then verify the result isn't already soft-deleted.
-        // The API's document(identifier) can match deleted docs by name, so we
-        // skip those and fall through to the name-search which filters them out.
         let uuid = match helpers::resolve_doc(&client, id).await {
             Ok(u) if !is_soft_deleted(&client, &u).await => u,
-            _ => {
-                // Either resolution failed or the resolved doc is already deleted —
-                // search by name among non-deleted drives.
-                match find_drive_uuid_by_name(&client, id).await {
-                    Some(u) => u,
-                    None => {
-                        eprintln!("{} Drive '{id}' not found", "✗".red());
-                        failed = true;
-                        continue;
-                    }
+            _ => match find_drive_uuid_by_name(&client, id).await {
+                Some(u) => u,
+                None => {
+                    eprintln!("{} Drive '{id}' not found", "✗".red());
+                    failed = true;
+                    continue;
                 }
-            }
+            },
         };
         let vars = serde_json::json!({ "identifier": uuid });
         match client.query(mutation, Some(&vars)).await {

@@ -909,7 +909,8 @@ async fn create(
     // adds it to the drive, and establishes the relationship edge atomically.
     let drive_id = helpers::resolve_doc(&client, &drive_identifier).await?;
 
-    // Look up the model namespace from the introspection cache for the mutation format
+    // Look up the model namespace from the introspection cache — required for the
+    // namespaced createDocument mutation that atomically adds the doc to the drive.
     let namespace = cache.find_model(&doc_type).map(|m| m.namespace.clone());
 
     let mut vars = serde_json::json!({
@@ -920,40 +921,31 @@ async fn create(
         vars["slug"] = serde_json::json!(folder_id); // parentFolder not directly supported
     }
 
-    let mutation = match &namespace {
-        Some(ns) if !ns.is_empty() => format!(
-            "mutation($name: String!, $parentIdentifier: String) {{ {} {{ createDocument(name: $name, parentIdentifier: $parentIdentifier) {{ id }} }} }}",
-            ns,
-        ),
-        _ => format!(
-            "mutation($name: String!, $parentIdentifier: String) {{ createEmptyDocument(documentType: \"{doc_type}\") {{ id }} }}",
+    let ns = match &namespace {
+        Some(ns) if !ns.is_empty() => ns.clone(),
+        _ => bail!(
+            "No namespace found for document type \"{doc_type}\". \
+             Run `switchboard introspect` to refresh the schema cache."
         ),
     };
 
+    let mutation = format!(
+        "mutation($name: String!, $parentIdentifier: String) {{ {} {{ createDocument(name: $name, parentIdentifier: $parentIdentifier) {{ id }} }} }}",
+        ns,
+    );
+
     let create_data = client.query(&mutation, Some(&vars)).await?;
 
-    let doc_id = match &namespace {
-        Some(ns) if !ns.is_empty() => create_data
-            .get(ns.as_str())
-            .and_then(|ns_val| ns_val.get("createDocument"))
-            .and_then(|v| v.get("id").and_then(|id| id.as_str())),
-        _ => create_data
-            .pointer("/createEmptyDocument/id")
-            .and_then(|v| v.as_str()),
-    }
-    .ok_or_else(|| anyhow::anyhow!("createDocument returned no ID"))?
-    .to_string();
+    let doc_id = create_data
+        .get(ns.as_str())
+        .and_then(|ns_val| ns_val.get("createDocument"))
+        .and_then(|v| v.get("id").and_then(|id| id.as_str()))
+        .ok_or_else(|| anyhow::anyhow!("createDocument returned no ID"))?
+        .to_string();
 
     // Move into folder if --parent-folder was specified.
     if let Some(ref folder_id) = parent_folder {
-        let move_mutation = match &namespace {
-            Some(_) => {
-                "mutation($docId: PHID!, $input: DocumentDrive_MoveNodeInput!) { DocumentDrive { moveNode(docId: $docId, input: $input) { id } } }"
-            }
-            None => {
-                "mutation($docId: PHID!, $input: DocumentDrive_MoveNodeInput!) { DocumentDrive_moveNode(docId: $docId, input: $input) { id } }"
-            }
-        };
+        let move_mutation = "mutation($docId: PHID!, $input: DocumentDrive_MoveNodeInput!) { DocumentDrive { moveNode(docId: $docId, input: $input) { id } } }";
         let move_vars = serde_json::json!({
             "docId": drive_id,
             "input": {

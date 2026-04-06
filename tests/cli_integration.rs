@@ -133,7 +133,7 @@ fn docs_tree_existing_drive() {
     }
     let slug = drives[0]["slug"].as_str().unwrap();
 
-    let (stdout, _, ok) = run(&["docs", "tree", "--drive", slug, "--format", "table"]);
+    let (stdout, _, ok) = run(&["docs", "tree", slug, "--format", "table"]);
     assert!(ok, "docs tree failed");
     assert!(!stdout.is_empty(), "tree output should not be empty");
 }
@@ -399,7 +399,7 @@ fn docs_rename_and_parents() {
     ]);
     assert!(ok, "doc create failed: {stderr}");
     let doc: serde_json::Value = serde_json::from_str(&doc_out).unwrap();
-    let doc_id = doc["DocumentModel_createDocument"]["id"].as_str().unwrap();
+    let doc_id = doc["id"].as_str().unwrap();
 
     // Rename
     let new_name = format!("renamed-{pid}");
@@ -466,33 +466,42 @@ fn docs_add_to_and_remove_from() {
     ]);
     assert!(ok);
     let doc: serde_json::Value = serde_json::from_str(&doc_out).unwrap();
-    let doc_id = doc["DocumentModel_createDocument"]["id"].as_str().unwrap();
+    let doc_id = doc["id"].as_str().unwrap();
 
     // Add to d2
     let (_, _, ok) = run(&["docs", "add-to", d2_id, doc_id, "--format", "json"]);
     assert!(ok, "add-to failed");
 
-    // Verify parents include both
-    let (parents_out, _, ok) = run(&["docs", "parents", doc_id, "--format", "json"]);
-    assert!(ok);
-    let parents: Vec<serde_json::Value> = serde_json::from_str(&parents_out).unwrap();
+    // Verify d2's drive state contains the doc node (documentParents index
+    // may not reflect cross-drive ADD_FILE immediately, so check state directly).
+    let (d2_out, _, ok) = run(&["drives", "get", d2_id, "--format", "json"]);
+    assert!(ok, "drives get d2 failed");
+    let d2_state: serde_json::Value = serde_json::from_str(&d2_out).unwrap();
+    let d2_nodes = d2_state
+        .pointer("/state/global/nodes")
+        .and_then(|v| v.as_array())
+        .expect("d2 should have nodes");
     assert!(
-        parents.len() >= 2,
-        "expected at least 2 parents, got {}",
-        parents.len()
+        d2_nodes.iter().any(|n| n["id"].as_str() == Some(doc_id)),
+        "d2 should contain the doc node after add-to"
     );
 
     // Remove from d2
     let (_, _, ok) = run(&["docs", "remove-from", d2_id, doc_id, "--format", "json"]);
     assert!(ok, "remove-from failed");
 
-    // Verify d2 no longer a parent
-    let (parents_out, _, ok) = run(&["docs", "parents", doc_id, "--format", "json"]);
+    // Verify d2 no longer contains the doc node
+    let (d2_out, _, ok) = run(&["drives", "get", d2_id, "--format", "json"]);
     assert!(ok);
-    let parents: Vec<serde_json::Value> = serde_json::from_str(&parents_out).unwrap();
+    let d2_state: serde_json::Value = serde_json::from_str(&d2_out).unwrap();
+    let d2_nodes = d2_state
+        .pointer("/state/global/nodes")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&Vec::new())
+        .clone();
     assert!(
-        !parents.iter().any(|p| p["id"].as_str() == Some(d2_id)),
-        "d2 should no longer be a parent"
+        !d2_nodes.iter().any(|n| n["id"].as_str() == Some(doc_id)),
+        "d2 should no longer contain the doc node"
     );
 
     // Cleanup
@@ -543,7 +552,7 @@ fn docs_move_between_drives() {
     ]);
     assert!(ok);
     let doc: serde_json::Value = serde_json::from_str(&doc_out).unwrap();
-    let doc_id = doc["DocumentModel_createDocument"]["id"].as_str().unwrap();
+    let doc_id = doc["id"].as_str().unwrap();
 
     // Move from d1 to d2
     let (_, _, ok) = run(&[
@@ -551,17 +560,31 @@ fn docs_move_between_drives() {
     ]);
     assert!(ok, "move failed");
 
-    // Verify parent is now d2, not d1
-    let (parents_out, _, ok) = run(&["docs", "parents", doc_id, "--format", "json"]);
+    // Verify d2 now has the doc and d1 does not (check drive state directly
+    // since documentParents index may lag behind mutateDocument actions).
+    let (d2_out, _, ok) = run(&["drives", "get", d2_id, "--format", "json"]);
     assert!(ok);
-    let parents: Vec<serde_json::Value> = serde_json::from_str(&parents_out).unwrap();
+    let d2_state: serde_json::Value = serde_json::from_str(&d2_out).unwrap();
+    let d2_nodes = d2_state
+        .pointer("/state/global/nodes")
+        .and_then(|v| v.as_array())
+        .expect("d2 should have nodes");
     assert!(
-        parents.iter().any(|p| p["id"].as_str() == Some(d2_id)),
-        "d2 should be a parent after move"
+        d2_nodes.iter().any(|n| n["id"].as_str() == Some(doc_id)),
+        "d2 should contain the doc after move"
     );
+
+    let (d1_out, _, ok) = run(&["drives", "get", d1_id, "--format", "json"]);
+    assert!(ok);
+    let d1_state: serde_json::Value = serde_json::from_str(&d1_out).unwrap();
+    let d1_nodes = d1_state
+        .pointer("/state/global/nodes")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&Vec::new())
+        .clone();
     assert!(
-        !parents.iter().any(|p| p["id"].as_str() == Some(d1_id)),
-        "d1 should not be a parent after move"
+        !d1_nodes.iter().any(|n| n["id"].as_str() == Some(doc_id)),
+        "d1 should not contain the doc after move"
     );
 
     // Cleanup
@@ -628,13 +651,14 @@ fn complete_document_model_lifecycle() {
     ]);
     assert!(ok, "doc create failed: {stderr}");
     let doc: serde_json::Value = serde_json::from_str(&doc_out).unwrap();
-    let doc_id = doc["DocumentModel_createDocument"]["id"].as_str().unwrap();
+    let doc_id = doc["id"].as_str().unwrap();
 
     // 3. Set model metadata
     let (_, _, ok) = run(&[
         "docs",
         "mutate",
         doc_id,
+        "--op",
         "setModelName",
         "--input",
         r#"{"name": "TaskTracker"}"#,
@@ -647,6 +671,7 @@ fn complete_document_model_lifecycle() {
         "docs",
         "mutate",
         doc_id,
+        "--op",
         "setModelId",
         "--input",
         &format!(r#"{{"id": "test/task-tracker-{pid}"}}"#),
@@ -659,6 +684,7 @@ fn complete_document_model_lifecycle() {
         "docs",
         "mutate",
         doc_id,
+        "--op",
         "setModelDescription",
         "--input",
         r#"{"description": "A task tracking model with title, status, assignee, and priority"}"#,
@@ -671,6 +697,7 @@ fn complete_document_model_lifecycle() {
         "docs",
         "mutate",
         doc_id,
+        "--op",
         "setAuthorName",
         "--input",
         r#"{"authorName": "Switchboard CLI Integration Tests"}"#,
@@ -683,6 +710,7 @@ fn complete_document_model_lifecycle() {
         "docs",
         "mutate",
         doc_id,
+        "--op",
         "setAuthorWebsite",
         "--input",
         r#"{"authorWebsite": "https://github.com/liberuum/switchboard-cli"}"#,
@@ -697,6 +725,7 @@ fn complete_document_model_lifecycle() {
         "docs",
         "mutate",
         doc_id,
+        "--op",
         "setStateSchema",
         "--input",
         schema,
@@ -710,6 +739,7 @@ fn complete_document_model_lifecycle() {
         "docs",
         "mutate",
         doc_id,
+        "--op",
         "setInitialState",
         "--input",
         r#"{"scope": "global", "initialValue": "{ \"tasks\": [], \"nextId\": 1 }"}"#,
@@ -723,6 +753,7 @@ fn complete_document_model_lifecycle() {
         "docs",
         "mutate",
         doc_id,
+        "--op",
         "addModule",
         "--input",
         r#"{"id": "task-ops", "name": "Task Operations", "description": "CRUD operations for tasks"}"#,
@@ -736,6 +767,7 @@ fn complete_document_model_lifecycle() {
         "docs",
         "mutate",
         doc_id,
+        "--op",
         "addOperation",
         "--input",
         r#"{"moduleId": "task-ops", "id": "add-task", "name": "addTask", "description": "Create a new task", "schema": "{ \"type\": \"object\", \"properties\": { \"title\": { \"type\": \"string\" }, \"assignee\": { \"type\": \"string\" }, \"priority\": { \"type\": \"integer\" } }, \"required\": [\"title\"] }", "template": "", "reducer": "", "scope": "global"}"#,
@@ -749,6 +781,7 @@ fn complete_document_model_lifecycle() {
         "docs",
         "mutate",
         doc_id,
+        "--op",
         "addOperation",
         "--input",
         r#"{"moduleId": "task-ops", "id": "complete-task", "name": "completeTask", "description": "Mark a task as done", "schema": "{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" } }, \"required\": [\"id\"] }", "template": "", "reducer": "", "scope": "global"}"#,
@@ -762,6 +795,7 @@ fn complete_document_model_lifecycle() {
         "docs",
         "mutate",
         doc_id,
+        "--op",
         "addOperation",
         "--input",
         r#"{"moduleId": "task-ops", "id": "reassign-task", "name": "reassignTask", "description": "Change task assignee", "schema": "{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" }, \"assignee\": { \"type\": \"string\" } }, \"required\": [\"id\", \"assignee\"] }", "template": "", "reducer": "", "scope": "global"}"#,
@@ -775,6 +809,7 @@ fn complete_document_model_lifecycle() {
         "docs",
         "mutate",
         doc_id,
+        "--op",
         "addOperation",
         "--input",
         r#"{"moduleId": "task-ops", "id": "delete-task", "name": "deleteTask", "description": "Remove a task by ID", "schema": "{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" } }, \"required\": [\"id\"] }", "template": "", "reducer": "", "scope": "global"}"#,
