@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -55,12 +57,22 @@ impl Default for PhdState {
 }
 
 /// The operations.json file inside a .phd archive.
-/// Operations are grouped by scope: document-scope ops (CREATE_DOCUMENT, UPGRADE_DOCUMENT)
-/// go in `document`, user ops go in `global`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PhdOperations {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub global: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub document: Vec<Value>,
+/// Operations are grouped by scope name (e.g. "global", "document", "local", custom scopes).
+/// Serializes as `{ "global": [...], "document": [...], ... }`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PhdOperations(pub HashMap<String, Vec<Value>>);
+
+impl PhdOperations {
+    /// Total number of operations across all scopes.
+    pub fn total_ops(&self) -> usize {
+        self.0.values().map(|v| v.len()).sum()
+    }
+
+    /// Iterate over operations in all non-document scopes (global, local, custom, etc.).
+    pub fn non_document_ops(&self) -> impl Iterator<Item = &Value> {
+        self.0
+            .iter()
+            .filter(|(k, _)| k.as_str() != "document")
+            .flat_map(|(_, v)| v.iter())
+    }
 }

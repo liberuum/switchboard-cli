@@ -788,30 +788,22 @@ async fn fetch_document(
 /// Extract state from a document value. In the new API, state is a JSONObject directly.
 /// Empty operations — matches Connect's export format (`operations.json: {}`)
 fn empty_ops() -> PhdOperations {
-    PhdOperations {
-        global: vec![],
-        document: vec![],
-    }
+    PhdOperations::default()
 }
 
-/// Split operations into document-scope and global-scope for the .phd format.
-/// Connect expects `{ "document": [...], "global": [...] }` — mixing scopes
-/// causes import failures ("missing index 0 operations").
+/// Split operations by scope for the .phd format.
+/// Groups operations into their actual scope (global, document, local, custom, etc.)
+/// rather than lumping non-document ops into global.
 fn split_ops_by_scope(operations: &[Value]) -> PhdOperations {
-    let mut global = Vec::new();
-    let mut document = Vec::new();
+    let mut map = std::collections::HashMap::<String, Vec<Value>>::new();
     for op in operations {
         let scope = op
             .pointer("/action/scope")
             .and_then(|v| v.as_str())
             .unwrap_or("global");
-        if scope == "document" {
-            document.push(op.clone());
-        } else {
-            global.push(op.clone());
-        }
+        map.entry(scope.to_string()).or_default().push(op.clone());
     }
-    PhdOperations { global, document }
+    PhdOperations(map)
 }
 
 fn extract_state(doc: &Value) -> Value {
@@ -890,12 +882,12 @@ pub async fn run_import(
 
         let doc_type = &contents.header.document_type;
         let doc_name = &contents.header.name;
-        let ops_count = contents.operations.global.len();
+        let ops_count = contents.operations.total_ops();
 
         if !quiet {
             println!("  Type: {doc_type}");
             println!("  Name: {doc_name}");
-            println!("  Ops:  {ops_count} global");
+            println!("  Ops:  {ops_count}");
         }
 
         // Find the matching model
@@ -1021,32 +1013,22 @@ async fn push_operations_via_mutate(
 ) -> Result<usize> {
     let mut total_pushed = 0;
 
-    for op in &operations.global {
-        let (op_type, input, scope) = if let Some(action) = op.get("action") {
+    // Iterate all non-document scopes (global, local, custom, etc.)
+    for op in operations.non_document_ops() {
+        let (op_type, input) = if let Some(action) = op.get("action") {
             let t = action.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let i = action
                 .get("input")
                 .cloned()
                 .unwrap_or(Value::Object(serde_json::Map::new()));
-            let s = action["scope"].as_str().unwrap_or("global").to_string();
-            (t.to_string(), i, s)
+            (t.to_string(), i)
         } else {
             let t = op.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let input_text = op.get("inputText").and_then(|v| v.as_str()).unwrap_or("{}");
             let i: Value =
                 serde_json::from_str(input_text).unwrap_or(Value::Object(serde_json::Map::new()));
-            let s = op
-                .get("scope")
-                .and_then(|v| v.as_str())
-                .unwrap_or("global")
-                .to_string();
-            (t.to_string(), i, s)
+            (t.to_string(), i)
         };
-
-        // Skip document-scope operations — internal lifecycle ops
-        if scope == "document" {
-            continue;
-        }
 
         // Convert SCREAMING_SNAKE (e.g. SET_MODEL_NAME) to camelCase (e.g. setModelName)
         let camel_name = screaming_snake_to_camel(&op_type);
