@@ -63,16 +63,21 @@ impl Default for PhdState {
 pub struct PhdOperations(pub HashMap<String, Vec<Value>>);
 
 impl PhdOperations {
-    /// Total number of operations across all scopes.
-    pub fn total_ops(&self) -> usize {
-        self.0.values().map(|v| v.len()).sum()
-    }
-
-    /// Iterate over operations in all non-document scopes (global, local, custom, etc.).
-    pub fn non_document_ops(&self) -> impl Iterator<Item = &Value> {
+    /// Iterate over domain operations (all scopes except `auth` and `document`).
+    /// This matches reactor-browser's `filterDomainOperations()`.
+    pub fn domain_ops(&self) -> impl Iterator<Item = &Value> {
         self.0
             .iter()
-            .filter(|(k, _)| k.as_str() != "document")
+            .filter(|(k, _)| k.as_str() != "auth" && k.as_str() != "document")
             .flat_map(|(_, v)| v.iter())
+    }
+
+    /// Count of domain operations (excluding `auth` and `document` scopes).
+    pub fn domain_ops_count(&self) -> usize {
+        self.0
+            .iter()
+            .filter(|(k, _)| k.as_str() != "auth" && k.as_str() != "document")
+            .map(|(_, v)| v.len())
+            .sum()
     }
 }

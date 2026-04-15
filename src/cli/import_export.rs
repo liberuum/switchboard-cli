@@ -380,7 +380,7 @@ async fn export_all(
                         empty_ops()
                     };
                     let current_state = build_current_state(&state);
-                    let initial_state = current_state.clone();
+                    let initial_state = extract_initial_state(&operations, &current_state);
 
                     let safe_file = sanitize_filename(file_name);
                     let file_path = file_dir.join(format!("{safe_file}.phd"));
@@ -468,7 +468,7 @@ async fn export_doc(
         empty_ops()
     };
     let current_state = build_current_state(&state);
-    let initial_state = current_state.clone();
+    let initial_state = extract_initial_state(&operations, &current_state);
 
     // Determine output path
     let safe_name = sanitize_filename(&header.name);
@@ -577,7 +577,7 @@ async fn export_drive(
                     empty_ops()
                 };
                 let current_state = build_current_state(&state);
-                let initial_state = current_state.clone();
+                let initial_state = extract_initial_state(&operations, &current_state);
 
                 // Resolve the folder path for this file
                 let safe_file = sanitize_filename(file_name);
@@ -812,6 +812,33 @@ fn extract_state(doc: &Value) -> Value {
         .unwrap_or(Value::Object(serde_json::Map::new()))
 }
 
+/// Extract the initial state from the UPGRADE_DOCUMENT operation in document-scope ops.
+/// Looks for `action.input.initialState` first, then `action.input.state` as fallback.
+/// If no UPGRADE_DOCUMENT op is found, falls back to cloning the current state.
+fn extract_initial_state(operations: &[Value], current_state: &PhdState) -> PhdState {
+    for op in operations {
+        let action = match op.get("action") {
+            Some(a) => a,
+            None => continue,
+        };
+        if action.pointer("/scope").and_then(|v| v.as_str()) != Some("document") {
+            continue;
+        }
+        if action.pointer("/type").and_then(|v| v.as_str()) != Some("UPGRADE_DOCUMENT") {
+            continue;
+        }
+        let input = match action.get("input") {
+            Some(i) => i,
+            None => continue,
+        };
+        // Prefer initialState, fall back to state
+        if let Some(state_val) = input.get("initialState").or_else(|| input.get("state")) {
+            return build_current_state(state_val);
+        }
+    }
+    current_state.clone()
+}
+
 fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| {
@@ -882,7 +909,7 @@ pub async fn run_import(
 
         let doc_type = &contents.header.document_type;
         let doc_name = &contents.header.name;
-        let ops_count = contents.operations.total_ops();
+        let ops_count = contents.operations.domain_ops_count();
 
         if !quiet {
             println!("  Type: {doc_type}");
@@ -1014,7 +1041,7 @@ async fn push_operations_via_mutate(
     let mut total_pushed = 0;
 
     // Iterate all non-document scopes (global, local, custom, etc.)
-    for op in operations.non_document_ops() {
+    for op in operations.domain_ops() {
         let (op_type, input) = if let Some(action) = op.get("action") {
             let t = action.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let i = action
