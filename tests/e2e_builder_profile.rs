@@ -295,8 +295,18 @@ fn t20_builder_profile_full_lifecycle() {
     );
 
     // ── Step 6: Export the drive ─────────────────────────────────────────
+    // Pass --with-ops so the .phd archives include the operation history
+    // we want to validate below. Without it, operations.json serializes as
+    // an empty `{}` and there's nothing to assert against.
     let export_dir = format!("/tmp/e2e-export-{suffix}");
-    let (_, stderr, ok) = run(&["export", "drive", &src_drive_id, "--out", &export_dir]);
+    let (_, stderr, ok) = run(&[
+        "export",
+        "drive",
+        &src_drive_id,
+        "--with-ops",
+        "--out",
+        &export_dir,
+    ]);
     assert!(ok, "export drive failed: {stderr}");
 
     // Verify .phd files exist
@@ -402,7 +412,8 @@ fn t20_builder_profile_full_lifecycle() {
     );
 
     // ── Step 10: Export with filters ─────────────────────────────────────
-    // Export only operations since revision 2 (skip CREATE_DOCUMENT)
+    // Export only operations since revision 2 (skip CREATE_DOCUMENT). The
+    // `--since-revision` filter is only meaningful when --with-ops is set.
     let filtered_dir = format!("/tmp/e2e-filtered-{suffix}");
     std::fs::create_dir_all(&filtered_dir).unwrap();
     let (_, stderr, ok) = run(&[
@@ -413,6 +424,7 @@ fn t20_builder_profile_full_lifecycle() {
         &src_drive_id,
         "--out",
         &format!("{filtered_dir}/alice-filtered.phd"),
+        "--with-ops",
         "--since-revision",
         "2",
     ]);
