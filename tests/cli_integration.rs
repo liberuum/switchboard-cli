@@ -389,7 +389,7 @@ fn docs_rename_and_parents() {
         "docs",
         "create",
         "--type",
-        "powerhouse/document-model",
+        "powerhouse/subgraph",
         "--name",
         &format!("rename-test-{pid}"),
         "--drive",
@@ -456,7 +456,7 @@ fn docs_add_to_and_remove_from() {
         "docs",
         "create",
         "--type",
-        "powerhouse/document-model",
+        "powerhouse/subgraph",
         "--name",
         &format!("addtest-{pid}"),
         "--drive",
@@ -542,7 +542,7 @@ fn docs_move_between_drives() {
         "docs",
         "create",
         "--type",
-        "powerhouse/document-model",
+        "powerhouse/subgraph",
         "--name",
         &format!("movetest-{pid}"),
         "--drive",
@@ -613,13 +613,16 @@ fn groups_command_removed() {
     );
 }
 
-// ── Complete end-to-end: create document model, populate schema, add to drive ─
+// ── Complete end-to-end: create subgraph doc, mutate state, add to drive ─
 
-/// Full lifecycle test: creates a TaskTracker document model from scratch,
-/// populates its schema and operations via mutations, adds it to a drive,
-/// verifies the full state, then cleans up.
+/// Full lifecycle test: creates a subgraph document, applies multiple
+/// state mutations, verifies state and operation history, renames it, then
+/// cleans up. Uses powerhouse/subgraph rather than powerhouse/document-model
+/// because document-model creation/mutation triggers Vetra codegen on dev
+/// environments that watch the reactor — this test is a CLI smoke test, not
+/// a model-spec test, so a low-mutation type keeps the dev env quiet.
 #[test]
-fn complete_document_model_lifecycle() {
+fn complete_subgraph_lifecycle() {
     let pid = std::process::id();
 
     // 1. Create a drive to hold the document
@@ -636,14 +639,15 @@ fn complete_document_model_lifecycle() {
     let drive: serde_json::Value = serde_json::from_str(&drive_out).unwrap();
     let drive_id = drive["id"].as_str().unwrap();
 
-    // 2. Create a DocumentModel document in the drive
+    // 2. Create a Subgraph document in the drive
+    let initial_doc_name = format!("subgraph-{pid}");
     let (doc_out, stderr, ok) = run(&[
         "docs",
         "create",
         "--type",
-        "powerhouse/document-model",
+        "powerhouse/subgraph",
         "--name",
-        &format!("TaskTracker-{pid}"),
+        &initial_doc_name,
         "--drive",
         drive_id,
         "--format",
@@ -653,268 +657,100 @@ fn complete_document_model_lifecycle() {
     let doc: serde_json::Value = serde_json::from_str(&doc_out).unwrap();
     let doc_id = doc["id"].as_str().unwrap();
 
-    // 3. Set model metadata
+    // 3. Set the subgraph name (state.global.name)
+    let state_name = format!("MySubgraph-{pid}");
+    let set_name_input = format!(r#"{{"name": "{state_name}"}}"#);
     let (_, _, ok) = run(&[
         "docs",
         "mutate",
         doc_id,
         "--op",
-        "setModelName",
+        "setSubgraphName",
         "--input",
-        r#"{"name": "TaskTracker"}"#,
+        &set_name_input,
         "--format",
         "json",
     ]);
-    assert!(ok, "setModelName failed");
+    assert!(ok, "setSubgraphName failed");
 
+    // 4. Set status to DRAFT
     let (_, _, ok) = run(&[
         "docs",
         "mutate",
         doc_id,
         "--op",
-        "setModelId",
+        "setSubgraphStatus",
         "--input",
-        &format!(r#"{{"id": "test/task-tracker-{pid}"}}"#),
+        r#"{"status": "DRAFT"}"#,
         "--format",
         "json",
     ]);
-    assert!(ok, "setModelId failed");
+    assert!(ok, "setSubgraphStatus DRAFT failed");
 
+    // 5. Then transition to CONFIRMED
     let (_, _, ok) = run(&[
         "docs",
         "mutate",
         doc_id,
         "--op",
-        "setModelDescription",
+        "setSubgraphStatus",
         "--input",
-        r#"{"description": "A task tracking model with title, status, assignee, and priority"}"#,
+        r#"{"status": "CONFIRMED"}"#,
         "--format",
         "json",
     ]);
-    assert!(ok, "setModelDescription failed");
+    assert!(ok, "setSubgraphStatus CONFIRMED failed");
 
-    let (_, _, ok) = run(&[
-        "docs",
-        "mutate",
-        doc_id,
-        "--op",
-        "setAuthorName",
-        "--input",
-        r#"{"authorName": "Switchboard CLI Integration Tests"}"#,
-        "--format",
-        "json",
-    ]);
-    assert!(ok, "setAuthorName failed");
-
-    let (_, _, ok) = run(&[
-        "docs",
-        "mutate",
-        doc_id,
-        "--op",
-        "setAuthorWebsite",
-        "--input",
-        r#"{"authorWebsite": "https://github.com/liberuum/switchboard-cli"}"#,
-        "--format",
-        "json",
-    ]);
-    assert!(ok, "setAuthorWebsite failed");
-
-    // 4. Set state schema — tasks with title, status, assignee, priority
-    let schema = r#"{"scope": "global", "schema": "{ \"type\": \"object\", \"properties\": { \"tasks\": { \"type\": \"array\", \"items\": { \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" }, \"title\": { \"type\": \"string\" }, \"status\": { \"type\": \"string\", \"enum\": [\"todo\", \"in_progress\", \"done\"] }, \"assignee\": { \"type\": \"string\" }, \"priority\": { \"type\": \"integer\", \"minimum\": 1, \"maximum\": 5 } }, \"required\": [\"id\", \"title\", \"status\"] } }, \"nextId\": { \"type\": \"integer\" } } }"}"#;
-    let (_, _, ok) = run(&[
-        "docs",
-        "mutate",
-        doc_id,
-        "--op",
-        "setStateSchema",
-        "--input",
-        schema,
-        "--format",
-        "json",
-    ]);
-    assert!(ok, "setStateSchema failed");
-
-    // 5. Set initial state
-    let (_, _, ok) = run(&[
-        "docs",
-        "mutate",
-        doc_id,
-        "--op",
-        "setInitialState",
-        "--input",
-        r#"{"scope": "global", "initialValue": "{ \"tasks\": [], \"nextId\": 1 }"}"#,
-        "--format",
-        "json",
-    ]);
-    assert!(ok, "setInitialState failed");
-
-    // 6. Add a module and operations
-    let (_, _, ok) = run(&[
-        "docs",
-        "mutate",
-        doc_id,
-        "--op",
-        "addModule",
-        "--input",
-        r#"{"id": "task-ops", "name": "Task Operations", "description": "CRUD operations for tasks"}"#,
-        "--format",
-        "json",
-    ]);
-    assert!(ok, "addModule failed");
-
-    // addTask operation
-    let (_, _, ok) = run(&[
-        "docs",
-        "mutate",
-        doc_id,
-        "--op",
-        "addOperation",
-        "--input",
-        r#"{"moduleId": "task-ops", "id": "add-task", "name": "addTask", "description": "Create a new task", "schema": "{ \"type\": \"object\", \"properties\": { \"title\": { \"type\": \"string\" }, \"assignee\": { \"type\": \"string\" }, \"priority\": { \"type\": \"integer\" } }, \"required\": [\"title\"] }", "template": "", "reducer": "", "scope": "global"}"#,
-        "--format",
-        "json",
-    ]);
-    assert!(ok, "addOperation addTask failed");
-
-    // completeTask operation
-    let (_, _, ok) = run(&[
-        "docs",
-        "mutate",
-        doc_id,
-        "--op",
-        "addOperation",
-        "--input",
-        r#"{"moduleId": "task-ops", "id": "complete-task", "name": "completeTask", "description": "Mark a task as done", "schema": "{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" } }, \"required\": [\"id\"] }", "template": "", "reducer": "", "scope": "global"}"#,
-        "--format",
-        "json",
-    ]);
-    assert!(ok, "addOperation completeTask failed");
-
-    // reassignTask operation
-    let (_, _, ok) = run(&[
-        "docs",
-        "mutate",
-        doc_id,
-        "--op",
-        "addOperation",
-        "--input",
-        r#"{"moduleId": "task-ops", "id": "reassign-task", "name": "reassignTask", "description": "Change task assignee", "schema": "{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" }, \"assignee\": { \"type\": \"string\" } }, \"required\": [\"id\", \"assignee\"] }", "template": "", "reducer": "", "scope": "global"}"#,
-        "--format",
-        "json",
-    ]);
-    assert!(ok, "addOperation reassignTask failed");
-
-    // deleteTask operation
-    let (_, _, ok) = run(&[
-        "docs",
-        "mutate",
-        doc_id,
-        "--op",
-        "addOperation",
-        "--input",
-        r#"{"moduleId": "task-ops", "id": "delete-task", "name": "deleteTask", "description": "Remove a task by ID", "schema": "{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"string\" } }, \"required\": [\"id\"] }", "template": "", "reducer": "", "scope": "global"}"#,
-        "--format",
-        "json",
-    ]);
-    assert!(ok, "addOperation deleteTask failed");
-
-    // 7. Verify full state
+    // 6. Verify state reflects the final mutations
     let (state_out, _, ok) = run(&["docs", "get", doc_id, "--state", "--format", "json"]);
     assert!(ok, "docs get --state failed");
     let state: serde_json::Value = serde_json::from_str(&state_out).unwrap();
-
-    // Verify metadata
-    assert_eq!(
-        state["documentType"].as_str(),
-        Some("powerhouse/document-model")
-    );
+    assert_eq!(state["documentType"].as_str(), Some("powerhouse/subgraph"));
     let global = &state["state"]["global"];
-    assert_eq!(global["name"].as_str(), Some("TaskTracker"));
-    assert!(
-        global["id"]
-            .as_str()
-            .unwrap()
-            .starts_with("test/task-tracker-"),
-        "model ID should start with test/task-tracker-"
-    );
-    assert!(
-        global["description"]
-            .as_str()
-            .unwrap()
-            .contains("task tracking"),
-        "description should mention task tracking"
+    assert_eq!(
+        global["name"].as_str(),
+        Some(state_name.as_str()),
+        "state.global.name should reflect setSubgraphName"
     );
     assert_eq!(
-        global["author"]["name"].as_str(),
-        Some("Switchboard CLI Integration Tests")
-    );
-    assert_eq!(
-        global["author"]["website"].as_str(),
-        Some("https://github.com/liberuum/switchboard-cli")
+        global["status"].as_str(),
+        Some("CONFIRMED"),
+        "state.global.status should be CONFIRMED after the second transition"
     );
 
-    // Verify state schema
-    let schema_str = global["specifications"][0]["state"]["global"]["schema"]
-        .as_str()
-        .unwrap();
+    // 7. Verify the doc is registered as a child of the drive (atomic creation)
+    let (drive_get_out, _, ok) = run(&["drives", "get", drive_id, "--format", "json"]);
+    assert!(ok, "drives get failed");
+    let drive_state: serde_json::Value = serde_json::from_str(&drive_get_out).unwrap();
+    let nodes = drive_state
+        .pointer("/state/global/nodes")
+        .and_then(|v| v.as_array())
+        .expect("drive should have nodes");
     assert!(
-        schema_str.contains("tasks"),
-        "schema should define tasks array"
-    );
-    assert!(
-        schema_str.contains("priority"),
-        "schema should define priority"
+        nodes.iter().any(|n| n["id"].as_str() == Some(doc_id)),
+        "doc should be a file node in its parent drive"
     );
 
-    // Verify initial state
-    let init = global["specifications"][0]["state"]["global"]["initialValue"]
-        .as_str()
-        .unwrap();
-    assert!(init.contains("tasks"), "initial state should have tasks");
-    assert!(init.contains("nextId"), "initial state should have nextId");
-
-    // Verify module and operations
-    let modules = global["specifications"][0]["modules"].as_array().unwrap();
-    assert_eq!(modules.len(), 1);
-    assert_eq!(modules[0]["name"].as_str(), Some("Task Operations"));
-    let ops = modules[0]["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 4, "expected 4 operations, got {}", ops.len());
-    let op_names: Vec<&str> = ops.iter().filter_map(|o| o["name"].as_str()).collect();
-    assert!(op_names.contains(&"addTask"));
-    assert!(op_names.contains(&"completeTask"));
-    assert!(op_names.contains(&"reassignTask"));
-    assert!(op_names.contains(&"deleteTask"));
-
-    // 8. Verify parents
-    let (parents_out, _, ok) = run(&["docs", "parents", doc_id, "--format", "json"]);
-    assert!(ok, "parents query failed");
-    let parents: Vec<serde_json::Value> = serde_json::from_str(&parents_out).unwrap();
-    assert!(
-        parents.iter().any(|p| p["id"].as_str() == Some(drive_id)),
-        "document should be a child of the drive"
-    );
-
-    // 9. Verify operations history
+    // 8. Verify operations history. Expect at least the three domain mutations
+    // (setSubgraphName + 2x setSubgraphStatus) — CREATE_DOCUMENT lives on the
+    // document scope, so the global-scope op count is ≥ 3.
     let (ops_out, _, ok) = run(&["ops", doc_id, "--format", "json"]);
     assert!(ok, "ops query failed");
     let ops_data: serde_json::Value = serde_json::from_str(&ops_out).unwrap();
     let op_count = ops_data.as_array().map(|a| a.len()).unwrap_or(0);
-    // CREATE_DOCUMENT + SET_NAME + setModelName + setModelId + setModelDescription +
-    // setAuthorName + setAuthorWebsite + setStateSchema + setInitialState +
-    // addModule + 4x addOperation = 14+ operations
     assert!(
-        op_count >= 12,
-        "expected at least 12 operations, got {op_count}"
+        op_count >= 3,
+        "expected at least 3 ops (1 setSubgraphName + 2 setSubgraphStatus), got {op_count}"
     );
 
-    // 10. Rename the document
-    let new_name = format!("TaskTracker-Renamed-{pid}");
+    // 9. Rename the document
+    let new_name = format!("subgraph-renamed-{pid}");
     let (rename_out, _, ok) = run(&["docs", "rename", doc_id, &new_name, "--format", "json"]);
     assert!(ok, "rename failed");
     let renamed: serde_json::Value = serde_json::from_str(&rename_out).unwrap();
     assert_eq!(renamed["name"].as_str().unwrap(), new_name);
 
-    // 11. Cleanup
+    // 10. Cleanup
     let (_, _, ok) = run(&["drives", "delete", drive_id, "-y"]);
     assert!(ok, "cleanup drive delete failed");
 }

@@ -238,7 +238,8 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
         (query, Value::Object(vars))
     };
 
-    println!(
+    // Status message goes to stderr so `--format json` stdout stays parseable.
+    eprintln!(
         "Running: {}",
         format!(
             "{}(docId: \"{}\")",
