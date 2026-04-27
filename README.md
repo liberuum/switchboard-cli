@@ -55,6 +55,21 @@ This CLI is a standalone tool — it doesn't share code with the TypeScript mono
 | **Reliable concurrency** | Tokio async runtime for WebSocket subscriptions and parallel operations |
 | **Battle-tested ecosystem** | clap (CLI parsing), reqwest + rustls (HTTP/TLS), serde (JSON), tokio-tungstenite (WebSocket) |
 
+## Prerequisites
+
+The prebuilt Linux binary is dynamically linked against glibc and built on Ubuntu 24.04 LTS, so it requires:
+
+- **Linux x86_64**: glibc **2.39 or newer** (Ubuntu 24.04+, Debian 13+, Fedora 40+)
+- **macOS**: Apple Silicon (ARM64), macOS 11 Big Sur or newer
+
+If you see an error like `version 'GLIBC_2.39' not found`, your system's glibc is too old for the prebuilt binary. Check your version with:
+
+```bash
+ldd --version
+```
+
+On older systems, [build from source](#building-from-source) instead — Rust 1.85+ is the only requirement.
+
 ## Installation
 
 ### One-line install (macOS / Linux)
