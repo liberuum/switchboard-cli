@@ -41,12 +41,18 @@ async fn run() -> Result<()> {
 
     let quiet = cli.quiet;
 
+    // Show the version-update notice only in fully interactive use:
+    // both stdout AND stderr must be terminals. When stdout is captured
+    // (e.g. `eval "$(switchboard completions bash)"`, pipes, redirects),
+    // this is a programmatic invocation and the notice is noise.
+    let interactive_io = std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
+
     // Handle -i flag or no subcommand
     let command = match cli.command {
         Some(cmd) => cmd,
         None if cli.interactive => {
             // Version check before entering REPL (lives long enough for background fetch)
-            if !quiet && std::io::stderr().is_terminal() {
+            if !quiet && interactive_io {
                 cli::update::print_update_notice();
                 cli::update::check_version_background();
             }
@@ -64,7 +70,7 @@ async fn run() -> Result<()> {
     // Interactive is handled here (not in dispatch) to avoid async recursion.
     if matches!(command, cli::Commands::Interactive) {
         // Version check before entering REPL
-        if !quiet && std::io::stderr().is_terminal() {
+        if !quiet && interactive_io {
             cli::update::print_update_notice();
             cli::update::check_version_background();
         }
@@ -73,7 +79,7 @@ async fn run() -> Result<()> {
 
     // Non-blocking startup version check
     let is_update_cmd = matches!(command, cli::Commands::Update(_));
-    let version_handle = if !quiet && !is_update_cmd && std::io::stderr().is_terminal() {
+    let version_handle = if !quiet && !is_update_cmd && interactive_io {
         cli::update::print_update_notice();
         Some(cli::update::check_version_background())
     } else {
