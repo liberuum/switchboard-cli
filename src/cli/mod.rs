@@ -5,6 +5,7 @@ pub mod config;
 pub mod docs;
 pub mod drives;
 pub mod field_editor;
+pub mod folders;
 pub mod guide;
 pub mod helpers;
 pub mod import_export;
@@ -84,6 +85,10 @@ pub enum Commands {
     /// Manage documents
     #[command(subcommand)]
     Docs(docs::DocsCommand),
+
+    /// Manage folders inside drives
+    #[command(subcommand)]
+    Folders(folders::FoldersCommand),
 
     /// Discover and inspect document models
     #[command(subcommand)]
@@ -165,6 +170,7 @@ pub async fn dispatch(
         Commands::Schema => schema::run(format, profile).await,
         Commands::Drives(cmd) => drives::run(cmd, format, profile).await,
         Commands::Docs(cmd) => docs::run(cmd, format, profile).await,
+        Commands::Folders(cmd) => folders::run(cmd, format, profile).await,
         Commands::Models(cmd) => models::run(cmd, format, profile).await,
         Commands::Ops(args) => ops::run(args, format, profile).await,
         Commands::Query(args) => query::run(args, format, profile).await,

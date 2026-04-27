@@ -832,6 +832,14 @@ DOCUMENTS
   docs apply <id> --actions/--file Dispatch raw actions (--wait for async)
   docs mutate <id> [--op <op>]   Interactive field editor (--op, --input for scripting)
 
+FOLDERS
+  folders create --name <name> --parent <id-or-name>  Create a folder
+                                            (--parent is universal: a drive
+                                             name/slug/UUID for root placement,
+                                             or a folder name/UUID for nesting)
+  folders create --name <name> --drive <id-or-slug>   Equivalent for the root case
+  folders delete <id> --drive <id> [-y]   Delete a folder by ID
+
 MODELS & OPERATIONS
   models list                   List document types
   models get <type>             Show operations for a type

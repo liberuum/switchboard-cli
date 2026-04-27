@@ -21,6 +21,10 @@ struct ReplHelper {
     commands: Vec<String>,
     /// Drive slugs fetched at startup
     drive_slugs: Vec<String>,
+    /// Folder names across all drives, fetched at startup
+    folder_names: Vec<String>,
+    /// Drive slug each folder lives in (parallel to folder_names)
+    folder_drive_slugs: Vec<String>,
     /// Document model types from introspection cache
     model_types: Vec<String>,
     /// Guide topic names
@@ -33,6 +37,12 @@ struct ReplHelper {
     doc_labels: Vec<String>,
     /// Drive slug for each doc entry (parallel to doc_ids/doc_labels)
     doc_drive_slugs: Vec<String>,
+}
+
+/// A folder entry for tab-completion.
+struct FolderEntry {
+    name: String,
+    drive_slug: String,
 }
 
 /// A document entry for tab-completion.
@@ -49,8 +59,10 @@ impl ReplHelper {
         model_types: Vec<String>,
         profile_names: Vec<String>,
         docs: Vec<DocEntry>,
+        folders: Vec<FolderEntry>,
     ) -> Self {
         let (doc_ids, doc_labels, doc_drive_slugs) = Self::build_doc_completions(&docs);
+        let (folder_names, folder_drive_slugs) = Self::build_folder_completions(&folders);
 
         let commands = vec![
             // Drives
@@ -73,6 +85,12 @@ impl ReplHelper {
             "docs remove-from ".into(),
             "docs move --from ".into(),
             "docs mutate ".into(),
+            // Folders
+            "folders create".into(),
+            "folders create --name ".into(),
+            "folders create --parent ".into(),
+            "folders create --drive ".into(),
+            "folders delete ".into(),
             // Models
             "models list".into(),
             "models get ".into(),
@@ -156,6 +174,8 @@ impl ReplHelper {
         Self {
             commands,
             drive_slugs,
+            folder_names,
+            folder_drive_slugs,
             model_types,
             guide_topics,
             profile_names,
@@ -163,6 +183,27 @@ impl ReplHelper {
             doc_labels,
             doc_drive_slugs,
         }
+    }
+
+    fn build_folder_completions(folders: &[FolderEntry]) -> (Vec<String>, Vec<String>) {
+        let names = folders
+            .iter()
+            .map(|f| {
+                if f.name.contains(' ') {
+                    format!("\"{}\"", f.name)
+                } else {
+                    f.name.clone()
+                }
+            })
+            .collect();
+        let drives = folders.iter().map(|f| f.drive_slug.clone()).collect();
+        (names, drives)
+    }
+
+    fn update_folders(&mut self, folders: Vec<FolderEntry>) {
+        let (names, drives) = Self::build_folder_completions(&folders);
+        self.folder_names = names;
+        self.folder_drive_slugs = drives;
     }
 
     fn build_doc_completions(docs: &[DocEntry]) -> (Vec<String>, Vec<String>, Vec<String>) {
@@ -322,6 +363,59 @@ impl Completer for ReplHelper {
             || input.starts_with("docs tree ")
         {
             let matches = filter_pairs(&self.drive_slugs, partial);
+            if !matches.is_empty() {
+                return Ok((word_start, matches));
+            }
+        }
+
+        // ── Parent completion (drives + folders, labeled) ────
+        // `--parent` is universal: it accepts a drive (root placement) or a
+        // folder (nested placement). Surface both, with display labels so the
+        // user can tell them apart.
+        if prev_word == Some("--parent") {
+            let mut matches: Vec<Pair> = self
+                .drive_slugs
+                .iter()
+                .filter(|s| s.to_lowercase().starts_with(&partial.to_lowercase()))
+                .map(|s| Pair {
+                    display: format!("{s}    (drive)"),
+                    replacement: s.clone(),
+                })
+                .collect();
+            matches.extend(
+                self.folder_names
+                    .iter()
+                    .zip(self.folder_drive_slugs.iter())
+                    .filter(|(name, _)| {
+                        let trim = name.trim_matches('"');
+                        trim.to_lowercase().starts_with(&partial.to_lowercase())
+                    })
+                    .map(|(name, drive)| Pair {
+                        display: format!("{name}    (folder in {drive})"),
+                        replacement: name.clone(),
+                    }),
+            );
+            if !matches.is_empty() {
+                return Ok((word_start, matches));
+            }
+        }
+
+        // ── Folder-only completion ───────────────────────────
+        // `--folder` is the strict-folder spelling; show only folders.
+        if prev_word == Some("--folder") {
+            let matches: Vec<Pair> = self
+                .folder_names
+                .iter()
+                .zip(self.folder_drive_slugs.iter())
+                .filter(|(name, _)| {
+                    let trim = name.trim_matches('"');
+                    trim.to_lowercase().starts_with(&partial.to_lowercase())
+                })
+                .map(|(name, drive)| Pair {
+                    display: format!("{name}    (folder in {drive})"),
+                    replacement: name.clone(),
+                })
+                .collect();
             if !matches.is_empty() {
                 return Ok((word_start, matches));
             }
@@ -598,6 +692,54 @@ async fn fetch_drive_slugs(client: &crate::graphql::GraphQLClient) -> Vec<String
     }
 }
 
+/// Fetch folder entries from every (non-deleted) drive's state.global.nodes.
+/// Used for tab completion of `--parent` / `--folder`.
+async fn fetch_folder_entries(client: &crate::graphql::GraphQLClient) -> Vec<FolderEntry> {
+    let data = match client
+        .query(
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { slug state } } }"#,
+            None,
+        )
+        .await
+    {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+
+    let drives = data
+        .pointer("/findDocuments/items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut folders = Vec::new();
+    for d in drives.iter().filter(|d| {
+        d.pointer("/state/document/isDeleted")
+            .and_then(|v| v.as_bool())
+            != Some(true)
+    }) {
+        let drive_slug = d["slug"].as_str().unwrap_or("").to_string();
+        let nodes = match d.pointer("/state/global/nodes").and_then(|v| v.as_array()) {
+            Some(n) => n,
+            None => continue,
+        };
+        for n in nodes {
+            if n["kind"].as_str() != Some("folder") {
+                continue;
+            }
+            if let Some(name) = n["name"].as_str()
+                && !name.is_empty()
+            {
+                folders.push(FolderEntry {
+                    name: name.to_string(),
+                    drive_slug: drive_slug.clone(),
+                });
+            }
+        }
+    }
+    folders
+}
+
 async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEntry> {
     let data = match client
         .query(
@@ -679,6 +821,9 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
     // Fetch document entries for tab completion
     let doc_entries = fetch_doc_entries(&client).await;
 
+    // Fetch folder entries for tab completion
+    let folder_entries = fetch_folder_entries(&client).await;
+
     stop_spinner(spinner);
 
     // Fetch profile names for tab completion
@@ -698,14 +843,23 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
         eprintln!();
     }
 
-    // Set up rustyline with history and completion
+    // Set up rustyline with history and completion.
+    // CompletionType::List shows ALL candidates at once, which is what users
+    // typically want — Circular cycles through them one tab at a time and
+    // hides matches behind extra keypresses.
     let config = Config::builder()
         .max_history_size(1000)?
         .auto_add_history(true)
-        .completion_type(CompletionType::Circular)
+        .completion_type(CompletionType::List)
         .build();
 
-    let helper = ReplHelper::new(drive_slugs, model_types, profile_names, doc_entries);
+    let helper = ReplHelper::new(
+        drive_slugs,
+        model_types,
+        profile_names,
+        doc_entries,
+        folder_entries,
+    );
     let mut rl: Editor<ReplHelper, rustyline::history::DefaultHistory> =
         Editor::with_config(config)?;
     rl.set_helper(Some(helper));
@@ -718,7 +872,31 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
 
     let mut current_profile = name;
 
+    // Track when we last refreshed completion caches so we can transparently
+    // pick up changes made outside the REPL (e.g. a drive created from another
+    // terminal session) without forcing the user to type `refresh`.
+    let mut last_completion_refresh = std::time::Instant::now();
+    const COMPLETION_TTL_SECS: u64 = 5;
+
     loop {
+        // Auto-refresh completions if stale. Cheap (a couple of GraphQL queries)
+        // and only runs at the prompt boundary, never mid-tab, so latency is hidden.
+        if last_completion_refresh.elapsed().as_secs() >= COMPLETION_TTL_SECS {
+            let new_slugs = fetch_drive_slugs(&client).await;
+            let new_docs = fetch_doc_entries(&client).await;
+            let new_folders = fetch_folder_entries(&client).await;
+            if let Some(helper) = rl.helper_mut() {
+                if !new_slugs.is_empty() {
+                    helper.drive_slugs = new_slugs;
+                }
+                if !new_docs.is_empty() {
+                    helper.update_docs(new_docs);
+                }
+                helper.update_folders(new_folders);
+            }
+            last_completion_refresh = std::time::Instant::now();
+        }
+
         let prompt = format!("{current_profile}> ");
         show_cursor();
         match rl.readline(&prompt) {
@@ -762,6 +940,7 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                     let spinner = spawn_spinner("Refreshing completions...");
                     let new_slugs = fetch_drive_slugs(&client).await;
                     let new_docs = fetch_doc_entries(&client).await;
+                    let new_folders = fetch_folder_entries(&client).await;
                     let new_model_types: Vec<String> =
                         crate::graphql::introspection::load_cache(&current_profile)
                             .ok()
@@ -776,10 +955,12 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                         if !new_docs.is_empty() {
                             helper.update_docs(new_docs);
                         }
+                        helper.update_folders(new_folders);
                         if !new_model_types.is_empty() {
                             helper.model_types = new_model_types;
                         }
                     }
+                    last_completion_refresh = std::time::Instant::now();
                     eprintln!("Completions refreshed.");
                     continue;
                 }
@@ -818,6 +999,13 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                             || line.starts_with("docs mutate")
                             || line.starts_with("docs apply")
                             || line.starts_with("import ");
+                        // Folders live in drive state and are also affected by
+                        // drive-modifying commands (create/delete cascade) and
+                        // by docs apply (raw ADD_FOLDER / DELETE_NODE actions).
+                        let modifies_folders = line.starts_with("folders create")
+                            || line.starts_with("folders delete")
+                            || modifies_drives
+                            || line.starts_with("docs apply");
                         if let Err(e) =
                             crate::cli::dispatch(command, format, cmd_profile, cmd_quiet).await
                         {
@@ -825,13 +1013,18 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                         }
 
                         // Refresh completion caches after modifying commands
-                        if modifies_drives || modifies_docs {
+                        if modifies_drives || modifies_docs || modifies_folders {
                             let spinner = spawn_spinner("Refreshing completions...");
                             let new_docs = fetch_doc_entries(&client).await;
                             let new_slugs = if modifies_drives {
                                 fetch_drive_slugs(&client).await
                             } else {
                                 Vec::new() // no change needed
+                            };
+                            let new_folders = if modifies_folders {
+                                Some(fetch_folder_entries(&client).await)
+                            } else {
+                                None
                             };
                             stop_spinner(spinner);
                             if let Some(helper) = rl.helper_mut() {
@@ -843,7 +1036,11 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                                 if !new_docs.is_empty() {
                                     helper.update_docs(new_docs);
                                 }
+                                if let Some(folders) = new_folders {
+                                    helper.update_folders(folders);
+                                }
                             }
+                            last_completion_refresh = std::time::Instant::now();
                         }
 
                         // Re-resolve default profile in case `config use` changed it
@@ -868,6 +1065,8 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
 
                                 let new_docs = fetch_doc_entries(&client).await;
 
+                                let new_folders = fetch_folder_entries(&client).await;
+
                                 let new_model_types: Vec<String> =
                                     crate::graphql::introspection::load_cache(&current_profile)
                                         .ok()
@@ -886,7 +1085,9 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                                     helper.drive_slugs = new_slugs;
                                     helper.model_types = new_model_types;
                                     helper.update_docs(new_docs);
+                                    helper.update_folders(new_folders);
                                 }
+                                last_completion_refresh = std::time::Instant::now();
                             }
                         }
 
@@ -950,6 +1151,7 @@ fn print_repl_help() {
     eprintln!("  Drives & Documents:");
     eprintln!("    drives   list | get | create | delete");
     eprintln!("    docs     list | get | tree | create | delete | mutate");
+    eprintln!("    folders  create | delete");
     eprintln!("    models   list | get");
     eprintln!("    ops      <doc-id> --drive <drive>");
     eprintln!();
@@ -982,7 +1184,59 @@ fn print_repl_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_split;
+    use super::{FolderEntry, ReplHelper, shell_split};
+    use rustyline::completion::Completer;
+    use rustyline::history::DefaultHistory;
+
+    /// Build a helper with fixed completion data for tests.
+    fn helper_with_drives(drives: &[&str]) -> ReplHelper {
+        ReplHelper::new(
+            drives.iter().map(|s| s.to_string()).collect(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+    }
+
+    /// Build a helper with both drive and folder data for completion tests.
+    fn helper_with_drives_and_folders(
+        drives: &[&str],
+        folders: &[(&str, &str)], // (folder_name, drive_slug)
+    ) -> ReplHelper {
+        ReplHelper::new(
+            drives.iter().map(|s| s.to_string()).collect(),
+            vec![],
+            vec![],
+            vec![],
+            folders
+                .iter()
+                .map(|(name, slug)| FolderEntry {
+                    name: (*name).to_string(),
+                    drive_slug: (*slug).to_string(),
+                })
+                .collect(),
+        )
+    }
+
+    /// Run the completer against a line and return the candidate replacements
+    /// (drops the start-position part of the result tuple).
+    fn complete(helper: &ReplHelper, line: &str) -> Vec<String> {
+        let history = DefaultHistory::new();
+        let ctx = rustyline::Context::new(&history);
+        let (_, pairs) = helper.complete(line, line.len(), &ctx).unwrap();
+        pairs.into_iter().map(|p| p.replacement).collect()
+    }
+
+    /// Run the completer and return the *display* strings (what the user sees
+    /// in the candidate list). Useful for testing labels like "(drive)" vs
+    /// "(folder)".
+    fn complete_display(helper: &ReplHelper, line: &str) -> Vec<String> {
+        let history = DefaultHistory::new();
+        let ctx = rustyline::Context::new(&history);
+        let (_, pairs) = helper.complete(line, line.len(), &ctx).unwrap();
+        pairs.into_iter().map(|p| p.display).collect()
+    }
 
     #[test]
     fn simple_words() {
@@ -1037,6 +1291,130 @@ mod tests {
         assert_eq!(
             shell_split(r#"--name "hello 'world'" --flag"#),
             vec!["--name", "hello 'world'", "--flag"]
+        );
+    }
+
+    // ── Completion tests ────────────────────────────────────────────────────
+    //
+    // Regression tests for the user-reported bug where typing
+    // `drives get <TAB>` only surfaced a subset of available drives.
+
+    #[test]
+    fn drives_get_lists_every_drive() {
+        let helper = helper_with_drives(&["my-builder-team-admin", "vetra-f80015b9", "Vetra"]);
+        let matches = complete(&helper, "drives get ");
+        assert_eq!(
+            matches,
+            vec!["my-builder-team-admin", "vetra-f80015b9", "Vetra"],
+            "drives get <TAB> must surface every cached drive slug"
+        );
+    }
+
+    #[test]
+    fn drives_get_filters_by_partial_prefix() {
+        let helper = helper_with_drives(&["my-builder-team-admin", "vetra-f80015b9", "Vetra"]);
+        let matches = complete(&helper, "drives get my");
+        assert_eq!(
+            matches,
+            vec!["my-builder-team-admin"],
+            "partial prefix should narrow the candidate set"
+        );
+    }
+
+    #[test]
+    fn drives_delete_uses_drive_completion_too() {
+        let helper = helper_with_drives(&["a", "b", "c"]);
+        let matches = complete(&helper, "drives delete ");
+        assert_eq!(matches, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn bare_folders_lists_subcommands() {
+        let helper = helper_with_drives(&[]);
+        let matches = complete(&helper, "folders ");
+        assert!(
+            matches.iter().any(|m| m == "folders create"),
+            "expected 'folders create' in matches, got {matches:?}"
+        );
+        assert!(
+            matches.iter().any(|m| m == "folders delete "),
+            "expected 'folders delete ' in matches, got {matches:?}"
+        );
+    }
+
+    #[test]
+    fn folders_create_drive_flag_completes_to_drives() {
+        let helper = helper_with_drives(&["my-builder-team-admin", "vetra-f80015b9"]);
+        // After --drive, drive slugs should be offered (not the static command list).
+        let matches = complete(&helper, "folders create --drive ");
+        assert_eq!(matches, vec!["my-builder-team-admin", "vetra-f80015b9"]);
+    }
+
+    #[test]
+    fn parent_flag_lists_drives_and_folders_with_labels() {
+        let helper = helper_with_drives_and_folders(
+            &["my-builder-team-admin"],
+            &[
+                ("Products", "my-builder-team-admin"),
+                ("Services And Offerings", "my-builder-team-admin"),
+            ],
+        );
+        let displays = complete_display(&helper, "folders create --parent ");
+        assert!(
+            displays.iter().any(|d| d.contains("(drive)")),
+            "expected at least one (drive) entry, got {displays:?}"
+        );
+        assert!(
+            displays.iter().any(|d| d.contains("(folder in")),
+            "expected at least one (folder in ...) entry, got {displays:?}"
+        );
+
+        // Replacements are bare names (the resolver handles the rest).
+        let replacements = complete(&helper, "folders create --parent ");
+        assert!(replacements.contains(&"my-builder-team-admin".to_string()));
+        assert!(replacements.contains(&"Products".to_string()));
+    }
+
+    #[test]
+    fn folder_flag_lists_only_folders() {
+        let helper = helper_with_drives_and_folders(
+            &["my-builder-team-admin"],
+            &[("Products", "my-builder-team-admin")],
+        );
+        let replacements = complete(&helper, "folders create --folder ");
+        assert_eq!(
+            replacements,
+            vec!["Products"],
+            "--folder must NOT surface drives, only folders"
+        );
+
+        let displays = complete_display(&helper, "folders create --folder ");
+        assert!(
+            displays.iter().all(|d| d.contains("(folder in")),
+            "every --folder candidate should be labeled as a folder, got {displays:?}"
+        );
+    }
+
+    #[test]
+    fn bare_drives_lists_subcommands() {
+        let helper = helper_with_drives(&["x"]);
+        let matches = complete(&helper, "drives ");
+        // Should surface drives subcommand prefixes from the static command list.
+        assert!(
+            matches.iter().any(|m| m == "drives list"),
+            "expected 'drives list' in matches, got {matches:?}"
+        );
+        assert!(
+            matches.iter().any(|m| m == "drives get "),
+            "expected 'drives get ' in matches, got {matches:?}"
+        );
+        assert!(
+            matches.iter().any(|m| m == "drives create"),
+            "expected 'drives create' in matches, got {matches:?}"
+        );
+        assert!(
+            matches.iter().any(|m| m == "drives delete "),
+            "expected 'drives delete ' in matches, got {matches:?}"
         );
     }
 }

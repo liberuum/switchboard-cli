@@ -387,6 +387,49 @@ Maps to GraphQL (all on `/graphql`):
 
 ---
 
+### 4a. Folders
+
+```
+switchboard folders create --name <name> [--parent <id-or-name>] [--drive <id-or-slug>]
+switchboard folders delete <id> --drive <id-or-slug> [-y]
+```
+
+Folders are nodes inside a drive's `state.global.nodes` (kind = `"folder"`); they
+are not separate documents. The CLI hides this behind a typed command.
+
+**`--parent` is universal:** it accepts a drive (folder is created at the drive
+root) or a folder (folder is nested inside it). Resolution order:
+
+1. UUID match → used directly. Drive vs folder is determined by querying the
+   document type.
+2. Drive name/slug → folder placed at that drive's root.
+3. Folder name → search all drives for a folder with that name. If a single
+   match is found, use that drive and folder. If multiple drives contain a
+   folder with the same name, the user must disambiguate with `--drive`.
+
+**`--folder` is a backwards-compat alias for `--parent`.** Tab completion
+treats `--folder` strictly: only folder candidates are surfaced, while
+`--parent` lists both drives and folders with `(drive)` / `(folder in <slug>)`
+labels.
+
+Either `--parent` or `--drive` (or both) must be passed. Examples:
+
+```
+folders create --name "Reports" --drive my-builder-team-admin
+folders create --name "2026" --parent Reports
+folders create --name "Q1" --drive my-builder-team-admin --parent Reports
+```
+
+Maps to GraphQL:
+
+- `mutation { DocumentDrive { addFolder(docId: <drive-id>, input: { id, name, parentFolder? }) } }`
+- `mutation { DocumentDrive { deleteNode(docId: <drive-id>, input: { id }) } }`
+
+The folder UUID is generated client-side. Children of a deleted folder are
+**not** auto-removed; callers must move or delete them first.
+
+---
+
 ### 5. Document Mutations
 
 ```

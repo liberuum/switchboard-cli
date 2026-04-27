@@ -198,6 +198,14 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard docs apply <id> --actions '<json>' [--file <file>] [--wait]` | Dispatch raw actions via `mutateDocument` — pass actions inline or from a file; `--wait` blocks until async completion |
 | `switchboard docs mutate <id-or-name> [--op <op>] [--input '<json>'] [--input-file <file>] [--drive <slug>]` | Interactive field-by-field editor — omit `--op` for operation picker; pass `--input` / `--input-file` for scripting |
 
+### Folders
+
+| Command | Description |
+|---------|-------------|
+| `switchboard folders create --name <name> --parent <id-or-name>` | Create a folder. `--parent` is universal: pass a drive name/slug/UUID for root placement, or a folder name/UUID to nest. |
+| `switchboard folders create --name <name> --drive <id-or-slug> [--parent <folder>]` | Equivalent for the root case; combine with `--parent` to disambiguate when the same folder name exists across drives. |
+| `switchboard folders delete <id> --drive <id-or-slug>` | Delete a folder by ID (use `-y` to skip confirmation). Children are not auto-removed — move or delete them first. |
+
 ### Models & Operations
 
 | Command | Description |
