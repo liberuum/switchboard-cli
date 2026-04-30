@@ -23,10 +23,14 @@ pub enum ConfigCommand {
     },
 }
 
-pub async fn run(cmd: ConfigCommand, format: OutputFormat) -> Result<()> {
+pub async fn run(
+    cmd: ConfigCommand,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+) -> Result<()> {
     match cmd {
         ConfigCommand::List => list(format),
-        ConfigCommand::Show => show(format),
+        ConfigCommand::Show => show(format, profile_name),
         ConfigCommand::Use { name } => use_profile(&name),
         ConfigCommand::Remove { name } => remove(&name),
     }
@@ -83,11 +87,28 @@ fn list(format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
-fn show(format: OutputFormat) -> Result<()> {
+fn show(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     let config = load_config()?;
-    let (name, profile) = config
-        .default_profile()
-        .ok_or_else(|| anyhow::anyhow!("No default profile set"))?;
+    // If --profile/-p was passed, show that profile. Otherwise fall back to
+    // the default. Other commands honor this flag; `config show` was missing
+    // the plumbing.
+    let (name, profile) = match profile_name {
+        Some(requested) => {
+            let p = config
+                .profiles
+                .get(requested)
+                .ok_or_else(|| anyhow::anyhow!("Profile '{requested}' not found"))?;
+            (requested.to_string(), p.clone())
+        }
+        None => {
+            let (name, profile) = config
+                .default_profile()
+                .ok_or_else(|| anyhow::anyhow!("No default profile set"))?;
+            (name.to_string(), profile.clone())
+        }
+    };
+    let name = name.as_str();
+    let profile = &profile;
 
     match format {
         OutputFormat::Json => {

@@ -592,8 +592,30 @@ document.phd (ZIP)
 #### Import
 
 ```
-switchboard import <files...> --drive <slug>
+switchboard import <files...> --drive <slug> [--strict] [--id-mapping <file>]
 ```
+
+**Flags:**
+
+- `--strict` — treats per-op failures and state mismatches as hard errors. Without this flag,
+  failures are reported per-document and the import continues; with it, the first failure
+  ends the run with a non-zero exit code. Use this in CI or scripted batch imports where
+  silent partial failures would be a data-integrity risk.
+- `--id-mapping <file>` — JSON object mapping `{ "<old-uuid>": "<new-uuid>", ... }`. Applied
+  to op inputs as they are dispatched, so cross-document references survive across reactor
+  reassignment. Within a single invocation the CLI also builds this map automatically as
+  documents are created (the new doc's old UUID → new UUID), so a multi-doc import within
+  one process keeps internal references consistent without an explicit mapping file.
+
+**Verdict semantics:**
+
+- `✓ EXACT MATCH` — every op applied and the resulting state matches the .phd's `current-state.json`.
+- `✓ Imported (state has drift on volatile fields)` — every op applied; state diverges only
+  on fields like `lastModified` that the reactor stamps when ops are replayed.
+- `⚠ states equal but N op(s) failed — content may be missing` — some ops were rejected,
+  but the resulting state happens to JSON-equal the expected (often because both are empty).
+  This is the silent-corruption case the bug report calls out.
+- `⚠ Imported with errors` — at least one op was rejected by the reactor.
 
 ```
 $ switchboard import invoice.phd "expense report.phd" --drive liberuum-drive

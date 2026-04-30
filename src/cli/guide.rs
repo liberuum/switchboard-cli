@@ -850,6 +850,8 @@ IMPORT / EXPORT
   export drive <id> --out <dir> Export all docs in a drive
   export doc <id> --drive <id>  Export a document as .phd
   import <files> --drive <id>   Import .phd files
+                                  [--strict]                    Fail on any rejected op or state mismatch
+                                  [--id-mapping <file.json>]    Rewrite UUIDs in op inputs (cross-reactor cloning)
 
 AUTH
   auth login [--token <jwt>]    Authenticate

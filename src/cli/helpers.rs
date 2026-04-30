@@ -89,6 +89,9 @@ pub async fn resolve_doc(client: &GraphQLClient, id_or_name: &str) -> Result<Str
 
         // Try to find doc within the drive's children
         let drive_id = resolve_single_doc(client, drive_part).await?;
+        let is_uuid = is_uuid(doc_part);
+
+        // Fast path: documentChildren is the proper relationship index.
         let children_query = format!(
             r#"{{ documentChildren(parentIdentifier: "{drive_id}") {{ items {{ id slug name }} }} }}"#,
         );
@@ -98,7 +101,6 @@ pub async fn resolve_doc(client: &GraphQLClient, id_or_name: &str) -> Result<Str
                 .pointer("/documentChildren/items")
                 .and_then(|v| v.as_array())
         {
-            let is_uuid = is_uuid(doc_part);
             for child in items {
                 let child_id = child["id"].as_str().unwrap_or("");
                 let child_slug = child["slug"].as_str().unwrap_or("");
@@ -111,6 +113,36 @@ pub async fn resolve_doc(client: &GraphQLClient, id_or_name: &str) -> Result<Str
                     return Ok(child_id.to_string());
                 }
             }
+        }
+
+        // Fallback: documentChildren can return empty even when the drive's
+        // node list has the doc (relationship index lag, especially after
+        // ADD_FILE on a remote reactor). Scan the drive's state.global.nodes
+        // directly — that's the source of truth `docs list` and Connect use.
+        let nodes_query =
+            format!(r#"{{ document(identifier: "{drive_id}") {{ document {{ state }} }} }}"#,);
+        if let Ok(data) = client.query(&nodes_query, None).await
+            && let Some(nodes) = data
+                .pointer("/document/document/state/global/nodes")
+                .and_then(|v| v.as_array())
+        {
+            for node in nodes {
+                if node["kind"].as_str() != Some("file") {
+                    continue;
+                }
+                let node_id = node["id"].as_str().unwrap_or("");
+                let node_name = node["name"].as_str().unwrap_or("");
+                if (is_uuid && node_id == doc_part) || node_name.eq_ignore_ascii_case(doc_part) {
+                    return Ok(node_id.to_string());
+                }
+            }
+        }
+
+        // As a last resort: if the user passed a UUID, try resolving it
+        // directly (it might exist on the reactor even if not indexed under
+        // this drive yet). The caller asked for a specific UUID, so honor it.
+        if is_uuid && let Ok(id) = resolve_single_doc(client, doc_part).await {
+            return Ok(id);
         }
 
         bail!(

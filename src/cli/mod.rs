@@ -111,6 +111,19 @@ pub enum Commands {
         /// Target drive ID or slug
         #[arg(long)]
         drive: String,
+        /// Treat per-op failures as hard errors. With this flag, any op
+        /// rejected by the reactor ends the import with a non-zero exit
+        /// code. Without it, failures are reported per-doc and the import
+        /// continues with whatever ops did succeed.
+        #[arg(long)]
+        strict: bool,
+        /// Optional path to a JSON file mapping old document UUIDs → new
+        /// UUIDs, applied to op inputs to rewrite cross-document
+        /// references when importing a snapshot from another reactor.
+        /// Within a single import invocation the CLI also builds this map
+        /// automatically as documents are created.
+        #[arg(long, value_name = "FILE")]
+        id_mapping: Option<String>,
     },
 
     /// Manage authentication
@@ -163,7 +176,7 @@ pub async fn dispatch(
 ) -> Result<()> {
     match command {
         Commands::Init => init::run().await,
-        Commands::Config(cmd) => config::run(cmd, format).await,
+        Commands::Config(cmd) => config::run(cmd, format, profile).await,
         Commands::Introspect => introspect::run(profile, quiet).await,
         Commands::Ping => ping(profile, quiet).await,
         Commands::Info => info(profile, format).await,
@@ -175,8 +188,14 @@ pub async fn dispatch(
         Commands::Ops(args) => ops::run(args, format, profile).await,
         Commands::Query(args) => query::run(args, format, profile).await,
         Commands::Export(cmd) => import_export::run_export(cmd, format, profile, quiet).await,
-        Commands::Import { files, drive } => {
-            import_export::run_import(files, drive, format, profile, quiet).await
+        Commands::Import {
+            files,
+            drive,
+            strict,
+            id_mapping,
+        } => {
+            import_export::run_import(files, drive, strict, id_mapping, format, profile, quiet)
+                .await
         }
         Commands::Auth(cmd) => auth::run(cmd, format, profile).await,
         Commands::Watch(cmd) => watch::run(cmd, format, profile, quiet).await,

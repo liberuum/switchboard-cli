@@ -765,6 +765,33 @@ async fn fetch_document(
         }
     }
 
+    // Sanity check: if the document's non-document-scope revisions indicate
+    // history exists but `documentOperations` came back empty, surface the
+    // discrepancy instead of writing a silently-empty operations.json. This
+    // is the symptom in SWITCHBOARD_CLI_BUGS.md Bug 3 (revision > 0 but
+    // exported ops empty) — knowing about it is the first step.
+    if all_ops.is_empty() && !filter.has_filters() {
+        let non_doc_revs = doc
+            .pointer("/revisionsList")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|r| r["scope"].as_str() != Some("document"))
+                    .filter_map(|r| r["revision"].as_u64())
+                    .sum::<u64>()
+            })
+            .unwrap_or(0);
+        if non_doc_revs > 0 {
+            eprintln!(
+                "  {} document '{}' reports {} non-document revision(s) but \
+                 documentOperations returned 0 — exported operations.json will be empty",
+                "⚠".yellow(),
+                doc["name"].as_str().unwrap_or(doc_id),
+                non_doc_revs,
+            );
+        }
+    }
+
     // Strip context.signer from exported operations. Signatures are bound to
     // the original document ID — when imported into a new document, the reactor
     // would reject them with "signature verification returned false". Stripping
@@ -866,11 +893,14 @@ fn format_bytes(bytes: u64) -> String {
 pub async fn run_import(
     files: Vec<String>,
     drive: String,
+    strict: bool,
+    id_mapping_path: Option<String>,
     _format: OutputFormat,
     profile_name: Option<&str>,
     quiet: bool,
 ) -> Result<()> {
-    let (_name, _profile, client, cache) = helpers::setup_with_cache(profile_name)?;
+    let (pname, _profile, client, mut cache) = helpers::setup_with_cache(profile_name)?;
+    let mut introspected = false;
 
     if files.is_empty() {
         bail!("No .phd files specified");
@@ -879,14 +909,41 @@ pub async fn run_import(
     // Resolve the drive identifier
     let drive_id = helpers::resolve_doc(&client, &drive).await?;
 
+    // Old → new document UUID map. Seeded from `--id-mapping <file>` if
+    // provided, then extended automatically as documents are created so that
+    // ops referencing earlier docs by their original UUID get rewritten
+    // before being dispatched.
+    let mut id_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(path) = id_mapping_path.as_deref() {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read --id-mapping file '{path}': {e}"))?;
+        let parsed: std::collections::HashMap<String, String> = serde_json::from_str(&raw)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "--id-mapping file '{path}' is not a valid JSON object of old→new strings: {e}"
+                )
+            })?;
+        if !quiet {
+            eprintln!(
+                "  {} Loaded {} entries from --id-mapping",
+                "ℹ".cyan(),
+                parsed.len()
+            );
+        }
+        id_map.extend(parsed);
+    }
+
     if !quiet {
         println!(
-            "  Importing {} file(s) into drive '{drive}'...",
-            files.len()
+            "  Importing {} file(s) into drive '{drive}'{}...",
+            files.len(),
+            if strict { " (strict mode)" } else { "" }
         );
     }
 
     let mut success = 0;
+    let mut total_ops_attempted = 0;
+    let mut total_ops_failed = 0;
 
     for file_str in &files {
         let path = Path::new(file_str);
@@ -917,12 +974,33 @@ pub async fn run_import(
             println!("  Ops:  {ops_count}");
         }
 
-        // Find the matching model
+        // Find the matching model. If the type is unknown, re-introspect once
+        // (handles fresh profiles or reactor restarts that loaded new packages)
+        // before giving up — same behavior as `docs create` and `docs mutate`.
+        if cache.find_model(doc_type).is_none() && !introspected {
+            if !quiet {
+                eprintln!(
+                    "  {} Type '{doc_type}' not in cache — re-introspecting...",
+                    "ℹ".cyan()
+                );
+            }
+            match crate::graphql::introspection::run_introspection(&client).await {
+                Ok(new_cache) => {
+                    let _ = crate::graphql::introspection::save_cache(&pname, &new_cache);
+                    cache = new_cache;
+                }
+                Err(e) => {
+                    eprintln!("  {} Re-introspection failed: {e}", "⚠".yellow());
+                }
+            }
+            introspected = true;
+        }
         let model = match cache.find_model(doc_type) {
             Some(m) => m,
             None => {
                 println!(
-                    "  {} No matching model found for type '{doc_type}'",
+                    "  {} No matching model found for type '{doc_type}' \
+                     (try `switchboard introspect` to refresh the schema cache)",
                     "✗".red()
                 );
                 continue;
@@ -976,73 +1054,190 @@ pub async fn run_import(
             }
         };
 
+        // Record the old → new ID mapping so subsequent ops within this
+        // batch can rewrite cross-document references on the fly.
+        if !contents.header.id.is_empty() {
+            id_map.insert(contents.header.id.clone(), new_doc_id.clone());
+        }
+
         // Step 2: Push operations via model-specific mutations
+        let mut stats = OpStats::default();
         if ops_count > 0 {
             match push_operations_via_mutate(
                 &client,
                 &new_doc_id,
                 &contents.operations,
                 model,
+                &id_map,
                 quiet,
             )
             .await
             {
-                Ok(pushed) => {
-                    if !quiet {
-                        println!("  Pushed: {pushed} operations");
-                    }
-                }
+                Ok(s) => stats = s,
                 Err(e) => {
                     println!("  {} Failed to push operations: {e}", "✗".red());
                     continue;
+                }
+            }
+            if !quiet {
+                if stats.failed == 0 {
+                    println!("  Pushed: {} operations", stats.succeeded);
+                } else {
+                    println!(
+                        "  Pushed: {}/{} operations ({} failed)",
+                        stats.succeeded, stats.attempted, stats.failed
+                    );
                 }
             }
         } else if !quiet {
             println!("  No operations to push");
         }
 
-        // Step 3: Verify state matches the .phd current-state
+        total_ops_attempted += stats.attempted;
+        total_ops_failed += stats.failed;
+
+        // Step 3: Verify state matches the .phd current-state.
+        //
+        // The verdict is qualified by whether ops actually applied: if any
+        // op was rejected, we never claim "EXACT MATCH" even if the JSON
+        // happens to match (it might match because both sides are empty —
+        // which is the silent-corruption mode the bug report calls out).
         tokio::time::sleep(std::time::Duration::from_millis(WRITE_DELAY_MS)).await;
+        let state_match = verify_state(&client, &new_doc_id, &contents.current_state.global).await;
         if !quiet {
-            match verify_state(&client, &new_doc_id, &contents.current_state.global).await {
-                Ok(true) => println!("  State:  {} EXACT MATCH", "✓".green()),
-                Ok(false) => println!("  State:  {} MISMATCH (see diffs above)", "~".yellow()),
-                Err(e) => println!("  State:  {} Could not verify: {e}", "~".yellow()),
+            match (&state_match, stats.failed) {
+                (Ok(true), 0) => println!("  State:  {} EXACT MATCH", "✓".green()),
+                (Ok(true), _) => println!(
+                    "  State:  {} states equal but {} op(s) failed — content may be missing",
+                    "⚠".yellow(),
+                    stats.failed
+                ),
+                (Ok(false), _) => {
+                    println!("  State:  {} MISMATCH (see diffs above)", "✗".red())
+                }
+                (Err(e), _) => println!("  State:  {} Could not verify: {e}", "~".yellow()),
             }
         }
 
+        // From the CLI's perspective, the import succeeded iff every op the
+        // reactor accepted was the ones we tried to push. A state mismatch on
+        // a volatile field (e.g. `lastModified` updated when ops are replayed)
+        // is informational only — under --strict we surface it as a failure,
+        // but normal mode treats the doc as successfully imported.
+        let ops_failed = stats.failed > 0;
+        let state_mismatched = matches!(state_match, Ok(false));
+        let doc_failed = ops_failed || (strict && state_mismatched);
         if !quiet {
-            println!("  {} Imported", "✓".green());
+            if doc_failed {
+                println!("  {} Imported with errors", "⚠".yellow());
+            } else if state_mismatched {
+                println!(
+                    "  {} Imported (state has drift on volatile fields)",
+                    "✓".green()
+                );
+            } else {
+                println!("  {} Imported", "✓".green());
+            }
         }
-        success += 1;
+        if doc_failed && strict {
+            bail!(
+                "import aborted (--strict): document '{}' had {} failed op(s){}",
+                doc_name,
+                stats.failed,
+                if state_mismatched {
+                    " and a state mismatch"
+                } else {
+                    ""
+                }
+            );
+        }
+        if !doc_failed {
+            success += 1;
+        }
     }
 
     if !quiet {
+        let icon = if total_ops_failed == 0 {
+            "✓".green().to_string()
+        } else {
+            "⚠".yellow().to_string()
+        };
         println!(
-            "\n{} {success}/{} documents imported into drive '{drive}'",
-            "✓".green(),
+            "\n{icon} {success}/{} documents imported into drive '{drive}' \
+             ({total_ops_attempted} ops attempted, {total_ops_failed} failed)",
+            files.len(),
+        );
+    }
+    if total_ops_failed > 0 && strict {
+        bail!(
+            "import finished with {} failed op(s) (--strict)",
+            total_ops_failed
+        );
+    }
+    if success < files.len() {
+        bail!(
+            "import finished with errors: only {success}/{} documents fully imported",
             files.len()
         );
     }
     Ok(())
 }
 
+/// Per-document op-application stats accumulated during import.
+#[derive(Default)]
+struct OpStats {
+    attempted: usize,
+    succeeded: usize,
+    failed: usize,
+}
+
+/// Recursively rewrite UUID references in a JSON value using the old → new
+/// ID map built during import. We walk every string and replace it whole if
+/// it matches a key in the map. This catches cross-document references in
+/// fields like `targetDocumentId`, `noteRef`, `childRef`, contributor lists,
+/// `operatorId`, etc., without having to enumerate them by name.
+fn rewrite_ids_in_value(value: &mut Value, id_map: &std::collections::HashMap<String, String>) {
+    match value {
+        Value::String(s) => {
+            if let Some(new) = id_map.get(s.as_str()) {
+                *s = new.clone();
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                rewrite_ids_in_value(v, id_map);
+            }
+        }
+        Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                rewrite_ids_in_value(v, id_map);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Push operations via model-specific mutations (e.g. DocumentModel_setModelName).
 /// Skips document-scope ops (CREATE_DOCUMENT, UPGRADE_DOCUMENT) since the doc
 /// was already created. Converts SCREAMING_SNAKE op types to camelCase and
 /// looks them up in the introspection cache for proper typed mutations.
+///
+/// Cross-document references in op inputs (any UUID in `id_map`) are rewritten
+/// to the new local UUIDs so an imported drive's internal references stay
+/// connected after the original IDs are reassigned.
 async fn push_operations_via_mutate(
     client: &GraphQLClient,
     doc_id: &str,
     operations: &PhdOperations,
     model: &crate::graphql::introspection::DocumentModel,
+    id_map: &std::collections::HashMap<String, String>,
     quiet: bool,
-) -> Result<usize> {
-    let mut total_pushed = 0;
+) -> Result<OpStats> {
+    let mut stats = OpStats::default();
 
     // Iterate all non-document scopes (global, local, custom, etc.)
     for op in operations.domain_ops() {
-        let (op_type, input) = if let Some(action) = op.get("action") {
+        let (op_type, mut input) = if let Some(action) = op.get("action") {
             let t = action.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let i = action
                 .get("input")
@@ -1057,6 +1252,15 @@ async fn push_operations_via_mutate(
             (t.to_string(), i)
         };
 
+        stats.attempted += 1;
+
+        // Rewrite cross-document references using the old → new ID map.
+        // Done before camelCase lookup so the rewritten input is what we
+        // actually send. No-op if id_map is empty.
+        if !id_map.is_empty() {
+            rewrite_ids_in_value(&mut input, id_map);
+        }
+
         // Convert SCREAMING_SNAKE (e.g. SET_MODEL_NAME) to camelCase (e.g. setModelName)
         let camel_name = screaming_snake_to_camel(&op_type);
 
@@ -1067,6 +1271,7 @@ async fn push_operations_via_mutate(
                 if !quiet {
                     println!("    ⚠ {op_type}: no matching mutation found (tried {camel_name})");
                 }
+                stats.failed += 1;
                 continue;
             }
         };
@@ -1133,25 +1338,26 @@ async fn push_operations_via_mutate(
             (query, Value::Object(vars_map))
         };
 
-        if total_pushed > 0 {
+        if stats.succeeded > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(WRITE_DELAY_MS)).await;
         }
 
         match client.query(&mutation, Some(&vars)).await {
             Ok(_) => {
-                total_pushed += 1;
+                stats.succeeded += 1;
             }
             Err(e) => {
                 let err_str = format!("{e}");
                 if !quiet {
-                    println!("    ⚠ {op_type}: {err_str}");
+                    println!("    {} {op_type}: {err_str}", "✗".red());
                 }
+                stats.failed += 1;
                 // Continue with remaining ops
             }
         }
     }
 
-    Ok(total_pushed)
+    Ok(stats)
 }
 
 /// Convert SCREAMING_SNAKE_CASE to camelCase.
