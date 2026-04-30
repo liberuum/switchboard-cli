@@ -958,6 +958,9 @@ pub async fn run_import(
     let mut success = 0;
     let mut total_ops_attempted = 0;
     let mut total_ops_failed = 0;
+    // Ops with forward UUID references queue here during the per-doc loop
+    // and drain after every doc has been created (so the id_map is final).
+    let mut deferred_ops: Vec<DeferredOp> = Vec::new();
 
     for entry in &entries {
         let path = entry.path.as_path();
@@ -1126,9 +1129,12 @@ pub async fn run_import(
             match push_operations_via_mutate(
                 &client,
                 &new_doc_id,
+                doc_type,
+                doc_name,
                 &contents.operations,
                 model,
                 &id_map,
+                &mut deferred_ops,
                 quiet,
             )
             .await
@@ -1140,14 +1146,15 @@ pub async fn run_import(
                 }
             }
             if !quiet {
-                if stats.failed == 0 {
-                    println!("  Pushed: {} operations", stats.succeeded);
-                } else {
-                    println!(
-                        "  Pushed: {}/{} operations ({} failed)",
-                        stats.succeeded, stats.attempted, stats.failed
-                    );
+                let mut parts = Vec::new();
+                parts.push(format!("{} pushed", stats.succeeded));
+                if stats.failed > 0 {
+                    parts.push(format!("{} failed", stats.failed));
                 }
+                if stats.deferred > 0 {
+                    parts.push(format!("{} deferred (forward refs)", stats.deferred));
+                }
+                println!("  Ops:    {} of {}", parts.join(", "), stats.attempted);
             }
         } else if !quiet {
             println!("  No operations to push");
@@ -1216,6 +1223,35 @@ pub async fn run_import(
         }
     }
 
+    // ── Drain deferred forward-ref ops ───────────────────────────────────
+    //
+    // Ops queued during the per-doc loop because their inputs referenced
+    // a UUID we hadn't yet seen the new ID for. Now that every doc is
+    // created and id_map is complete, rewrite their inputs and dispatch.
+    let (deferred_succeeded, deferred_failed) = if !deferred_ops.is_empty() {
+        if !quiet {
+            println!(
+                "\n  ── Drain: {} deferred forward-ref op(s) ──",
+                deferred_ops.len()
+            );
+        }
+        let (s, f) = drain_deferred_ops(&client, &deferred_ops, &cache, &id_map, quiet).await;
+        total_ops_attempted += deferred_ops.len();
+        total_ops_failed += f;
+        if !quiet {
+            let icon = if f == 0 {
+                "✓".green().to_string()
+            } else {
+                "⚠".yellow().to_string()
+            };
+            println!("  {icon} Drained: {s} resolved, {f} failed");
+        }
+        (s, f)
+    } else {
+        (0, 0)
+    };
+    let _ = deferred_succeeded; // recorded for future use; not surfaced in the final line
+
     if !quiet {
         let icon = if total_ops_failed == 0 {
             "✓".green().to_string()
@@ -1233,7 +1269,7 @@ pub async fn run_import(
             total_ops_failed
         );
     }
-    if success < total_inputs {
+    if success < total_inputs || deferred_failed > 0 && strict {
         bail!(
             "import finished with errors: only {success}/{total_inputs} documents fully imported",
         );
@@ -1247,6 +1283,26 @@ struct OpStats {
     attempted: usize,
     succeeded: usize,
     failed: usize,
+    /// Ops whose input references a UUID we haven't seen the new ID for yet
+    /// (forward refs to a doc later in the import). These are queued and
+    /// drained after every doc has been created so the now-complete id_map
+    /// can rewrite cross-document references correctly.
+    deferred: usize,
+}
+
+/// An op that was queued during the per-doc pass because at least one
+/// UUID-shaped string in its input wasn't yet in the id_map. Drained at the
+/// end of `run_import` once the map is final.
+struct DeferredOp {
+    /// New (local) doc UUID this op will apply to.
+    doc_id: String,
+    /// Source document type — used at drain time to look up the correct
+    /// model entry in the introspection cache.
+    doc_type: String,
+    /// Human-readable doc name for error reporting.
+    doc_name: String,
+    /// Original op JSON (action.type / action.input live underneath).
+    op: Value,
 }
 
 /// One file slated for import, paired with the folder hierarchy it should land
@@ -1406,6 +1462,23 @@ async fn ensure_folder_chain(
     Ok(current_parent)
 }
 
+/// Returns true if `value` contains any UUID-shaped string that is not in
+/// the id_map. Used to decide whether an op references a doc we haven't
+/// imported yet (forward reference) — such ops get deferred so the second
+/// pass can rewrite them with the now-complete map.
+///
+/// "UUID-shaped" matches `helpers::is_uuid` (8-4-4-4-12 hex). Strings that
+/// aren't UUIDs are ignored, so plain text content with uuid-like substrings
+/// won't trigger deferral.
+fn has_forward_ref(value: &Value, id_map: &std::collections::HashMap<String, String>) -> bool {
+    match value {
+        Value::String(s) => helpers::is_uuid(s) && !id_map.contains_key(s.as_str()),
+        Value::Array(arr) => arr.iter().any(|v| has_forward_ref(v, id_map)),
+        Value::Object(map) => map.values().any(|v| has_forward_ref(v, id_map)),
+        _ => false,
+    }
+}
+
 /// Recursively rewrite UUID references in a JSON value using the old → new
 /// ID map built during import. We walk every string and replace it whole if
 /// it matches a key in the map. This catches cross-document references in
@@ -1440,12 +1513,22 @@ fn rewrite_ids_in_value(value: &mut Value, id_map: &std::collections::HashMap<St
 /// Cross-document references in op inputs (any UUID in `id_map`) are rewritten
 /// to the new local UUIDs so an imported drive's internal references stay
 /// connected after the original IDs are reassigned.
+///
+/// When an op's input references a UUID that's not yet in `id_map` (a forward
+/// reference to a doc later in the import), the op is queued in
+/// `deferred_ops` instead of dispatched. After every doc has been created,
+/// `run_import` drains the queue with the now-complete map. This keeps
+/// bidirectional links between docs intact across a single-pass import.
+#[allow(clippy::too_many_arguments)]
 async fn push_operations_via_mutate(
     client: &GraphQLClient,
     doc_id: &str,
+    doc_type: &str,
+    doc_name: &str,
     operations: &PhdOperations,
     model: &crate::graphql::introspection::DocumentModel,
     id_map: &std::collections::HashMap<String, String>,
+    deferred_ops: &mut Vec<DeferredOp>,
     quiet: bool,
 ) -> Result<OpStats> {
     let mut stats = OpStats::default();
@@ -1469,6 +1552,23 @@ async fn push_operations_via_mutate(
 
         stats.attempted += 1;
 
+        // If any UUID in the op input is unknown to the id_map, this is a
+        // forward reference to a doc later in the import. Queue it for the
+        // drain phase rather than dispatching with a UUID that doesn't exist
+        // on the destination reactor. External UUIDs (refs to docs outside
+        // the import) will also queue and dispatch at drain time with the
+        // original UUID — same outcome as today, just delayed.
+        if has_forward_ref(&input, id_map) {
+            stats.deferred += 1;
+            deferred_ops.push(DeferredOp {
+                doc_id: doc_id.to_string(),
+                doc_type: doc_type.to_string(),
+                doc_name: doc_name.to_string(),
+                op: op.clone(),
+            });
+            continue;
+        }
+
         // Rewrite cross-document references using the old → new ID map.
         // Done before camelCase lookup so the rewritten input is what we
         // actually send. No-op if id_map is empty.
@@ -1476,95 +1576,15 @@ async fn push_operations_via_mutate(
             rewrite_ids_in_value(&mut input, id_map);
         }
 
-        // Convert SCREAMING_SNAKE (e.g. SET_MODEL_NAME) to camelCase (e.g. setModelName)
-        let camel_name = screaming_snake_to_camel(&op_type);
-
-        // Find the matching operation in the model's introspection cache
-        let model_op = match model.operations.iter().find(|o| o.operation == camel_name) {
-            Some(op) => op,
-            None => {
-                if !quiet {
-                    println!("    ⚠ {op_type}: no matching mutation found (tried {camel_name})");
-                }
-                stats.failed += 1;
-                continue;
-            }
-        };
-
-        // Build the mutation using the model's namespace-aware helper
-        let has_input_arg = model_op.args.iter().any(|a| a.name == "input");
-        let selection = "{ id }";
-
-        let (mutation, vars) = if has_input_arg {
-            let input_type = model_op
-                .args
-                .iter()
-                .find(|a| a.name == "input")
-                .map(|a| &a.type_name)
-                .unwrap();
-            let required = model_op
-                .args
-                .iter()
-                .find(|a| a.name == "input")
-                .is_some_and(|a| a.required);
-            let bang = if required { "!" } else { "" };
-
-            let args_str = "docId: $docId, input: $input";
-            let body = model.mutation_body(&model_op.full_name, args_str, selection);
-            let query = format!("mutation($docId: PHID!, $input: {input_type}{bang}) {{ {body} }}");
-            let vars = serde_json::json!({
-                "docId": doc_id,
-                "input": input,
-            });
-            (query, vars)
-        } else {
-            let mut var_decls = vec!["$docId: PHID!".to_string()];
-            let mut arg_refs = vec!["docId: $docId".to_string()];
-            let mut vars_map = serde_json::Map::new();
-            vars_map.insert("docId".into(), Value::String(doc_id.to_string()));
-
-            if let Value::Object(map) = &input {
-                for (key, val) in map {
-                    let arg_type = model_op
-                        .args
-                        .iter()
-                        .find(|a| a.name == *key)
-                        .map(|a| a.type_name.as_str())
-                        .unwrap_or("String");
-                    let required = model_op
-                        .args
-                        .iter()
-                        .find(|a| a.name == *key)
-                        .is_some_and(|a| a.required);
-                    let bang = if required { "!" } else { "" };
-
-                    var_decls.push(format!("${key}: {arg_type}{bang}"));
-                    arg_refs.push(format!("{key}: ${key}"));
-                    vars_map.insert(key.clone(), val.clone());
-                }
-            }
-
-            let args_str = arg_refs.join(", ");
-            let body = model.mutation_body(&model_op.full_name, &args_str, selection);
-            let query = format!(
-                "mutation({decls}) {{ {body} }}",
-                decls = var_decls.join(", "),
-            );
-            (query, Value::Object(vars_map))
-        };
-
         if stats.succeeded > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(WRITE_DELAY_MS)).await;
         }
 
-        match client.query(&mutation, Some(&vars)).await {
-            Ok(_) => {
-                stats.succeeded += 1;
-            }
+        match dispatch_op(client, doc_id, &op_type, input, model).await {
+            Ok(()) => stats.succeeded += 1,
             Err(e) => {
-                let err_str = format!("{e}");
                 if !quiet {
-                    println!("    {} {op_type}: {err_str}", "✗".red());
+                    println!("    {} {op_type}: {e}", "✗".red());
                 }
                 stats.failed += 1;
                 // Continue with remaining ops
@@ -1573,6 +1593,166 @@ async fn push_operations_via_mutate(
     }
 
     Ok(stats)
+}
+
+/// Dispatch one op against a single document. Looks up the matching mutation
+/// in the model's introspection cache, builds either an `(docId, input)` or
+/// flattened-args mutation depending on the operation's signature, and runs
+/// it. Returns Err with a human-readable message on any failure.
+async fn dispatch_op(
+    client: &GraphQLClient,
+    doc_id: &str,
+    op_type: &str,
+    input: Value,
+    model: &crate::graphql::introspection::DocumentModel,
+) -> std::result::Result<(), String> {
+    let camel_name = screaming_snake_to_camel(op_type);
+
+    let model_op = match model.operations.iter().find(|o| o.operation == camel_name) {
+        Some(op) => op,
+        None => {
+            return Err(format!("no matching mutation found (tried {camel_name})"));
+        }
+    };
+
+    let has_input_arg = model_op.args.iter().any(|a| a.name == "input");
+    let selection = "{ id }";
+
+    let (mutation, vars) = if has_input_arg {
+        let input_type = model_op
+            .args
+            .iter()
+            .find(|a| a.name == "input")
+            .map(|a| &a.type_name)
+            .unwrap();
+        let required = model_op
+            .args
+            .iter()
+            .find(|a| a.name == "input")
+            .is_some_and(|a| a.required);
+        let bang = if required { "!" } else { "" };
+
+        let args_str = "docId: $docId, input: $input";
+        let body = model.mutation_body(&model_op.full_name, args_str, selection);
+        let query = format!("mutation($docId: PHID!, $input: {input_type}{bang}) {{ {body} }}");
+        let vars = serde_json::json!({
+            "docId": doc_id,
+            "input": input,
+        });
+        (query, vars)
+    } else {
+        let mut var_decls = vec!["$docId: PHID!".to_string()];
+        let mut arg_refs = vec!["docId: $docId".to_string()];
+        let mut vars_map = serde_json::Map::new();
+        vars_map.insert("docId".into(), Value::String(doc_id.to_string()));
+
+        if let Value::Object(map) = &input {
+            for (key, val) in map {
+                let arg_type = model_op
+                    .args
+                    .iter()
+                    .find(|a| a.name == *key)
+                    .map(|a| a.type_name.as_str())
+                    .unwrap_or("String");
+                let required = model_op
+                    .args
+                    .iter()
+                    .find(|a| a.name == *key)
+                    .is_some_and(|a| a.required);
+                let bang = if required { "!" } else { "" };
+
+                var_decls.push(format!("${key}: {arg_type}{bang}"));
+                arg_refs.push(format!("{key}: ${key}"));
+                vars_map.insert(key.clone(), val.clone());
+            }
+        }
+
+        let args_str = arg_refs.join(", ");
+        let body = model.mutation_body(&model_op.full_name, &args_str, selection);
+        let query = format!(
+            "mutation({decls}) {{ {body} }}",
+            decls = var_decls.join(", "),
+        );
+        (query, Value::Object(vars_map))
+    };
+
+    client
+        .query(&mutation, Some(&vars))
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("{e}"))
+}
+
+/// Re-attempt deferred ops after every doc has been created and id_map is
+/// final. Each op's input is re-rewritten with the now-complete map, then
+/// dispatched. Returns (succeeded, failed) counts.
+async fn drain_deferred_ops(
+    client: &GraphQLClient,
+    deferred: &[DeferredOp],
+    cache: &crate::graphql::IntrospectionCache,
+    id_map: &std::collections::HashMap<String, String>,
+    quiet: bool,
+) -> (usize, usize) {
+    let mut succeeded = 0;
+    let mut failed = 0;
+    for (i, d) in deferred.iter().enumerate() {
+        // Pull op_type and input out the same way push does.
+        let (op_type, mut input) = if let Some(action) = d.op.get("action") {
+            let t = action.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let i = action
+                .get("input")
+                .cloned()
+                .unwrap_or(Value::Object(serde_json::Map::new()));
+            (t.to_string(), i)
+        } else {
+            let t = d.op.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let input_text =
+                d.op.get("inputText")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}");
+            let i: Value =
+                serde_json::from_str(input_text).unwrap_or(Value::Object(serde_json::Map::new()));
+            (t.to_string(), i)
+        };
+
+        // Rewrite once more — by now the map is complete, so internal refs
+        // resolve. Any UUID still missing is an external ref and dispatched
+        // as-is (same outcome as a non-deferred op with an external ref).
+        if !id_map.is_empty() {
+            rewrite_ids_in_value(&mut input, id_map);
+        }
+
+        let model = match cache.find_model(&d.doc_type) {
+            Some(m) => m,
+            None => {
+                if !quiet {
+                    println!(
+                        "    {} {} ({op_type}): model '{}' missing from cache",
+                        "✗".red(),
+                        d.doc_name,
+                        d.doc_type
+                    );
+                }
+                failed += 1;
+                continue;
+            }
+        };
+
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(WRITE_DELAY_MS)).await;
+        }
+
+        match dispatch_op(client, &d.doc_id, &op_type, input, model).await {
+            Ok(()) => succeeded += 1,
+            Err(e) => {
+                if !quiet {
+                    println!("    {} {} ({op_type}): {e}", "✗".red(), d.doc_name);
+                }
+                failed += 1;
+            }
+        }
+    }
+    (succeeded, failed)
 }
 
 /// Convert SCREAMING_SNAKE_CASE to camelCase.
@@ -1658,4 +1838,100 @@ async fn verify_state(
     }
 
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_forward_ref, rewrite_ids_in_value};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    const A: &str = "11111111-1111-4111-8111-111111111111";
+    const B: &str = "22222222-2222-4222-8222-222222222222";
+    const C: &str = "33333333-3333-4333-8333-333333333333";
+
+    #[test]
+    fn no_uuids_means_no_forward_ref() {
+        let m = map(&[]);
+        assert!(!has_forward_ref(&json!({ "title": "hello" }), &m));
+        assert!(!has_forward_ref(&json!({ "amount": 42 }), &m));
+        assert!(!has_forward_ref(&json!([1, 2, 3]), &m));
+    }
+
+    #[test]
+    fn known_uuid_is_not_a_forward_ref() {
+        let m = map(&[(A, "new-a")]);
+        assert!(!has_forward_ref(&json!({ "targetDocumentId": A }), &m));
+    }
+
+    #[test]
+    fn unknown_uuid_is_a_forward_ref() {
+        let m = map(&[(A, "new-a")]);
+        // B is not in the map → forward (or external) ref
+        assert!(has_forward_ref(&json!({ "targetDocumentId": B }), &m));
+    }
+
+    #[test]
+    fn deeply_nested_unknown_uuid_detected() {
+        let m = map(&[(A, "new-a")]);
+        let v = json!({
+            "links": [
+                { "id": "abc", "targetDocumentId": A },
+                { "id": "def", "targetDocumentId": C },  // C unknown
+            ]
+        });
+        assert!(has_forward_ref(&v, &m));
+    }
+
+    #[test]
+    fn all_uuids_known_means_no_forward_ref_even_when_nested() {
+        let m = map(&[(A, "new-a"), (B, "new-b")]);
+        let v = json!({
+            "links": [
+                { "targetDocumentId": A },
+                { "targetDocumentId": B },
+            ]
+        });
+        assert!(!has_forward_ref(&v, &m));
+    }
+
+    #[test]
+    fn non_uuid_strings_ignored() {
+        let m = map(&[]);
+        // "11111111" looks vaguely uuidish but isn't 36 chars in 8-4-4-4-12 form
+        assert!(!has_forward_ref(&json!({ "id": "not-a-uuid" }), &m));
+        assert!(!has_forward_ref(&json!({ "id": "11111111" }), &m));
+    }
+
+    #[test]
+    fn rewrite_replaces_known_uuids() {
+        let m = map(&[(A, "new-a"), (B, "new-b")]);
+        let mut v = json!({
+            "targetDocumentId": A,
+            "noteRef": B,
+            "title": "unchanged",
+            "nested": { "childRef": A }
+        });
+        rewrite_ids_in_value(&mut v, &m);
+        assert_eq!(v["targetDocumentId"], "new-a");
+        assert_eq!(v["noteRef"], "new-b");
+        assert_eq!(v["title"], "unchanged");
+        assert_eq!(v["nested"]["childRef"], "new-a");
+    }
+
+    #[test]
+    fn rewrite_leaves_unknown_uuids_alone() {
+        let m = map(&[(A, "new-a")]);
+        let mut v = json!({ "targetDocumentId": B });
+        rewrite_ids_in_value(&mut v, &m);
+        // External UUIDs pass through unchanged
+        assert_eq!(v["targetDocumentId"], B);
+    }
 }

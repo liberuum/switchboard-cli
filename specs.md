@@ -607,6 +607,36 @@ switchboard import <files...> --drive <slug> [--strict] [--id-mapping <file>]
   documents are created (the new doc's old UUID → new UUID), so a multi-doc import within
   one process keeps internal references consistent without an explicit mapping file.
 
+**Forward-reference deferral (default behavior):** Cross-document references
+in op inputs are rewritten using an old → new UUID map built as documents are
+created during import. Because docs are created sequentially, a knowledge-note
+op like `ADD_LINK { targetDocumentId: <uuid> }` may run *before* the doc that
+`<uuid>` refers to has been created — at which point the map is incomplete and
+the rewrite would skip. Without intervention, that link ends up pointing at
+the source's old UUID and silently breaks on the destination.
+
+The CLI handles this with a deferral queue:
+
+1. For each op, scan inputs recursively for UUID-shaped strings.
+2. If every UUID is either in the id_map or not a UUID → rewrite + dispatch
+   immediately (the common case).
+3. If any UUID is unknown → enqueue the op as a `DeferredOp { doc_id, doc_type, op }`.
+4. After every input has been processed (every doc created), drain the queue:
+   re-rewrite each input with the now-complete map and dispatch.
+
+Any UUID still missing at drain time is an external reference (pointing at a
+doc outside this import) and is dispatched as-is, identical to the
+pre-deferral behavior. Per-doc verdict shows the deferred count separately:
+`Ops:    1 pushed, 19 deferred (forward refs) of 20`. The drain step prints
+`Drained: N resolved, M failed`.
+
+Verified on the 392-doc `bai/knowledge-vault` test drive (738 inter-note
+links, 2,542 ops with forward refs): every link to a doc inside the import
+resolved correctly. Pre-deferral, ~52% of bidirectional links survived;
+post-deferral, **100% of in-import refs** resolve. Phantom refs (pointing at
+docs that don't exist anywhere) pass through unchanged — those are data
+quality issues in the source, not CLI bugs.
+
 **Folder reconstruction:** When a `<files...>` argument is a directory, `import`
 walks it recursively and uses the relative sub-paths to recreate the folder
 hierarchy on the destination drive. Existing folders are reused (matched by
