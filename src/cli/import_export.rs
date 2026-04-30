@@ -909,6 +909,20 @@ pub async fn run_import(
     // Resolve the drive identifier
     let drive_id = helpers::resolve_doc(&client, &drive).await?;
 
+    // Expand any directory args into individual .phd files, capturing the
+    // sub-path components so we can reproduce the source's folder hierarchy
+    // on the destination drive. Plain file args land at drive root.
+    let entries = expand_phd_inputs(&files);
+    if entries.is_empty() {
+        bail!("No .phd files found in the supplied paths");
+    }
+    let total_inputs = entries.len();
+
+    // Pre-cache existing folders so repeat imports reuse folders instead of
+    // creating duplicates with the same name/parent.
+    let mut folder_cache = build_existing_folder_cache(&client, &drive_id).await;
+    let nested_api = helpers::is_nested_api(&client).await;
+
     // Old → new document UUID map. Seeded from `--id-mapping <file>` if
     // provided, then extended automatically as documents are created so that
     // ops referencing earlier docs by their original UUID get rewritten
@@ -945,12 +959,12 @@ pub async fn run_import(
     let mut total_ops_attempted = 0;
     let mut total_ops_failed = 0;
 
-    for file_str in &files {
-        let path = Path::new(file_str);
+    for entry in &entries {
+        let path = entry.path.as_path();
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or(file_str);
+            .unwrap_or_else(|| path.to_str().unwrap_or("?"));
 
         if !quiet {
             println!("\n  ── {} ──", filename);
@@ -972,7 +986,30 @@ pub async fn run_import(
             println!("  Type: {doc_type}");
             println!("  Name: {doc_name}");
             println!("  Ops:  {ops_count}");
+            if !entry.folder_chain.is_empty() {
+                println!("  Path: {}", entry.folder_chain.join("/"));
+            }
         }
+
+        // Ensure the destination folder hierarchy exists, creating folders
+        // as needed. We do this before doc creation so the createDocument
+        // mutation can drop the new doc straight into the correct folder
+        // via parentIdentifier (skipping a follow-up moveNode round trip).
+        let parent_folder_id = match ensure_folder_chain(
+            &client,
+            &drive_id,
+            &entry.folder_chain,
+            &mut folder_cache,
+            nested_api,
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                println!("  {} Failed to create folder chain: {e}", "✗".red());
+                continue;
+            }
+        };
 
         // Find the matching model. If the type is unknown, re-introspect once
         // (handles fresh profiles or reactor restarts that loaded new packages)
@@ -1053,6 +1090,29 @@ pub async fn run_import(
                 continue;
             }
         };
+
+        // Move the doc into its target folder (if any). createDocument places
+        // the new doc at drive root; a follow-up moveNode lifts it into the
+        // matching folder so the destination drive mirrors the source layout.
+        if let Some(folder_id) = &parent_folder_id {
+            let move_mutation = if nested_api {
+                "mutation($docId: PHID!, $input: DocumentDrive_MoveNodeInput!) { \
+                 DocumentDrive { moveNode(docId: $docId, input: $input) { id } } }"
+            } else {
+                "mutation($docId: PHID!, $input: DocumentDrive_MoveNodeInput!) { \
+                 DocumentDrive_moveNode(docId: $docId, input: $input) { id } }"
+            };
+            let move_vars = serde_json::json!({
+                "docId": drive_id,
+                "input": {
+                    "srcFolder": new_doc_id,
+                    "targetParentFolder": folder_id,
+                }
+            });
+            if let Err(e) = client.query(move_mutation, Some(&move_vars)).await {
+                eprintln!("  {} Could not move doc into folder: {e}", "⚠".yellow());
+            }
+        }
 
         // Record the old → new ID mapping so subsequent ops within this
         // batch can rewrite cross-document references on the fly.
@@ -1163,9 +1223,8 @@ pub async fn run_import(
             "⚠".yellow().to_string()
         };
         println!(
-            "\n{icon} {success}/{} documents imported into drive '{drive}' \
+            "\n{icon} {success}/{total_inputs} documents imported into drive '{drive}' \
              ({total_ops_attempted} ops attempted, {total_ops_failed} failed)",
-            files.len(),
         );
     }
     if total_ops_failed > 0 && strict {
@@ -1174,10 +1233,9 @@ pub async fn run_import(
             total_ops_failed
         );
     }
-    if success < files.len() {
+    if success < total_inputs {
         bail!(
-            "import finished with errors: only {success}/{} documents fully imported",
-            files.len()
+            "import finished with errors: only {success}/{total_inputs} documents fully imported",
         );
     }
     Ok(())
@@ -1189,6 +1247,163 @@ struct OpStats {
     attempted: usize,
     succeeded: usize,
     failed: usize,
+}
+
+/// One file slated for import, paired with the folder hierarchy it should land
+/// in inside the destination drive. The `folder_chain` is empty for files
+/// passed directly on the command line; for files discovered by walking a
+/// directory argument it's the path components from that directory down to
+/// the file's parent.
+struct ImportEntry {
+    path: std::path::PathBuf,
+    folder_chain: Vec<String>,
+}
+
+/// Expand each input arg: directory args are walked recursively (their
+/// internal structure becomes folder_chain), file args land at drive root.
+fn expand_phd_inputs(paths: &[String]) -> Vec<ImportEntry> {
+    use std::path::Path;
+    let mut entries = Vec::new();
+    for p in paths {
+        let path = Path::new(p);
+        if path.is_dir() {
+            walk_phd_dir(path, path, &mut entries);
+        } else if path.is_file() {
+            entries.push(ImportEntry {
+                path: path.to_path_buf(),
+                folder_chain: vec![],
+            });
+        } else {
+            // Doesn't exist — keep the path as-is so the read step reports a
+            // meaningful "Failed to read" error rather than silently dropping it.
+            entries.push(ImportEntry {
+                path: path.to_path_buf(),
+                folder_chain: vec![],
+            });
+        }
+    }
+    entries
+}
+
+fn walk_phd_dir(base: &std::path::Path, current: &std::path::Path, out: &mut Vec<ImportEntry>) {
+    let Ok(read) = std::fs::read_dir(current) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            walk_phd_dir(base, &p, out);
+        } else if p.extension().and_then(|s| s.to_str()) == Some("phd") {
+            let rel = p.strip_prefix(base).unwrap_or(&p);
+            let folder_chain: Vec<String> = rel
+                .parent()
+                .map(|d| {
+                    d.components()
+                        .map(|c| c.as_os_str().to_string_lossy().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.push(ImportEntry {
+                path: p,
+                folder_chain,
+            });
+        }
+    }
+}
+
+/// Pre-populate a folder-path → UUID cache from a drive's existing nodes so
+/// repeat imports against the same drive reuse folders instead of duplicating
+/// them. The cache key is the full path from drive root, so "Billing/Aug" and
+/// "Other/Aug" are distinct entries.
+async fn build_existing_folder_cache(
+    client: &GraphQLClient,
+    drive_id: &str,
+) -> std::collections::HashMap<Vec<String>, String> {
+    let mut out = std::collections::HashMap::new();
+    let escaped = drive_id.replace('"', r#"\""#);
+    let q = format!(r#"{{ document(identifier: "{escaped}") {{ document {{ state }} }} }}"#);
+    let Ok(data) = client.query(&q, None).await else {
+        return out;
+    };
+    let Some(nodes) = data
+        .pointer("/document/document/state/global/nodes")
+        .and_then(|v| v.as_array())
+    else {
+        return out;
+    };
+
+    // Build id → (name, parent_id) for folder nodes only.
+    let mut folder_info: std::collections::HashMap<String, (String, Option<String>)> =
+        std::collections::HashMap::new();
+    for n in nodes {
+        if n["kind"].as_str() != Some("folder") {
+            continue;
+        }
+        let id = n["id"].as_str().unwrap_or("").to_string();
+        let name = n["name"].as_str().unwrap_or("").to_string();
+        let parent = n["parentFolder"].as_str().map(String::from);
+        if !id.is_empty() && !name.is_empty() {
+            folder_info.insert(id, (name, parent));
+        }
+    }
+
+    // For each folder, walk its parent chain to construct the path key.
+    for (id, _) in folder_info.iter() {
+        let mut chain: Vec<String> = Vec::new();
+        let mut cur = Some(id.clone());
+        while let Some(c) = cur {
+            let Some((name, parent)) = folder_info.get(&c) else {
+                break;
+            };
+            chain.push(name.clone());
+            cur = parent.clone();
+        }
+        chain.reverse();
+        if !chain.is_empty() {
+            out.insert(chain, id.clone());
+        }
+    }
+    out
+}
+
+/// Walk `chain` from drive root, creating each folder if it isn't already in
+/// the cache. Returns the leaf folder's UUID (or None when chain is empty).
+async fn ensure_folder_chain(
+    client: &GraphQLClient,
+    drive_id: &str,
+    chain: &[String],
+    cache: &mut std::collections::HashMap<Vec<String>, String>,
+    nested_api: bool,
+) -> Result<Option<String>> {
+    if chain.is_empty() {
+        return Ok(None);
+    }
+    let mut current_parent: Option<String> = None;
+    for i in 1..=chain.len() {
+        let prefix: Vec<String> = chain[..i].to_vec();
+        if let Some(id) = cache.get(&prefix) {
+            current_parent = Some(id.clone());
+            continue;
+        }
+        let folder_name = &prefix[prefix.len() - 1];
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let mut input = serde_json::json!({ "id": new_id, "name": folder_name });
+        if let Some(p) = &current_parent {
+            input["parentFolder"] = serde_json::json!(p);
+        }
+        let mutation = if nested_api {
+            "mutation($docId: PHID!, $input: DocumentDrive_AddFolderInput!) { \
+             DocumentDrive { addFolder(docId: $docId, input: $input) { id } } }"
+        } else {
+            "mutation($docId: PHID!, $input: DocumentDrive_AddFolderInput!) { \
+             DocumentDrive_addFolder(docId: $docId, input: $input) { id } }"
+        };
+        let vars = serde_json::json!({ "docId": drive_id, "input": input });
+        client.query(mutation, Some(&vars)).await?;
+        cache.insert(prefix, new_id.clone());
+        current_parent = Some(new_id);
+    }
+    Ok(current_parent)
 }
 
 /// Recursively rewrite UUID references in a JSON value using the old → new

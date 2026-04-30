@@ -607,6 +607,15 @@ switchboard import <files...> --drive <slug> [--strict] [--id-mapping <file>]
   documents are created (the new doc's old UUID → new UUID), so a multi-doc import within
   one process keeps internal references consistent without an explicit mapping file.
 
+**Folder reconstruction:** When a `<files...>` argument is a directory, `import`
+walks it recursively and uses the relative sub-paths to recreate the folder
+hierarchy on the destination drive. Existing folders are reused (matched by
+full path from drive root); missing ones are created via `DocumentDrive_addFolder`.
+Each new doc is then placed in its target folder via `DocumentDrive_moveNode`.
+Plain file arguments (or files inside an explicit directory) land at drive root.
+Empty folders in the source are not preserved (the .phd export format is
+file-based — empty folders never appear on disk).
+
 **Verdict semantics:**
 
 - `✓ EXACT MATCH` — every op applied and the resulting state matches the .phd's `current-state.json`.

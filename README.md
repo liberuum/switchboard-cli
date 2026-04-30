@@ -221,7 +221,7 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard export all [--out ./dir/]` | Export everything (all drives, organized by folder) |
 | `switchboard export drive <slug> --out ./dir/` | Export all documents in a drive |
 | `switchboard export doc <id> --drive <slug> --out file.phd` | Export a single document |
-| `switchboard import <files> --drive <slug> [--strict] [--id-mapping <file>]` | Import `.phd` files into a drive. `--strict` fails the run if any op is rejected or any doc's state mismatches. `--id-mapping` accepts a JSON object of old→new UUIDs to rewrite cross-document references (the CLI also builds this map automatically as docs are created within a single invocation). |
+| `switchboard import <paths...> --drive <slug> [--strict] [--id-mapping <file>]` | Import `.phd` files into a drive. **Directory args are walked recursively** and their sub-path becomes folder hierarchy on the destination (existing folders are reused). File args land at drive root. `--strict` fails the run on any rejected op or state mismatch. `--id-mapping` is a JSON `{"old-uuid":"new-uuid"}` map for rewriting cross-document references (the CLI also builds this map automatically within a single invocation as docs are created). |
 
 All export commands support operation filters: `--action-types <types>` (comma-separated action types), `--since-revision <n>` (operations from revision N onwards), `--from <datetime>` and `--to <datetime>` (ISO 8601 time range). These enable incremental and selective exports.
 

@@ -849,7 +849,7 @@ IMPORT / EXPORT
   export all [--out <dir>]      Export everything (all drives)
   export drive <id> --out <dir> Export all docs in a drive
   export doc <id> --drive <id>  Export a document as .phd
-  import <files> --drive <id>   Import .phd files
+  import <paths...> --drive <id> Import .phd files (or whole directories — folders rebuilt)
                                   [--strict]                    Fail on any rejected op or state mismatch
                                   [--id-mapping <file.json>]    Rewrite UUIDs in op inputs (cross-reactor cloning)
 
