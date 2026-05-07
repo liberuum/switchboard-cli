@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//usr/local/bin/**)",
+      "Bash(/usr/local/bin/switchboard --version)",
+      "Bash(switchboard completions *)",
+      "Bash(switchboard --quiet config list)",
+      "Bash(python3 -c ' *)",
+      "Bash(switchboard export *)",
+      "Bash(git pull *)",
+      "Bash(grep -n \"if total_ops_failed > 0 && strict\\\\|^    }$\" /home/p/Powerhouse/switchboard-cli/src/cli/import_export.rs)"
+    ],
+    "additionalDirectories": [
+      "/home/p"
+    ]
+  }
+}
