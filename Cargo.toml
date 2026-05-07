@@ -62,3 +62,7 @@ self-replace = "1"
 flate2 = "1"
 tar = "0.4"
 uuid = { version = "1.22.0", features = ["v4"] }
+
+# Used only on Unix to restore default SIGPIPE handling (see main.rs).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

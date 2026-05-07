@@ -14,6 +14,14 @@ use cli::Cli;
 
 #[tokio::main]
 async fn main() {
+    // Restore default SIGPIPE handling so writes against a closed pipe
+    // (e.g. `switchboard ... | head`) terminate the process silently with
+    // exit 141 instead of triggering Rust's stdlib panic on broken pipe.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     if let Err(e) = run().await {
         eprintln!("{} {e:#}", "Error:".red().bold());
         std::process::exit(1);
