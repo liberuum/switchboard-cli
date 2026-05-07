@@ -999,161 +999,76 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
         }
     }
 
-    // Soft-delete the document WITHOUT cascade — CASCADE would propagate to
-    // parent drives and delete them too (the bug that nuked Genesis drive).
-    // We handle drive node cleanup separately via mutateDocument + DELETE_NODE.
-    let delete_mutation =
-        "mutation($identifier: String!) { deleteDocument(identifier: $identifier) }";
-    // Use mutateDocument with raw DELETE_NODE action instead of the model-specific
-    // deleteNode mutation. The model mutation goes through the reactor job queue
-    // and may silently fail for ghost nodes (reactor tries to validate the
-    // referenced document which doesn't exist). mutateDocument applies directly.
+    // Resolve every input id to a UUID and remember which drives carry a
+    // `state.global.nodes` entry for it — both must be cleaned up server-side.
+    //
+    // The legacy singular `deleteDocument(identifier)` mutation still validates
+    // against `drive.state.global.nodes` and rejects with "Node not found" when
+    // the entry is missing, so we use the batched `deleteDocuments(propagate:
+    // ORPHAN)` API. ORPHAN tears down the document and its relationship index
+    // entries but does NOT touch `state.global.nodes` — verified empirically —
+    // hence the explicit DELETE_NODE pre-step below. (CASCADE would also
+    // delete child docs, which is wrong for a single-doc operation.)
     let remove_node_mutation = "mutation($id: String!, $actions: [JSONObject!]!) { mutateDocument(documentIdentifier: $id, actions: $actions) { id name } }";
     let mut failed = false;
+    let mut to_delete: Vec<(String, String)> = Vec::new(); // (input_id, uuid)
+    let mut node_cleanups: Vec<(String, String)> = Vec::new(); // (drive_id, uuid)
+
     for id in ids {
         let uuid = match helpers::resolve_doc(&client, id).await {
             Ok(u) => u,
-            Err(_) => {
-                // Name-based fallback: search across all drives
-                match resolve_doc_by_name(&client, id, None).await {
-                    Ok(u) => u,
-                    Err(_) => {
-                        // Document can't be resolved — might be a ghost node
-                        // (exists in a drive's node list but not in the reactor).
-                        // Check all drives for a file node with this ID.
-                        let ghost_drives = find_drives_referencing_node(&client, id).await;
-                        if ghost_drives.is_empty() {
-                            eprintln!("{} Document '{id}' not found", "✗".red());
-                            failed = true;
-                            continue;
-                        }
-                        // Ghost found — clean up the orphan nodes.
-                        let mut cleaned = false;
-                        for (drive_id, drive_name) in &ghost_drives {
-                            let ts = iso_now();
-                            let node_vars = serde_json::json!({
-                                "id": drive_id,
-                                "actions": [{
-                                    "id": gen_action_id(),
-                                    "type": "DELETE_NODE",
-                                    "input": { "id": id },
-                                    "scope": "global",
-                                    "timestampUtcMs": ts
-                                }]
-                            });
-                            if client
-                                .query(remove_node_mutation, Some(&node_vars))
-                                .await
-                                .is_ok()
-                            {
-                                cleaned = true;
-                                eprintln!(
-                                    "  {} Removed ghost node from drive \"{}\"",
-                                    "↳".dimmed(),
-                                    drive_name
-                                );
-                            }
-                        }
-                        if cleaned {
-                            println!(
-                                "{} Cleaned up ghost node {id} (document was missing from reactor)",
-                                "✓".green()
-                            );
-                        } else {
-                            eprintln!("{} Failed to clean up ghost node {id}", "✗".red());
-                            failed = true;
-                        }
-                        continue;
-                    }
+            Err(_) => match resolve_doc_by_name(&client, id, None).await {
+                Ok(u) => u,
+                Err(_) => {
+                    eprintln!("{} Document '{id}' not found", "✗".red());
+                    failed = true;
+                    continue;
                 }
-            }
+            },
         };
-
-        // CRITICAL: Remove the file node from parent drives BEFORE deleting the document.
-        // If we delete the document first and the node removal fails, we get a ghost node
-        // that crashes Connect ("Document not found" errors). If we remove the node first
-        // and the delete fails, we get an orphan — invisible but harmless.
-        let parent_drives = find_parent_drives(&client, &uuid).await;
-        for drive_id in &parent_drives {
-            let ts = iso_now();
-            let node_vars = serde_json::json!({
-                "id": drive_id,
-                "actions": [{
-                    "id": gen_action_id(),
-                    "type": "DELETE_NODE",
-                    "input": { "id": uuid },
-                    "scope": "global",
-                    "timestampUtcMs": ts
-                }]
-            });
-            let _ = client.query(remove_node_mutation, Some(&node_vars)).await;
+        for drive_id in find_parent_drives(&client, &uuid).await {
+            node_cleanups.push((drive_id, uuid.clone()));
         }
+        to_delete.push((id.clone(), uuid));
+    }
 
-        // Now delete the document itself (node already removed from drives)
-        let vars = serde_json::json!({ "identifier": uuid });
+    // Strip the drive's tree-node entries first so docs vanish from `docs list`
+    // and Connect immediately. These calls are best-effort: a missing node is
+    // already the desired post-condition.
+    for (drive_id, uuid) in &node_cleanups {
+        let ts = iso_now();
+        let node_vars = serde_json::json!({
+            "id": drive_id,
+            "actions": [{
+                "id": gen_action_id(),
+                "type": "DELETE_NODE",
+                "input": { "id": uuid },
+                "scope": "global",
+                "timestampUtcMs": ts
+            }]
+        });
+        let _ = client.query(remove_node_mutation, Some(&node_vars)).await;
+    }
+
+    // Batch-delete the docs themselves.
+    if !to_delete.is_empty() {
+        let uuids: Vec<String> = to_delete.iter().map(|(_, u)| u.clone()).collect();
+        let delete_mutation =
+            "mutation($ids: [String!]!) { deleteDocuments(identifiers: $ids, propagate: ORPHAN) }";
+        let vars = serde_json::json!({ "ids": uuids });
         match client.query(delete_mutation, Some(&vars)).await {
             Ok(_) => {
-                println!("{} Deleted document {id}", "✓".green());
+                for (input_id, _) in &to_delete {
+                    println!("{} Deleted document {input_id}", "✓".green());
+                }
             }
             Err(e) => {
-                let err_str = format!("{e}");
-                let is_not_found = err_str.contains("not found")
-                    || err_str.contains("Not found")
-                    || err_str.contains("Document not found");
-
-                if is_not_found {
-                    // Ghost node: document doesn't exist in reactor but may be
-                    // referenced in a drive's node tree. Try to clean up.
-                    let ghost_drives = find_drives_referencing_node(&client, &uuid).await;
-                    if ghost_drives.is_empty() {
-                        eprintln!(
-                            "{} Document '{id}' not found in reactor or any drive",
-                            "✗".red()
-                        );
-                        failed = true;
-                    } else {
-                        let mut cleaned = false;
-                        for (drive_id, drive_name) in &ghost_drives {
-                            let ts = iso_now();
-                            let node_vars = serde_json::json!({
-                                "id": drive_id,
-                                "actions": [{
-                                    "type": "DELETE_NODE",
-                                    "input": { "id": uuid },
-                                    "scope": "global",
-                                    "timestampUtcMs": ts
-                                }]
-                            });
-                            if client
-                                .query(remove_node_mutation, Some(&node_vars))
-                                .await
-                                .is_ok()
-                            {
-                                cleaned = true;
-                                eprintln!(
-                                    "  {} Removed ghost node from drive \"{}\"",
-                                    "↳".dimmed(),
-                                    drive_name
-                                );
-                            }
-                        }
-                        if cleaned {
-                            println!(
-                                "{} Cleaned up ghost node {id} (document was missing from reactor)",
-                                "✓".green()
-                            );
-                        } else {
-                            eprintln!("{} Failed to clean up ghost node {id}", "✗".red());
-                            failed = true;
-                        }
-                    }
-                } else {
-                    eprintln!("{} Failed to delete document {id}: {e}", "✗".red());
-                    failed = true;
-                }
+                eprintln!("{} Failed to delete document(s): {e}", "✗".red());
+                failed = true;
             }
         }
     }
+
     if failed {
         bail!("One or more documents could not be deleted");
     }
@@ -1182,43 +1097,6 @@ async fn find_parent_drives(client: &crate::graphql::GraphQLClient, doc_id: &str
                 })
         })
         .unwrap_or_default()
-}
-
-/// Scan all drives for file nodes referencing the given doc ID.
-/// Returns (drive_id, drive_name) pairs.
-/// Used for ghost node cleanup when the document doesn't exist in the reactor.
-async fn find_drives_referencing_node(
-    client: &crate::graphql::GraphQLClient,
-    doc_id: &str,
-) -> Vec<(String, String)> {
-    let query = r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name state } } }"#;
-    let Ok(data) = client.query(query, None).await else {
-        return Vec::new();
-    };
-    let Some(drives) = data
-        .pointer("/findDocuments/items")
-        .and_then(|v| v.as_array())
-    else {
-        return Vec::new();
-    };
-
-    let mut results = Vec::new();
-    for drive in drives {
-        let nodes = drive
-            .pointer("/state/global/nodes")
-            .and_then(|v| v.as_array());
-        if let Some(nodes) = nodes {
-            for node in nodes {
-                if node["id"].as_str() == Some(doc_id) && node["kind"].as_str() == Some("file") {
-                    let drive_id = drive["id"].as_str().unwrap_or("").to_string();
-                    let drive_name = drive["name"].as_str().unwrap_or("").to_string();
-                    results.push((drive_id, drive_name));
-                    break;
-                }
-            }
-        }
-    }
-    results
 }
 
 /// Scan a drive's node tree and return file nodes whose documents don't exist.
@@ -1280,6 +1158,21 @@ async fn rename(
 
     let data = client.query(&mutation, None).await?;
     let doc = &data["renameDocument"];
+    let doc_uuid = doc["id"].as_str().unwrap_or(id).to_string();
+
+    // Sync each parent drive's tree-node entry. `renameDocument` updates the
+    // doc's own name + records SET_NAME, but `state.global.nodes[].name` is a
+    // separate cached field; without this follow-up `docs list` and Connect
+    // continue to show the stale pre-rename name.
+    let parent_drives = find_parent_drives(&client, &doc_uuid).await;
+    let update_file_mutation = "mutation($docId: PHID!, $input: DocumentDrive_UpdateFileInput!) { DocumentDrive { updateFile(docId: $docId, input: $input) { id } } }";
+    for drive_id in &parent_drives {
+        let vars = serde_json::json!({
+            "docId": drive_id,
+            "input": { "id": doc_uuid, "name": name }
+        });
+        let _ = client.query(update_file_mutation, Some(&vars)).await;
+    }
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(doc),
@@ -1342,9 +1235,7 @@ async fn add_to(
 ) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    let drive_id = helpers::resolve_doc(&client, parent)
-        .await
-        .unwrap_or_else(|_| parent.to_string());
+    let (drive_id, parent_folder) = helpers::resolve_drive_and_parent(&client, parent).await?;
     let mut added = Vec::new();
 
     for id in ids {
@@ -1364,9 +1255,17 @@ async fn add_to(
         let doc_type = doc["documentType"].as_str().unwrap_or("unknown");
         let doc_id = doc["id"].as_str().unwrap_or(&resolved);
 
+        let mut input = serde_json::json!({
+            "id": doc_id,
+            "name": doc_name,
+            "documentType": doc_type,
+        });
+        if let Some(folder) = &parent_folder {
+            input["parentFolder"] = serde_json::Value::String(folder.clone());
+        }
         let vars = serde_json::json!({
             "docId": drive_id,
-            "input": { "id": doc_id, "name": doc_name, "documentType": doc_type }
+            "input": input,
         });
         let add_file_mutation = "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { DocumentDrive { addFile(docId: $docId, input: $input) { id name } } }";
         client.query(add_file_mutation, Some(&vars)).await?;
@@ -1395,9 +1294,10 @@ async fn remove_from(
 ) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    let drive_id = helpers::resolve_doc(&client, parent)
-        .await
-        .unwrap_or_else(|_| parent.to_string());
+    // `parent` may be a drive or a folder. `deleteNode` only needs the drive
+    // ID + file ID (the file's location in the tree is irrelevant), so we
+    // discard the folder context after resolving.
+    let (drive_id, _folder) = helpers::resolve_drive_and_parent(&client, parent).await?;
     let mut removed = Vec::new();
 
     for id in ids {
@@ -1439,12 +1339,8 @@ async fn move_docs(
 ) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    let from_id = helpers::resolve_doc(&client, from)
-        .await
-        .unwrap_or_else(|_| from.to_string());
-    let to_id = helpers::resolve_doc(&client, to)
-        .await
-        .unwrap_or_else(|_| to.to_string());
+    let (from_drive, _from_folder) = helpers::resolve_drive_and_parent(&client, from).await?;
+    let (to_drive, to_folder) = helpers::resolve_drive_and_parent(&client, to).await?;
     let mut moved = Vec::new();
 
     for id in ids {
@@ -1452,7 +1348,8 @@ async fn move_docs(
             .await
             .unwrap_or_else(|_| id.clone());
 
-        // Fetch doc info for the addFile call
+        // Fetch doc info — needed for the cross-drive add-back path; cheap so
+        // we always run it and let the intra-drive branch ignore name/type.
         let escaped = resolved.replace('"', r#"\""#);
         let info_query = format!(
             r#"{{ document(identifier: "{escaped}") {{ document {{ id name documentType }} }} }}"#
@@ -1465,28 +1362,55 @@ async fn move_docs(
         let doc_type = doc["documentType"].as_str().unwrap_or("unknown");
         let doc_id = doc["id"].as_str().unwrap_or(&resolved);
 
-        // Remove from source drive
-        let del_vars = serde_json::json!({
-            "docId": from_id,
-            "input": { "id": doc_id }
-        });
-        let del_node_mutation = "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }";
-        client.query(del_node_mutation, Some(&del_vars)).await?;
+        if from_drive == to_drive {
+            // Intra-drive move: use the dedicated MoveNode mutation. Updates
+            // the existing tree entry in place (one round-trip instead of two,
+            // and the entry retains its identity in the operations log).
+            //
+            // Note: the input field is named `srcFolder` in the schema but
+            // accepts ANY node id (file or folder), confirmed empirically.
+            let mut move_input = serde_json::json!({ "srcFolder": doc_id });
+            if let Some(folder) = &to_folder {
+                move_input["targetParentFolder"] = serde_json::Value::String(folder.clone());
+            }
+            let move_vars = serde_json::json!({
+                "docId": from_drive,
+                "input": move_input,
+            });
+            let move_mutation = "mutation($docId: PHID!, $input: DocumentDrive_MoveNodeInput!) { DocumentDrive { moveNode(docId: $docId, input: $input) { id } } }";
+            client.query(move_mutation, Some(&move_vars)).await?;
+        } else {
+            // Cross-drive move: MoveNode is scoped to a single drive, so fall
+            // back to deleteNode + addFile.
+            let del_vars = serde_json::json!({
+                "docId": from_drive,
+                "input": { "id": doc_id }
+            });
+            let del_node_mutation = "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }";
+            client.query(del_node_mutation, Some(&del_vars)).await?;
 
-        // Add to target drive
-        let add_vars = serde_json::json!({
-            "docId": to_id,
-            "input": { "id": doc_id, "name": doc_name, "documentType": doc_type }
-        });
-        let add_file_mutation = "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { DocumentDrive { addFile(docId: $docId, input: $input) { id } } }";
-        client.query(add_file_mutation, Some(&add_vars)).await?;
+            let mut add_input = serde_json::json!({
+                "id": doc_id,
+                "name": doc_name,
+                "documentType": doc_type,
+            });
+            if let Some(folder) = &to_folder {
+                add_input["parentFolder"] = serde_json::Value::String(folder.clone());
+            }
+            let add_vars = serde_json::json!({
+                "docId": to_drive,
+                "input": add_input,
+            });
+            let add_file_mutation = "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { DocumentDrive { addFile(docId: $docId, input: $input) { id } } }";
+            client.query(add_file_mutation, Some(&add_vars)).await?;
+        }
 
         moved.push(doc_name.to_string());
     }
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => {
-            print_json(&serde_json::json!({ "moved": moved, "from": from_id, "to": to_id }));
+            print_json(&serde_json::json!({ "moved": moved, "from": from_drive, "to": to_drive }));
         }
         _ => {
             for name in &moved {

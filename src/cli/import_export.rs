@@ -686,6 +686,36 @@ const OP_BATCH_SIZE: usize = 500;
 /// Delay between write operations (import only) to avoid overwhelming the server.
 const WRITE_DELAY_MS: u64 = 100;
 
+/// Wait for an async job (returned by `mutateDocumentAsync`) to reach a
+/// terminal status. Polls `jobStatus` rather than opening a subscription —
+/// `jobStatus` returns `FAILED` for unknown ids and a status string for real
+/// ones, so the poll never produces server log noise. Returns Ok on terminal
+/// success states (COMPLETED, READ_READY) and Err on terminal failure states
+/// (FAILED, CANCELLED) or timeout.
+async fn wait_for_job(client: &GraphQLClient, job_id: &str, timeout_ms: u64) -> Result<()> {
+    let escaped = job_id.replace('"', r#"\""#);
+    let query = format!(r#"{{ jobStatus(jobId: "{escaped}") {{ id status error }} }}"#);
+    let start = std::time::Instant::now();
+    let budget = std::time::Duration::from_millis(timeout_ms);
+    loop {
+        let data = client.query(&query, None).await?;
+        let job = &data["jobStatus"];
+        let status = job["status"].as_str().unwrap_or("UNKNOWN");
+        match status {
+            "COMPLETED" | "READ_READY" => return Ok(()),
+            "FAILED" | "CANCELLED" => {
+                let err = job["error"].as_str().unwrap_or("(no error message)");
+                bail!("job {job_id} ended with status {status}: {err}");
+            }
+            _ => {}
+        }
+        if start.elapsed() >= budget {
+            bail!("job {job_id} did not complete within {timeout_ms}ms (last status: {status})");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 /// Fetch drive nodes via the document() query on the main GraphQL endpoint.
 async fn fetch_drive_nodes(client: &GraphQLClient, drive_identifier: &str) -> Result<Vec<Value>> {
     let escaped = drive_identifier.replace('"', r#"\""#);
@@ -1088,23 +1118,11 @@ pub async fn run_import(
             }
         };
 
-        // Move the doc into its target folder (if any). createDocument places
-        // the new doc at drive root; a follow-up moveNode lifts it into the
-        // matching folder so the destination drive mirrors the source layout.
-        if let Some(folder_id) = &parent_folder_id {
-            let move_mutation = "mutation($docId: PHID!, $input: DocumentDrive_MoveNodeInput!) { \
-                 DocumentDrive { moveNode(docId: $docId, input: $input) { id } } }";
-            let move_vars = serde_json::json!({
-                "docId": drive_id,
-                "input": {
-                    "srcFolder": new_doc_id,
-                    "targetParentFolder": folder_id,
-                }
-            });
-            if let Err(e) = client.query(move_mutation, Some(&move_vars)).await {
-                eprintln!("  {} Could not move doc into folder: {e}", "⚠".yellow());
-            }
-        }
+        // moveNode is intentionally deferred until *after* op replay below.
+        // push_operations_via_mutate uses mutateDocumentAsync internally and
+        // waits for the resulting job to complete, which doubles as our
+        // "doc is committed" gate. Firing moveNode before that gate would
+        // race the commit and produce "Document not found" log noise.
 
         // Record the old → new ID mapping so subsequent ops within this
         // batch can rewrite cross-document references on the fly.
@@ -1112,16 +1130,17 @@ pub async fn run_import(
             id_map.insert(contents.header.id.clone(), new_doc_id.clone());
         }
 
-        // Step 2: Push operations via model-specific mutations
+        // Step 2: Push operations as a single batched mutateDocumentAsync.
+        // The job returned by the server doubles as our visibility gate —
+        // by the time `wait_for_job` returns, the new doc is committed and
+        // every action has been applied (or rejected) atomically.
         let mut stats = OpStats::default();
         if ops_count > 0 {
             match push_operations_via_mutate(
                 &client,
                 &new_doc_id,
-                doc_type,
                 doc_name,
                 &contents.operations,
-                model,
                 &id_map,
                 &mut deferred_ops,
                 quiet,
@@ -1151,6 +1170,25 @@ pub async fn run_import(
 
         total_ops_attempted += stats.attempted;
         total_ops_failed += stats.failed;
+
+        // Step 2b: Place the doc in its target folder. Deferred until after
+        // op replay so the async-job gate (inside push_operations_via_mutate)
+        // has confirmed the new doc is committed — moveNode against an
+        // uncommitted doc would log a server-side "Document not found".
+        if let Some(folder_id) = &parent_folder_id {
+            let move_mutation = "mutation($docId: PHID!, $input: DocumentDrive_MoveNodeInput!) { \
+                 DocumentDrive { moveNode(docId: $docId, input: $input) { id } } }";
+            let move_vars = serde_json::json!({
+                "docId": drive_id,
+                "input": {
+                    "srcFolder": new_doc_id,
+                    "targetParentFolder": folder_id,
+                }
+            });
+            if let Err(e) = client.query(move_mutation, Some(&move_vars)).await {
+                eprintln!("  {} Could not move doc into folder: {e}", "⚠".yellow());
+            }
+        }
 
         // Step 3: Verify state matches the .phd current-state.
         //
@@ -1285,9 +1323,6 @@ struct OpStats {
 struct DeferredOp {
     /// New (local) doc UUID this op will apply to.
     doc_id: String,
-    /// Source document type — used at drain time to look up the correct
-    /// model entry in the introspection cache.
-    doc_type: String,
     /// Human-readable doc name for error reporting.
     doc_name: String,
     /// Original op JSON (action.type / action.input live underneath).
@@ -1506,164 +1541,109 @@ fn rewrite_ids_in_value(value: &mut Value, id_map: &std::collections::HashMap<St
 async fn push_operations_via_mutate(
     client: &GraphQLClient,
     doc_id: &str,
-    doc_type: &str,
     doc_name: &str,
     operations: &PhdOperations,
-    model: &crate::graphql::introspection::DocumentModel,
     id_map: &std::collections::HashMap<String, String>,
     deferred_ops: &mut Vec<DeferredOp>,
     quiet: bool,
 ) -> Result<OpStats> {
     let mut stats = OpStats::default();
 
-    // Iterate all non-document scopes (global, local, custom, etc.)
+    // Build a single batched action list. mutateDocumentAsync queues these
+    // server-side and returns a job id; `wait_for_job` blocks until the job
+    // reaches a terminal state. Doing it as one call (rather than per-op
+    // sync mutations) is what makes this race-free: the job processor
+    // serialises the doc's commit and the actions, so we never need a
+    // CLI-side delay or visibility probe (both of which would generate
+    // "Document not found" log noise on the reactor).
+    let mut actions: Vec<Value> = Vec::new();
+
     for op in operations.domain_ops() {
-        let (op_type, mut input) = if let Some(action) = op.get("action") {
+        let (op_type, mut input, scope) = if let Some(action) = op.get("action") {
             let t = action.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let s = action
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("global");
             let i = action
                 .get("input")
                 .cloned()
                 .unwrap_or(Value::Object(serde_json::Map::new()));
-            (t.to_string(), i)
+            (t.to_string(), i, s.to_string())
         } else {
             let t = op.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let s = op.get("scope").and_then(|v| v.as_str()).unwrap_or("global");
             let input_text = op.get("inputText").and_then(|v| v.as_str()).unwrap_or("{}");
             let i: Value =
                 serde_json::from_str(input_text).unwrap_or(Value::Object(serde_json::Map::new()));
-            (t.to_string(), i)
+            (t.to_string(), i, s.to_string())
         };
 
         stats.attempted += 1;
 
-        // If any UUID in the op input is unknown to the id_map, this is a
-        // forward reference to a doc later in the import. Queue it for the
-        // drain phase rather than dispatching with a UUID that doesn't exist
-        // on the destination reactor. External UUIDs (refs to docs outside
-        // the import) will also queue and dispatch at drain time with the
-        // original UUID — same outcome as today, just delayed.
+        // Forward references to docs not yet imported go to the drain phase
+        // with the same logic as before — when the drain runs, id_map is
+        // complete and we can rewrite + dispatch them then.
         if has_forward_ref(&input, id_map) {
             stats.deferred += 1;
             deferred_ops.push(DeferredOp {
                 doc_id: doc_id.to_string(),
-                doc_type: doc_type.to_string(),
                 doc_name: doc_name.to_string(),
                 op: op.clone(),
             });
             continue;
         }
 
-        // Rewrite cross-document references using the old → new ID map.
-        // Done before camelCase lookup so the rewritten input is what we
-        // actually send. No-op if id_map is empty.
         if !id_map.is_empty() {
             rewrite_ids_in_value(&mut input, id_map);
         }
 
-        if stats.succeeded > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(WRITE_DELAY_MS)).await;
-        }
+        let action_id = op
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let timestamp = op
+            .get("timestampUtcMs")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(crate::cli::docs::iso_now);
 
-        match dispatch_op(client, doc_id, &op_type, input, model).await {
-            Ok(()) => stats.succeeded += 1,
-            Err(e) => {
-                if !quiet {
-                    println!("    {} {op_type}: {e}", "✗".red());
-                }
-                stats.failed += 1;
-                // Continue with remaining ops
+        actions.push(serde_json::json!({
+            "id": action_id,
+            "type": op_type,
+            "input": input,
+            "scope": scope,
+            "timestampUtcMs": timestamp,
+        }));
+    }
+
+    if actions.is_empty() {
+        return Ok(stats);
+    }
+
+    let mutation = "mutation($di: String!, $acts: [JSONObject!]!) { mutateDocumentAsync(documentIdentifier: $di, actions: $acts) }";
+    let vars = serde_json::json!({
+        "di": doc_id,
+        "acts": actions,
+    });
+    let resp = client.query(mutation, Some(&vars)).await?;
+    let job_id = resp["mutateDocumentAsync"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("mutateDocumentAsync did not return a job id"))?;
+
+    // 30s budget per doc covers worst-case reactor commit + replay latency.
+    match wait_for_job(client, job_id, 30_000).await {
+        Ok(()) => stats.succeeded = stats.attempted - stats.deferred,
+        Err(e) => {
+            if !quiet {
+                println!("    {} batch failed: {e}", "✗".red());
             }
+            stats.failed = stats.attempted - stats.deferred;
         }
     }
 
     Ok(stats)
-}
-
-/// Dispatch one op against a single document. Looks up the matching mutation
-/// in the model's introspection cache, builds either an `(docId, input)` or
-/// flattened-args mutation depending on the operation's signature, and runs
-/// it. Returns Err with a human-readable message on any failure.
-async fn dispatch_op(
-    client: &GraphQLClient,
-    doc_id: &str,
-    op_type: &str,
-    input: Value,
-    model: &crate::graphql::introspection::DocumentModel,
-) -> std::result::Result<(), String> {
-    let camel_name = screaming_snake_to_camel(op_type);
-
-    let model_op = match model.operations.iter().find(|o| o.operation == camel_name) {
-        Some(op) => op,
-        None => {
-            return Err(format!("no matching mutation found (tried {camel_name})"));
-        }
-    };
-
-    let has_input_arg = model_op.args.iter().any(|a| a.name == "input");
-    let selection = "{ id }";
-
-    let (mutation, vars) = if has_input_arg {
-        let input_type = model_op
-            .args
-            .iter()
-            .find(|a| a.name == "input")
-            .map(|a| &a.type_name)
-            .unwrap();
-        let required = model_op
-            .args
-            .iter()
-            .find(|a| a.name == "input")
-            .is_some_and(|a| a.required);
-        let bang = if required { "!" } else { "" };
-
-        let args_str = "docId: $docId, input: $input";
-        let body = model.mutation_body(&model_op.full_name, args_str, selection);
-        let query = format!("mutation($docId: PHID!, $input: {input_type}{bang}) {{ {body} }}");
-        let vars = serde_json::json!({
-            "docId": doc_id,
-            "input": input,
-        });
-        (query, vars)
-    } else {
-        let mut var_decls = vec!["$docId: PHID!".to_string()];
-        let mut arg_refs = vec!["docId: $docId".to_string()];
-        let mut vars_map = serde_json::Map::new();
-        vars_map.insert("docId".into(), Value::String(doc_id.to_string()));
-
-        if let Value::Object(map) = &input {
-            for (key, val) in map {
-                let arg_type = model_op
-                    .args
-                    .iter()
-                    .find(|a| a.name == *key)
-                    .map(|a| a.type_name.as_str())
-                    .unwrap_or("String");
-                let required = model_op
-                    .args
-                    .iter()
-                    .find(|a| a.name == *key)
-                    .is_some_and(|a| a.required);
-                let bang = if required { "!" } else { "" };
-
-                var_decls.push(format!("${key}: {arg_type}{bang}"));
-                arg_refs.push(format!("{key}: ${key}"));
-                vars_map.insert(key.clone(), val.clone());
-            }
-        }
-
-        let args_str = arg_refs.join(", ");
-        let body = model.mutation_body(&model_op.full_name, &args_str, selection);
-        let query = format!(
-            "mutation({decls}) {{ {body} }}",
-            decls = var_decls.join(", "),
-        );
-        (query, Value::Object(vars_map))
-    };
-
-    client
-        .query(&mutation, Some(&vars))
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("{e}"))
 }
 
 /// Re-attempt deferred ops after every doc has been created and id_map is
@@ -1672,90 +1652,108 @@ async fn dispatch_op(
 async fn drain_deferred_ops(
     client: &GraphQLClient,
     deferred: &[DeferredOp],
-    cache: &crate::graphql::IntrospectionCache,
+    _cache: &crate::graphql::IntrospectionCache,
     id_map: &std::collections::HashMap<String, String>,
     quiet: bool,
 ) -> (usize, usize) {
-    let mut succeeded = 0;
+    // Group ops by destination doc, then send each group as a single
+    // mutateDocumentAsync + wait — same race-free pattern as
+    // push_operations_via_mutate.
+    use std::collections::HashMap;
+    let mut grouped: HashMap<String, (String, Vec<Value>)> = HashMap::new(); // doc_id -> (doc_name, actions)
     let mut failed = 0;
-    for (i, d) in deferred.iter().enumerate() {
-        // Pull op_type and input out the same way push does.
-        let (op_type, mut input) = if let Some(action) = d.op.get("action") {
+
+    for d in deferred {
+        let (op_type, mut input, scope) = if let Some(action) = d.op.get("action") {
             let t = action.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let s = action
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("global");
             let i = action
                 .get("input")
                 .cloned()
                 .unwrap_or(Value::Object(serde_json::Map::new()));
-            (t.to_string(), i)
+            (t.to_string(), i, s.to_string())
         } else {
             let t = d.op.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let s =
+                d.op.get("scope")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("global");
             let input_text =
                 d.op.get("inputText")
                     .and_then(|v| v.as_str())
                     .unwrap_or("{}");
             let i: Value =
                 serde_json::from_str(input_text).unwrap_or(Value::Object(serde_json::Map::new()));
-            (t.to_string(), i)
+            (t.to_string(), i, s.to_string())
         };
 
-        // Rewrite once more — by now the map is complete, so internal refs
-        // resolve. Any UUID still missing is an external ref and dispatched
-        // as-is (same outcome as a non-deferred op with an external ref).
         if !id_map.is_empty() {
             rewrite_ids_in_value(&mut input, id_map);
         }
 
-        let model = match cache.find_model(&d.doc_type) {
-            Some(m) => m,
-            None => {
+        let action_id =
+            d.op.get("id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let timestamp =
+            d.op.get("timestampUtcMs")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(crate::cli::docs::iso_now);
+
+        grouped
+            .entry(d.doc_id.clone())
+            .or_insert_with(|| (d.doc_name.clone(), Vec::new()))
+            .1
+            .push(serde_json::json!({
+                "id": action_id,
+                "type": op_type,
+                "input": input,
+                "scope": scope,
+                "timestampUtcMs": timestamp,
+            }));
+    }
+
+    let mutation = "mutation($di: String!, $acts: [JSONObject!]!) { mutateDocumentAsync(documentIdentifier: $di, actions: $acts) }";
+    let mut succeeded = 0;
+    for (doc_id, (doc_name, actions)) in grouped {
+        let count = actions.len();
+        let vars = serde_json::json!({ "di": doc_id, "acts": actions });
+        let resp = match client.query(mutation, Some(&vars)).await {
+            Ok(r) => r,
+            Err(e) => {
                 if !quiet {
-                    println!(
-                        "    {} {} ({op_type}): model '{}' missing from cache",
-                        "✗".red(),
-                        d.doc_name,
-                        d.doc_type
-                    );
+                    println!("    {} {doc_name}: drain submit failed: {e}", "✗".red());
                 }
-                failed += 1;
+                failed += count;
                 continue;
             }
         };
-
-        if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(WRITE_DELAY_MS)).await;
-        }
-
-        match dispatch_op(client, &d.doc_id, &op_type, input, model).await {
-            Ok(()) => succeeded += 1,
+        let job_id = match resp["mutateDocumentAsync"].as_str() {
+            Some(j) => j,
+            None => {
+                if !quiet {
+                    println!("    {} {doc_name}: no job id from drain", "✗".red());
+                }
+                failed += count;
+                continue;
+            }
+        };
+        match wait_for_job(client, job_id, 30_000).await {
+            Ok(()) => succeeded += count,
             Err(e) => {
                 if !quiet {
-                    println!("    {} {} ({op_type}): {e}", "✗".red(), d.doc_name);
+                    println!("    {} {doc_name}: drain job failed: {e}", "✗".red());
                 }
-                failed += 1;
+                failed += count;
             }
         }
     }
     (succeeded, failed)
-}
-
-/// Convert SCREAMING_SNAKE_CASE to camelCase.
-/// e.g. "SET_MODEL_NAME" → "setModelName"
-fn screaming_snake_to_camel(s: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize_next = false;
-    for (i, c) in s.chars().enumerate() {
-        if c == '_' {
-            capitalize_next = true;
-        } else if i == 0 || (!capitalize_next && result.is_empty()) {
-            result.push(c.to_ascii_lowercase());
-        } else if capitalize_next {
-            result.push(c.to_ascii_uppercase());
-            capitalize_next = false;
-        } else {
-            result.push(c.to_ascii_lowercase());
-        }
-    }
-    result
 }
 
 /// Verify the imported document's state matches the expected state from the .phd

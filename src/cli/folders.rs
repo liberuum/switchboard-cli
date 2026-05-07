@@ -148,21 +148,15 @@ async fn resolve_parent(
             })
         }
 
-        // Only --parent: try drive first, fall back to folder lookup across drives.
+        // Only --parent: scan-first (silent on the server) instead of
+        // try-resolve-doc-first. Calling `resolve_doc` on a folder UUID
+        // would always error server-side ("Document not found") and pollute
+        // the reactor log even though the CLI catches it.
         (Some(p), None) => {
-            if let Ok(drive_id) = helpers::resolve_doc(client, p).await
-                && is_drive(client, &drive_id).await
-            {
-                return Ok(ParentTarget {
-                    drive_id,
-                    parent_folder_id: None,
-                });
-            }
-            // Not a drive — search all drives for a folder matching this id/name.
-            let (drive_id, folder_id) = find_folder_across_drives(client, p, None).await?;
+            let (drive_id, parent_folder_id) = helpers::resolve_drive_and_parent(client, p).await?;
             Ok(ParentTarget {
                 drive_id,
-                parent_folder_id: Some(folder_id),
+                parent_folder_id,
             })
         }
 
@@ -184,23 +178,6 @@ async fn resolve_parent(
             })
         }
     }
-}
-
-/// Returns true if the given UUID identifies a drive document.
-async fn is_drive(client: &crate::graphql::GraphQLClient, doc_id: &str) -> bool {
-    let escaped = doc_id.replace('"', r#"\""#);
-    let query =
-        format!(r#"{{ document(identifier: "{escaped}") {{ document {{ documentType }} }} }}"#);
-    client
-        .query(&query, None)
-        .await
-        .ok()
-        .and_then(|d| {
-            d.pointer("/document/document/documentType")
-                .and_then(|v| v.as_str())
-                .map(|t| t == "powerhouse/document-drive")
-        })
-        .unwrap_or(false)
 }
 
 /// Resolve a parent folder identifier within a specific drive. Accepts either
@@ -240,57 +217,6 @@ async fn resolve_folder_id_in_drive(
         1 => Ok(matches[0].to_string()),
         n => bail!(
             "Found {n} folders named '{identifier}' in drive {drive_id} — pass the UUID instead"
-        ),
-    }
-}
-
-/// Search every drive for a folder matching `identifier` (UUID or name).
-/// Returns `(drive_id, folder_id)`. If `drive_filter` is set, only that
-/// drive is searched. Errors on ambiguity.
-async fn find_folder_across_drives(
-    client: &crate::graphql::GraphQLClient,
-    identifier: &str,
-    drive_filter: Option<&str>,
-) -> Result<(String, String)> {
-    let drives_query = r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id state } } }"#;
-    let data = client.query(drives_query, None).await?;
-    let drives = data
-        .pointer("/findDocuments/items")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut matches: Vec<(String, String)> = Vec::new();
-    for d in drives.iter() {
-        let did = d["id"].as_str().unwrap_or("").to_string();
-        if let Some(filter) = drive_filter
-            && did != filter
-        {
-            continue;
-        }
-        let nodes = match d.pointer("/state/global/nodes").and_then(|v| v.as_array()) {
-            Some(n) => n,
-            None => continue,
-        };
-        for n in nodes {
-            if n["kind"].as_str() != Some("folder") {
-                continue;
-            }
-            let id = n["id"].as_str().unwrap_or("");
-            let name = n["name"].as_str().unwrap_or("");
-            let id_match = helpers::is_uuid(identifier) && id == identifier;
-            let name_match = !helpers::is_uuid(identifier) && name == identifier;
-            if id_match || name_match {
-                matches.push((did.clone(), id.to_string()));
-            }
-        }
-    }
-
-    match matches.len() {
-        0 => bail!("No folder named '{identifier}' found in any drive"),
-        1 => Ok(matches.into_iter().next().unwrap()),
-        n => bail!(
-            "Found {n} folders matching '{identifier}' across drives — disambiguate with --drive <slug>"
         ),
     }
 }

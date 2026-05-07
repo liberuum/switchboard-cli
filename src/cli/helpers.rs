@@ -332,3 +332,84 @@ pub fn is_uuid(s: &str) -> bool {
         && parts[4].len() == 12
         && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
+
+/// Resolve a parent identifier (drive or folder, by UUID, slug, or name) to
+/// the drive that holds it plus an optional folder ID inside that drive.
+///
+/// Returns `(drive_id, None)` when the parent is a drive itself, and
+/// `(drive_id, Some(folder_id))` when the parent is a folder. Errors when no
+/// match is found or when a folder name is ambiguous across drives.
+///
+/// Used by `docs add-to`, `docs remove-from`, and `docs move` so they can
+/// target a drive root or a sub-folder uniformly. Folders are not documents
+/// on the new server schema — they live in `drive.state.global.nodes` — so
+/// `resolve_doc` alone is insufficient for parent resolution.
+pub async fn resolve_drive_and_parent(
+    client: &GraphQLClient,
+    parent: &str,
+) -> Result<(String, Option<String>)> {
+    // Single round-trip: fetch every drive with id/slug/name/state. We then
+    // match `parent` against drive identifiers AND folder entries within
+    // each drive's node tree. This deliberately avoids calling
+    // `document(identifier: <folder-id>)` — folders are tree nodes, not
+    // documents, so that resolver would always error with "Document not
+    // found" and the failed query gets logged on the reactor side even
+    // though the CLI catches it. Scanning the already-fetched node trees
+    // is silent.
+    let drives_query = r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id slug name state } } }"#;
+    let data = client.query(drives_query, None).await?;
+    let drives = data
+        .pointer("/findDocuments/items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let parent_is_uuid = is_uuid(parent);
+
+    // Pass 1: is `parent` a drive itself? Match by id, slug, or name.
+    for d in &drives {
+        let drive_id = d["id"].as_str().unwrap_or("");
+        let drive_slug = d["slug"].as_str().unwrap_or("");
+        let drive_name = d["name"].as_str().unwrap_or("");
+        let id_match = parent_is_uuid && drive_id == parent;
+        let slug_match = !parent_is_uuid && drive_slug.eq_ignore_ascii_case(parent);
+        let name_match = !parent_is_uuid && drive_name.eq_ignore_ascii_case(parent);
+        if id_match || slug_match || name_match {
+            return Ok((drive_id.to_string(), None));
+        }
+    }
+
+    // Pass 2: is `parent` a folder anywhere? Match by id (when UUID) or
+    // name (otherwise) against `state.global.nodes` entries with kind=folder.
+    let mut matches: Vec<(String, String)> = Vec::new();
+    for d in &drives {
+        let drive_id = d["id"].as_str().unwrap_or("").to_string();
+        let nodes = match d.pointer("/state/global/nodes").and_then(|v| v.as_array()) {
+            Some(n) => n,
+            None => continue,
+        };
+        for n in nodes {
+            if n["kind"].as_str() != Some("folder") {
+                continue;
+            }
+            let id = n["id"].as_str().unwrap_or("");
+            let name = n["name"].as_str().unwrap_or("");
+            let id_match = parent_is_uuid && id == parent;
+            let name_match = !parent_is_uuid && name == parent;
+            if id_match || name_match {
+                matches.push((drive_id.clone(), id.to_string()));
+            }
+        }
+    }
+
+    match matches.len() {
+        0 => bail!("Parent '{parent}' is not a drive or folder visible on this profile"),
+        1 => {
+            let (drive_id, folder_id) = matches.into_iter().next().unwrap();
+            Ok((drive_id, Some(folder_id)))
+        }
+        n => bail!(
+            "Parent '{parent}' is ambiguous — found {n} folders with that name across drives. Pass a UUID instead."
+        ),
+    }
+}
