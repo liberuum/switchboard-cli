@@ -291,15 +291,15 @@ async fn list(
             all_files.push(file);
         }
 
-        // If drive state has no nodes, also try documentChildren as fallback
+        // If drive state has no nodes, also try the relationship index as fallback
         if nodes.is_empty() {
             let escaped = drive_id.replace('"', r#"\""#);
             let children_query = format!(
-                r#"{{ documentChildren(parentIdentifier: "{escaped}") {{ items {{ id slug name documentType state }} }} }}"#
+                r#"{{ documentOutgoingRelationships(sourceIdentifier: "{escaped}", relationshipType: "child") {{ items {{ id slug name documentType state }} }} }}"#
             );
             if let Ok(data) = client.query(&children_query, None).await
                 && let Some(items) = data
-                    .pointer("/documentChildren/items")
+                    .pointer("/documentOutgoingRelationships/items")
                     .and_then(|v| v.as_array())
             {
                 for item in items {
@@ -458,14 +458,14 @@ async fn resolve_doc_by_name(
             }
         }
 
-        // Also check documentChildren as fallback
+        // Also check the relationship index as fallback
         let escaped = drive_id.replace('"', r#"\""#);
         let children_query = format!(
-            r#"{{ documentChildren(parentIdentifier: "{escaped}") {{ items {{ id slug name }} }} }}"#
+            r#"{{ documentOutgoingRelationships(sourceIdentifier: "{escaped}", relationshipType: "child") {{ items {{ id slug name }} }} }}"#
         );
         if let Ok(data) = client.query(&children_query, None).await
             && let Some(items) = data
-                .pointer("/documentChildren/items")
+                .pointer("/documentOutgoingRelationships/items")
                 .and_then(|v| v.as_array())
         {
             for item in items {
@@ -661,11 +661,11 @@ async fn get(
             if !doc_id.is_empty() {
                 let escaped = doc_id.replace('"', r#"\""#);
                 let parents_query = format!(
-                    r#"{{ documentParents(childIdentifier: "{escaped}") {{ items {{ id name slug documentType }} }} }}"#
+                    r#"{{ documentIncomingRelationships(targetIdentifier: "{escaped}", relationshipType: "child") {{ items {{ id name slug documentType }} }} }}"#
                 );
                 if let Ok(parents_data) = client.query(&parents_query, None).await
                     && let Some(parents) = parents_data
-                        .pointer("/documentParents/items")
+                        .pointer("/documentIncomingRelationships/items")
                         .and_then(|v| v.as_array())
                 {
                     for parent in parents
@@ -780,16 +780,22 @@ async fn tree(
             println!("{display_name}/");
             print_tree(&nodes, None, "");
         } else {
-            // Fallback: documentChildren API
+            // Fallback: relationship index. Older/different servers may not
+            // expose this field at all — treat any failure as "drive is empty"
+            // rather than aborting the whole tree render.
             let escaped = id.replace('"', r#"\""#);
             let children_query = format!(
-                r#"{{ documentChildren(parentIdentifier: "{escaped}") {{ items {{ id name documentType }} }} }}"#
+                r#"{{ documentOutgoingRelationships(sourceIdentifier: "{escaped}", relationshipType: "child") {{ items {{ id name documentType }} }} }}"#
             );
-            let data = client.query(&children_query, None).await?;
-            let items = data
-                .pointer("/documentChildren/items")
-                .and_then(|v| v.as_array())
-                .cloned()
+            let items: Vec<Value> = client
+                .query(&children_query, None)
+                .await
+                .ok()
+                .and_then(|data| {
+                    data.pointer("/documentOutgoingRelationships/items")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                })
                 .unwrap_or_default();
 
             println!("{display_name}/");
@@ -1159,14 +1165,14 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
 async fn find_parent_drives(client: &crate::graphql::GraphQLClient, doc_id: &str) -> Vec<String> {
     let escaped = doc_id.replace('"', r#"\""#);
     let query = format!(
-        r#"{{ documentParents(childIdentifier: "{escaped}") {{ items {{ id documentType }} }} }}"#
+        r#"{{ documentIncomingRelationships(targetIdentifier: "{escaped}", relationshipType: "child") {{ items {{ id documentType }} }} }}"#
     );
     client
         .query(&query, None)
         .await
         .ok()
         .and_then(|d| {
-            d.pointer("/documentParents/items")
+            d.pointer("/documentIncomingRelationships/items")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
@@ -1294,12 +1300,12 @@ async fn parents(id: &str, format: OutputFormat, profile_name: Option<&str>) -> 
 
     let escaped = id.replace('"', r#"\""#);
     let query = format!(
-        r#"{{ documentParents(childIdentifier: "{escaped}") {{ items {{ id name slug documentType }} totalCount }} }}"#
+        r#"{{ documentIncomingRelationships(targetIdentifier: "{escaped}", relationshipType: "child") {{ items {{ id name slug documentType }} totalCount }} }}"#
     );
 
     let data = client.query(&query, None).await?;
     let items = data
-        .pointer("/documentParents/items")
+        .pointer("/documentIncomingRelationships/items")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
@@ -1362,12 +1368,7 @@ async fn add_to(
             "docId": drive_id,
             "input": { "id": doc_id, "name": doc_name, "documentType": doc_type }
         });
-        let nested = helpers::is_nested_api(&client).await;
-        let add_file_mutation = if nested {
-            "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { DocumentDrive { addFile(docId: $docId, input: $input) { id name } } }"
-        } else {
-            "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { DocumentDrive_addFile(docId: $docId, input: $input) { id name } }"
-        };
+        let add_file_mutation = "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { DocumentDrive { addFile(docId: $docId, input: $input) { id name } } }";
         client.query(add_file_mutation, Some(&vars)).await?;
         added.push(doc_name.to_string());
     }
@@ -1407,12 +1408,7 @@ async fn remove_from(
             "docId": drive_id,
             "input": { "id": resolved }
         });
-        let nested = helpers::is_nested_api(&client).await;
-        let del_node_mutation = if nested {
-            "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }"
-        } else {
-            "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive_deleteNode(docId: $docId, input: $input) { id } }"
-        };
+        let del_node_mutation = "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }";
         client.query(del_node_mutation, Some(&vars)).await?;
         removed.push(resolved);
     }
@@ -1470,16 +1466,11 @@ async fn move_docs(
         let doc_id = doc["id"].as_str().unwrap_or(&resolved);
 
         // Remove from source drive
-        let nested = helpers::is_nested_api(&client).await;
         let del_vars = serde_json::json!({
             "docId": from_id,
             "input": { "id": doc_id }
         });
-        let del_node_mutation = if nested {
-            "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }"
-        } else {
-            "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive_deleteNode(docId: $docId, input: $input) { id } }"
-        };
+        let del_node_mutation = "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }";
         client.query(del_node_mutation, Some(&del_vars)).await?;
 
         // Add to target drive
@@ -1487,11 +1478,7 @@ async fn move_docs(
             "docId": to_id,
             "input": { "id": doc_id, "name": doc_name, "documentType": doc_type }
         });
-        let add_file_mutation = if nested {
-            "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { DocumentDrive { addFile(docId: $docId, input: $input) { id } } }"
-        } else {
-            "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { DocumentDrive_addFile(docId: $docId, input: $input) { id } }"
-        };
+        let add_file_mutation = "mutation($docId: PHID!, $input: DocumentDrive_AddFileInput!) { DocumentDrive { addFile(docId: $docId, input: $input) { id } } }";
         client.query(add_file_mutation, Some(&add_vars)).await?;
 
         moved.push(doc_name.to_string());

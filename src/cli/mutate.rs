@@ -292,11 +292,11 @@ async fn resolve_doc_across_drives(client: &GraphQLClient, name: &str) -> Result
     for drive_id in &drive_ids {
         let escaped = drive_id.replace('"', r#"\""#);
         let q = format!(
-            r#"{{ documentChildren(parentIdentifier: "{escaped}") {{ items {{ id name slug }} }} }}"#
+            r#"{{ documentOutgoingRelationships(sourceIdentifier: "{escaped}", relationshipType: "child") {{ items {{ id name slug }} }} }}"#
         );
         if let Ok(d) = client.query(&q, None).await
             && let Some(items) = d
-                .pointer("/documentChildren/items")
+                .pointer("/documentOutgoingRelationships/items")
                 .and_then(|v| v.as_array())
         {
             for item in items {

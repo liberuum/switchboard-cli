@@ -278,8 +278,6 @@ async fn create(
 
     // Use the DocumentDrive createDocument mutation so the API records a
     // CREATE_DOCUMENT operation (required for soft-delete to work later).
-    let nested = helpers::is_nested_api(&client).await;
-
     let mut vars_map = serde_json::json!({
         "name": name,
         "slug": slug,
@@ -288,22 +286,12 @@ async fn create(
         vars_map["preferredEditor"] = serde_json::json!(editor);
     }
 
-    let create_mutation = if nested {
-        "mutation($name: String!, $slug: String, $preferredEditor: String) { \
+    let create_mutation = "mutation($name: String!, $slug: String, $preferredEditor: String) { \
          DocumentDrive { createDocument(name: $name, slug: $slug, preferredEditor: $preferredEditor) \
-         { id slug name } } }"
-    } else {
-        "mutation($name: String!, $slug: String, $preferredEditor: String) { \
-         DocumentDrive_createDocument(name: $name, slug: $slug, preferredEditor: $preferredEditor) \
-         { id slug name } }"
-    };
+         { id slug name } } }";
 
     let create_data = client.query(create_mutation, Some(&vars_map)).await?;
-    let drive = if nested {
-        &create_data["DocumentDrive"]["createDocument"]
-    } else {
-        &create_data["DocumentDrive_createDocument"]
-    };
+    let drive = &create_data["DocumentDrive"]["createDocument"];
 
     // Set the state-level drive name (state.global.name).
     // createDocument only sets the metadata name — the /d/<slug> endpoint
@@ -314,11 +302,7 @@ async fn create(
             "docId": doc_id,
             "input": { "name": name }
         });
-        let name_mutation = if nested {
-            "mutation($docId: PHID!, $input: DocumentDrive_SetDriveNameInput!) { DocumentDrive { setDriveName(docId: $docId, input: $input) { id } } }"
-        } else {
-            "mutation($docId: PHID!, $input: DocumentDrive_SetDriveNameInput!) { DocumentDrive_setDriveName(docId: $docId, input: $input) { id } }"
-        };
+        let name_mutation = "mutation($docId: PHID!, $input: DocumentDrive_SetDriveNameInput!) { DocumentDrive { setDriveName(docId: $docId, input: $input) { id } } }";
         let _ = client.query(name_mutation, Some(&name_vars)).await;
     }
 
@@ -329,11 +313,7 @@ async fn create(
             "docId": doc_id,
             "input": { "icon": icon_url }
         });
-        let icon_mutation = if nested {
-            "mutation($docId: PHID!, $input: DocumentDrive_SetDriveIconInput!) { DocumentDrive { setDriveIcon(docId: $docId, input: $input) { id } } }"
-        } else {
-            "mutation($docId: PHID!, $input: DocumentDrive_SetDriveIconInput!) { DocumentDrive_setDriveIcon(docId: $docId, input: $input) { id } }"
-        };
+        let icon_mutation = "mutation($docId: PHID!, $input: DocumentDrive_SetDriveIconInput!) { DocumentDrive { setDriveIcon(docId: $docId, input: $input) { id } } }";
         client.query(icon_mutation, Some(&icon_vars)).await?;
     }
 
@@ -375,8 +355,8 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
         }
     }
 
-    let mutation = "mutation($identifier: String!) { deleteDocument(identifier: $identifier, propagate: CASCADE) }";
     let mut failed = false;
+    let mut resolved: Vec<(String, String)> = Vec::new(); // (display_id, uuid)
     for id in ids {
         let uuid = match helpers::resolve_doc(&client, id).await {
             Ok(u) if !is_soft_deleted(&client, &u).await => u,
@@ -389,15 +369,26 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
                 }
             },
         };
-        let vars = serde_json::json!({ "identifier": uuid });
+        resolved.push((id.clone(), uuid));
+    }
+
+    if !resolved.is_empty() {
+        let identifiers: Vec<&String> = resolved.iter().map(|(_, u)| u).collect();
+        let mutation = "mutation($identifiers: [String!]!) { deleteDocuments(identifiers: $identifiers, propagate: CASCADE) }";
+        let vars = serde_json::json!({ "identifiers": identifiers });
         match client.query(mutation, Some(&vars)).await {
-            Ok(_) => println!("{} Deleted drive {id}", "✓".green()),
+            Ok(_) => {
+                for (display_id, _) in &resolved {
+                    println!("{} Deleted drive {display_id}", "✓".green());
+                }
+            }
             Err(e) => {
-                eprintln!("{} Failed to delete drive {id}: {e}", "✗".red());
+                eprintln!("{} Batch delete failed: {e}", "✗".red());
                 failed = true;
             }
         }
     }
+
     if failed {
         bail!("One or more drives could not be deleted");
     }

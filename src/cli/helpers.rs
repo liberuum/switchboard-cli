@@ -91,14 +91,14 @@ pub async fn resolve_doc(client: &GraphQLClient, id_or_name: &str) -> Result<Str
         let drive_id = resolve_single_doc(client, drive_part).await?;
         let is_uuid = is_uuid(doc_part);
 
-        // Fast path: documentChildren is the proper relationship index.
+        // Fast path: documentOutgoingRelationships is the proper relationship index.
         let children_query = format!(
-            r#"{{ documentChildren(parentIdentifier: "{drive_id}") {{ items {{ id slug name }} }} }}"#,
+            r#"{{ documentOutgoingRelationships(sourceIdentifier: "{drive_id}", relationshipType: "child") {{ items {{ id slug name }} }} }}"#,
         );
 
         if let Ok(data) = client.query(&children_query, None).await
             && let Some(items) = data
-                .pointer("/documentChildren/items")
+                .pointer("/documentOutgoingRelationships/items")
                 .and_then(|v| v.as_array())
         {
             for child in items {
@@ -115,9 +115,9 @@ pub async fn resolve_doc(client: &GraphQLClient, id_or_name: &str) -> Result<Str
             }
         }
 
-        // Fallback: documentChildren can return empty even when the drive's
-        // node list has the doc (relationship index lag, especially after
-        // ADD_FILE on a remote reactor). Scan the drive's state.global.nodes
+        // Fallback: documentOutgoingRelationships can return empty even when
+        // the drive's node list has the doc (relationship index lag, especially
+        // after ADD_FILE on a remote reactor). Scan the drive's state.global.nodes
         // directly — that's the source of truth `docs list` and Connect use.
         let nodes_query =
             format!(r#"{{ document(identifier: "{drive_id}") {{ document {{ state }} }} }}"#,);
@@ -212,11 +212,11 @@ async fn resolve_single_doc(client: &GraphQLClient, identifier: &str) -> Result<
                 continue;
             }
             let children_query = format!(
-                r#"{{ documentChildren(parentIdentifier: "{drv_id}") {{ items {{ id name slug }} }} }}"#,
+                r#"{{ documentOutgoingRelationships(sourceIdentifier: "{drv_id}", relationshipType: "child") {{ items {{ id name slug }} }} }}"#,
             );
             if let Ok(cd) = client.query(&children_query, None).await
                 && let Some(items) = cd
-                    .pointer("/documentChildren/items")
+                    .pointer("/documentOutgoingRelationships/items")
                     .and_then(|v| v.as_array())
             {
                 for item in items {
@@ -319,22 +319,6 @@ pub fn base_url_from(graphql_url: &str) -> String {
         .trim_end_matches('/')
         .trim_end_matches("/graphql")
         .to_string()
-}
-
-/// Detect whether the API uses nested mutations (dev.104+).
-/// Returns true if `DocumentDriveMutations` type exists.
-pub async fn is_nested_api(client: &GraphQLClient) -> bool {
-    let q = r#"{ __type(name: "DocumentDriveMutations") { name } }"#;
-    client
-        .query(q, None)
-        .await
-        .ok()
-        .and_then(|d| {
-            d.pointer("/__type/name")
-                .and_then(|v| v.as_str())
-                .map(|_| true)
-        })
-        .unwrap_or(false)
 }
 
 pub fn is_uuid(s: &str) -> bool {

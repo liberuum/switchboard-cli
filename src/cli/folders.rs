@@ -91,14 +91,8 @@ async fn create(
         input["parentFolder"] = serde_json::json!(p);
     }
 
-    let nested = helpers::is_nested_api(&client).await;
-    let mutation = if nested {
-        "mutation($docId: PHID!, $input: DocumentDrive_AddFolderInput!) { \
-         DocumentDrive { addFolder(docId: $docId, input: $input) { id } } }"
-    } else {
-        "mutation($docId: PHID!, $input: DocumentDrive_AddFolderInput!) { \
-         DocumentDrive_addFolder(docId: $docId, input: $input) { id } }"
-    };
+    let mutation = "mutation($docId: PHID!, $input: DocumentDrive_AddFolderInput!) { \
+         DocumentDrive { addFolder(docId: $docId, input: $input) { id } } }";
     let vars = serde_json::json!({ "docId": target.drive_id, "input": input });
     client.query(mutation, Some(&vars)).await?;
 
@@ -322,14 +316,8 @@ async fn delete(
         }
     }
 
-    let nested = helpers::is_nested_api(&client).await;
-    let mutation = if nested {
-        "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { \
-         DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }"
-    } else {
-        "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { \
-         DocumentDrive_deleteNode(docId: $docId, input: $input) { id } }"
-    };
+    let mutation = "mutation($docId: PHID!, $input: DocumentDrive_DeleteNodeInput!) { \
+         DocumentDrive { deleteNode(docId: $docId, input: $input) { id } } }";
     let vars = serde_json::json!({ "docId": drive_id, "input": { "id": id } });
     if let Err(e) = client.query(mutation, Some(&vars)).await {
         bail!("Failed to delete folder {id}: {e}");

@@ -380,7 +380,8 @@ Maps to GraphQL (all on `/graphql`):
 - `mutation { Model_createDocument(name:, driveId: UUID) }` → create (model-specific)
 - `mutation { deleteDocument(id:) }` → delete
 - `renameDocument(documentIdentifier, name)` → rename
-- `documentParents(childIdentifier)` → reverse tree traversal
+- `documentIncomingRelationships(targetIdentifier, relationshipType: "child")` → reverse tree traversal
+- `documentOutgoingRelationships(sourceIdentifier, relationshipType: "child")` → forward tree traversal
 - `DocumentDrive { addFile(docId, input: { id, name, documentType }) }` → add doc to drive
 - `DocumentDrive { deleteNode(docId, input: { id }) }` → remove doc from drive
 - Remove from source + add to target → move between drives

@@ -921,7 +921,6 @@ pub async fn run_import(
     // Pre-cache existing folders so repeat imports reuse folders instead of
     // creating duplicates with the same name/parent.
     let mut folder_cache = build_existing_folder_cache(&client, &drive_id).await;
-    let nested_api = helpers::is_nested_api(&client).await;
 
     // Old → new document UUID map. Seeded from `--id-mapping <file>` if
     // provided, then extended automatically as documents are created so that
@@ -998,21 +997,16 @@ pub async fn run_import(
         // as needed. We do this before doc creation so the createDocument
         // mutation can drop the new doc straight into the correct folder
         // via parentIdentifier (skipping a follow-up moveNode round trip).
-        let parent_folder_id = match ensure_folder_chain(
-            &client,
-            &drive_id,
-            &entry.folder_chain,
-            &mut folder_cache,
-            nested_api,
-        )
-        .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                println!("  {} Failed to create folder chain: {e}", "✗".red());
-                continue;
-            }
-        };
+        let parent_folder_id =
+            match ensure_folder_chain(&client, &drive_id, &entry.folder_chain, &mut folder_cache)
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    println!("  {} Failed to create folder chain: {e}", "✗".red());
+                    continue;
+                }
+            };
 
         // Find the matching model. If the type is unknown, re-introspect once
         // (handles fresh profiles or reactor restarts that loaded new packages)
@@ -1098,13 +1092,8 @@ pub async fn run_import(
         // the new doc at drive root; a follow-up moveNode lifts it into the
         // matching folder so the destination drive mirrors the source layout.
         if let Some(folder_id) = &parent_folder_id {
-            let move_mutation = if nested_api {
-                "mutation($docId: PHID!, $input: DocumentDrive_MoveNodeInput!) { \
-                 DocumentDrive { moveNode(docId: $docId, input: $input) { id } } }"
-            } else {
-                "mutation($docId: PHID!, $input: DocumentDrive_MoveNodeInput!) { \
-                 DocumentDrive_moveNode(docId: $docId, input: $input) { id } }"
-            };
+            let move_mutation = "mutation($docId: PHID!, $input: DocumentDrive_MoveNodeInput!) { \
+                 DocumentDrive { moveNode(docId: $docId, input: $input) { id } } }";
             let move_vars = serde_json::json!({
                 "docId": drive_id,
                 "input": {
@@ -1429,7 +1418,6 @@ async fn ensure_folder_chain(
     drive_id: &str,
     chain: &[String],
     cache: &mut std::collections::HashMap<Vec<String>, String>,
-    nested_api: bool,
 ) -> Result<Option<String>> {
     if chain.is_empty() {
         return Ok(None);
@@ -1447,13 +1435,8 @@ async fn ensure_folder_chain(
         if let Some(p) = &current_parent {
             input["parentFolder"] = serde_json::json!(p);
         }
-        let mutation = if nested_api {
-            "mutation($docId: PHID!, $input: DocumentDrive_AddFolderInput!) { \
-             DocumentDrive { addFolder(docId: $docId, input: $input) { id } } }"
-        } else {
-            "mutation($docId: PHID!, $input: DocumentDrive_AddFolderInput!) { \
-             DocumentDrive_addFolder(docId: $docId, input: $input) { id } }"
-        };
+        let mutation = "mutation($docId: PHID!, $input: DocumentDrive_AddFolderInput!) { \
+             DocumentDrive { addFolder(docId: $docId, input: $input) { id } } }";
         let vars = serde_json::json!({ "docId": drive_id, "input": input });
         client.query(mutation, Some(&vars)).await?;
         cache.insert(prefix, new_id.clone());

@@ -706,7 +706,10 @@ QUERY PATTERNS
   {{ document(identifier: "my-doc") {{ document {{ id name slug documentType state }} }} }}
 
   # Get children of a document/drive
-  {{ documentChildren(parentIdentifier: "my-drive") {{ items {{ id name slug documentType }} }} }}
+  {{ documentOutgoingRelationships(sourceIdentifier: "my-drive", relationshipType: "child") {{ items {{ id name slug documentType }} }} }}
+
+  # Get parents of a document
+  {{ documentIncomingRelationships(targetIdentifier: "my-doc", relationshipType: "child") {{ items {{ id name slug documentType }} }} }}
 
   # Get document operations
   {{ documentOperations(filter: {{ documentId: "uuid" }}) {{ items {{ id index action {{ type input scope }} }} totalCount }} }}

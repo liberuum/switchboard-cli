@@ -776,11 +776,11 @@ async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEnt
         }
 
         let children_query = format!(
-            r#"{{ documentChildren(parentIdentifier: "{drv_id}") {{ items {{ id name documentType }} }} }}"#
+            r#"{{ documentOutgoingRelationships(sourceIdentifier: "{drv_id}", relationshipType: "child") {{ items {{ id name documentType }} }} }}"#
         );
         if let Ok(cd) = client.query(&children_query, None).await
             && let Some(items) = cd
-                .pointer("/documentChildren/items")
+                .pointer("/documentOutgoingRelationships/items")
                 .and_then(|v| v.as_array())
         {
             for node in items {
