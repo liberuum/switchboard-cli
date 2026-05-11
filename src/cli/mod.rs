@@ -13,6 +13,7 @@ pub mod init;
 pub mod interactive;
 pub mod introspect;
 pub mod jobs;
+pub mod migrate;
 pub mod models;
 pub mod mutate;
 pub mod ops;
@@ -126,6 +127,18 @@ pub enum Commands {
         id_mapping: Option<String>,
     },
 
+    /// Migrate a drive (with full op history and preserved UUIDs) between two profiles
+    Migrate {
+        /// Source drive ID or slug (resolved on the --from profile)
+        source_drive: String,
+        /// Source profile name
+        #[arg(long)]
+        from: String,
+        /// Destination profile name
+        #[arg(long)]
+        to: String,
+    },
+
     /// Manage authentication
     #[command(subcommand)]
     Auth(auth::AuthCommand),
@@ -197,6 +210,11 @@ pub async fn dispatch(
             import_export::run_import(files, drive, strict, id_mapping, format, profile, quiet)
                 .await
         }
+        Commands::Migrate {
+            source_drive,
+            from,
+            to,
+        } => migrate::run(source_drive, from, to, quiet).await,
         Commands::Auth(cmd) => auth::run(cmd, format, profile).await,
         Commands::Watch(cmd) => watch::run(cmd, format, profile, quiet).await,
         Commands::Jobs(cmd) => jobs::run(cmd, format, profile, quiet).await,

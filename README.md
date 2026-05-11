@@ -155,6 +155,15 @@ switchboard export drive my-drive --out ./backup/ # Export one drive
 switchboard import ./backup/*.phd --drive another-drive
 ```
 
+### 5. Migrate a drive between profiles
+
+```bash
+switchboard migrate my-drive --from local --to staging
+```
+
+Preserves the drive's UUID, every document's UUID, and the full operation
+history. Aborts if the destination already has a drive with the same slug.
+
 ## Commands
 
 ### Setup & Configuration
@@ -222,6 +231,7 @@ switchboard import ./backup/*.phd --drive another-drive
 | `switchboard export drive <slug> --out ./dir/` | Export all documents in a drive |
 | `switchboard export doc <id> --drive <slug> --out file.phd` | Export a single document |
 | `switchboard import <paths...> --drive <slug> [--strict] [--id-mapping <file>]` | Import `.phd` files into a drive. **Directory args are walked recursively** and their sub-path becomes folder hierarchy on the destination (existing folders are reused). File args land at drive root. **Forward references between docs are auto-deferred and resolved at the end of the import**, so bidirectional links in cross-doc graphs (knowledge bases, MOC + note structures) survive the roundtrip. `--strict` fails the run on any rejected op or state mismatch. `--id-mapping` is a JSON `{"old-uuid":"new-uuid"}` map for rewriting cross-document references across multiple invocations. |
+| `switchboard migrate <source-drive> --from <profile> --to <profile>` | Move a drive between two profiles in one shot. Preserves the drive's UUID, every contained document's UUID, and the full operation history (drive-scope and document-scope) by replaying raw actions via `mutateDocumentAsync`. Refuses to run if the destination already has a drive with the source's slug. The source drive is left untouched (copy, not move). |
 
 All export commands support operation filters: `--action-types <types>` (comma-separated action types), `--since-revision <n>` (operations from revision N onwards), `--from <datetime>` and `--to <datetime>` (ISO 8601 time range). These enable incremental and selective exports.
 

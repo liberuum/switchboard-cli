@@ -112,6 +112,9 @@ impl ReplHelper {
             "export doc ".into(),
             "export drive ".into(),
             "import ".into(),
+            "migrate ".into(),
+            "migrate --from ".into(),
+            "migrate --to ".into(),
             // Watch
             "watch docs".into(),
             "watch docs --drive ".into(),
@@ -160,6 +163,7 @@ impl ReplHelper {
             "drives".into(),
             "docs".into(),
             "import-export".into(),
+            "migrate".into(),
             "auth".into(),
             "watch".into(),
             "jobs".into(),

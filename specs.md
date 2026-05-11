@@ -688,6 +688,41 @@ The import flow:
 
 ---
 
+### 7a. Drive Migration
+
+```
+switchboard migrate <source-drive> --from <profile> --to <profile>
+```
+
+Moves a drive between two Switchboard profiles in one invocation, producing a
+byte-for-byte equivalent drive on the destination — same drive UUID, same
+contained-document UUIDs, same operation history end-to-end.
+
+**Behavior (fixed; no flags):**
+
+- Always preserves the source drive's UUID on the destination.
+- Always preserves every contained document's UUID.
+- Always replays the full operation history (document scope + drive scope +
+  any custom scopes).
+- Always strict: any failed `mutateDocumentAsync` submission or async job
+  failure aborts immediately.
+- Source drive is left untouched (copy, not move).
+- Refuses to run if the destination already has a drive with the same slug
+  (no auto-suffix, no overwrite, no prompt).
+
+**Mechanism.** Unlike `import`, which uses the typed model-specific
+`createDocument` mutation (auto-generates IDs server-side), `migrate`
+submits raw actions directly via `mutateDocumentAsync`. The `CREATE_DOCUMENT`
+action carries the source UUID in its `input.id`, so the destination reactor
+materialises the document with that exact ID. The same path replays
+`SET_DRIVE_NAME`, `SET_DRIVE_ICON`, `ADD_FILE`, `ADD_FOLDER`, and every
+document-level op verbatim, preserving timestamps and action IDs.
+
+**Output:** documents migrated (drive + children) and total operations
+replayed.
+
+---
+
 ### 8. Operations History
 
 ```

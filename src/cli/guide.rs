@@ -13,6 +13,8 @@ pub enum GuideCommand {
     Docs,
     /// How import/export works with .phd files
     ImportExport,
+    /// Migrating a drive between two profiles, with preserved UUIDs and ops
+    Migrate,
     /// Authentication and authorization
     Auth,
     /// Permissions system (document, operation, group)
@@ -42,6 +44,7 @@ pub fn run(topic: GuideCommand) -> Result<()> {
         GuideCommand::Drives => print_drives(),
         GuideCommand::Docs => print_docs(),
         GuideCommand::ImportExport => print_import_export(),
+        GuideCommand::Migrate => print_migrate(),
         GuideCommand::Auth => print_auth(),
         GuideCommand::Permissions => print_permissions(),
         GuideCommand::Watch => print_watch(),
@@ -367,6 +370,57 @@ EXAMPLES
 
   # Export operations within a time range
   switchboard export all --out ./backup/ --from 2025-01-01T00:00:00Z --to 2025-06-01T00:00:00Z"#
+    );
+}
+
+fn print_migrate() {
+    println!(
+        r#"DRIVE MIGRATION
+
+Move a drive (and everything inside it) from one Switchboard profile to
+another, preserving all UUIDs and operation history.
+
+  switchboard migrate <source-drive> --from <profile> --to <profile>
+
+EXAMPLE
+
+  switchboard migrate my-drive --from local --to staging
+
+WHAT'S PRESERVED
+
+  • The drive's UUID is identical on the destination.
+  • Every contained document's UUID is identical.
+  • Every operation — drive-scope (SET_DRIVE_NAME, ADD_FILE, ADD_FOLDER, ...)
+    and document-scope (CREATE_DOCUMENT, UPGRADE_DOCUMENT, plus every
+    domain mutation) — is replayed verbatim with its original action id
+    and timestamp.
+
+BEHAVIOR (NO FLAGS)
+
+  Migration is intentionally strict and opinionated:
+
+  • Source drive is left untouched (copy, not move).
+  • If the destination already has a drive with the source's slug, the
+    command aborts before sending any data — no auto-suffix, no overwrite.
+  • Any submission failure or async job error aborts immediately; there is
+    no partial-success path.
+
+HOW IT DIFFERS FROM EXPORT + IMPORT
+
+  `switchboard import` calls each model's typed `createDocument` mutation,
+  which auto-generates fresh UUIDs server-side and discards the source IDs.
+  `migrate` bypasses that path entirely: it submits raw actions via
+  `mutateDocumentAsync`, so the `CREATE_DOCUMENT` action carries the source
+  UUID in its `input.id` and the destination reactor materialises the doc
+  with that exact ID.
+
+OUTPUT
+
+  ✓ Migration complete
+      Drive:      My Drive (5f3a...e7c1)
+      Slug:       my-drive
+      Documents:  8  (1 drive + 7 children)
+      Operations: 142"#
     );
 }
 
@@ -855,6 +909,7 @@ IMPORT / EXPORT
   import <paths...> --drive <id> Import .phd files (or whole directories — folders rebuilt)
                                   [--strict]                    Fail on any rejected op or state mismatch
                                   [--id-mapping <file.json>]    Rewrite UUIDs in op inputs (cross-reactor cloning)
+  migrate <drive> --from <p> --to <p>  Move drive between profiles preserving UUIDs + full op history
 
 AUTH
   auth login [--token <jwt>]    Authenticate

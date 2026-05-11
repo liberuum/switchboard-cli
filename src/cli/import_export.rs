@@ -692,7 +692,11 @@ const WRITE_DELAY_MS: u64 = 100;
 /// ones, so the poll never produces server log noise. Returns Ok on terminal
 /// success states (COMPLETED, READ_READY) and Err on terminal failure states
 /// (FAILED, CANCELLED) or timeout.
-async fn wait_for_job(client: &GraphQLClient, job_id: &str, timeout_ms: u64) -> Result<()> {
+pub(crate) async fn wait_for_job(
+    client: &GraphQLClient,
+    job_id: &str,
+    timeout_ms: u64,
+) -> Result<()> {
     let escaped = job_id.replace('"', r#"\""#);
     let query = format!(r#"{{ jobStatus(jobId: "{escaped}") {{ id status error }} }}"#);
     let start = std::time::Instant::now();
@@ -717,7 +721,10 @@ async fn wait_for_job(client: &GraphQLClient, job_id: &str, timeout_ms: u64) -> 
 }
 
 /// Fetch drive nodes via the document() query on the main GraphQL endpoint.
-async fn fetch_drive_nodes(client: &GraphQLClient, drive_identifier: &str) -> Result<Vec<Value>> {
+pub(crate) async fn fetch_drive_nodes(
+    client: &GraphQLClient,
+    drive_identifier: &str,
+) -> Result<Vec<Value>> {
     let escaped = drive_identifier.replace('"', r#"\""#);
     let query = format!(r#"{{ document(identifier: "{escaped}") {{ document {{ state }} }} }}"#,);
     let data = client.query(&query, None).await?;
@@ -731,7 +738,7 @@ async fn fetch_drive_nodes(client: &GraphQLClient, drive_identifier: &str) -> Re
 
 /// Fetch a document's full data (metadata + state + operations) via the main GraphQL endpoint.
 /// Uses document() for metadata/state and documentOperations() for ops with pagination.
-async fn fetch_document(
+pub(crate) async fn fetch_document(
     client: &GraphQLClient,
     doc_id: &str,
     filter: &OpFilterArgs,
