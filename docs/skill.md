@@ -81,7 +81,9 @@ switchboard docs list --drive <slug> -t <type> --format json  # Filter by docume
 switchboard docs list --drive <slug> --format svg --out tree.svg  # Visual tree
 
 switchboard docs get <id|name> --format json                # Get document metadata
-switchboard docs get <id|name> --drive <slug> --format json # Narrow by drive
+switchboard docs get <id|name> --drive <slug> --format json # Narrow by drive (CLI >= 1.0.28;
+                                                            # older versions fail falsely — omit --drive there.
+                                                            # Slugs are per-server: check `drives list` first)
 switchboard docs get <id|name> --state --format json        # Include full document state
 
 switchboard docs tree --format json                         # File tree (all drives)
