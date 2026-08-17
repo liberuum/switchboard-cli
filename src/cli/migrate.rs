@@ -412,7 +412,7 @@ async fn fetch_operations(client: &GraphQLClient, doc_id: &str) -> Result<Vec<Va
     loop {
         let offset = all_ops.len();
         let ops_query = format!(
-            r#"{{ documentOperations(filter: {{ documentId: "{escaped}" }}, paging: {{ limit: {OP_BATCH_SIZE}, offset: {offset} }}) {{ items {{ id index action {{ id type input scope timestampUtcMs attachments {{ data mimeType hash extension fileName }} context {{ signer {{ user {{ address networkId chainId }} app {{ name key }} signatures }} }} }} timestampUtcMs hash skip error }} totalCount }} }}"#,
+            r#"{{ documentOperations(filter: {{ documentId: "{escaped}" }}, paging: {{ limit: {OP_BATCH_SIZE}, offset: {offset} }}) {{ items {{ id index action {{ id type input scope timestampUtcMs context {{ signer {{ user {{ address networkId chainId }} app {{ name key }} signatures }} }} }} timestampUtcMs hash skip error }} totalCount }} }}"#,
         );
         let ops_data = client.query(&ops_query, None).await?;
         if total_count.is_none() {
