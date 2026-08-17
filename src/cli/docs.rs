@@ -511,11 +511,13 @@ async fn get(
 ) -> Result<()> {
     let (name, _profile, client) = helpers::setup(profile_name)?;
 
-    // Build the identifier: if --drive is given, use "drive/doc" format
-    let identifier = match drive {
-        Some(d) => format!("{d}/{id}"),
-        None => id.to_string(),
-    };
+    // Always resolve by the document's own id/slug. (The old "drive/doc"
+    // compound identifier is not understood by the reactor's document
+    // resolver, which made every `docs get --drive` lookup fail and fall
+    // back to a name search that can't match a UUID.) --drive instead
+    // scopes the result: direct hits are membership-checked against the
+    // drive, and the name-search fallback stays drive-scoped.
+    let identifier = id.to_string();
 
     // Visual formats always need state
     let need_state = include_state || format.is_visual();
@@ -536,7 +538,27 @@ async fn get(
             .is_some_and(|d| !d.is_null());
 
         if found {
-            (result.unwrap(), identifier.clone())
+            let data = result.unwrap();
+            // --drive narrows the search: verify the direct hit is actually
+            // a member of that drive (or the drive document itself).
+            if let Some(d) = drive {
+                let (drive_id, _drive_name, nodes) = fetch_drive_nodes(&client, d).await?;
+                let doc_id = data
+                    .pointer("/document/document/id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&identifier)
+                    .to_string();
+                let is_member = doc_id == drive_id
+                    || nodes
+                        .iter()
+                        .any(|n| n["id"].as_str() == Some(doc_id.as_str()));
+                if !is_member {
+                    anyhow::bail!(
+                        "Document '{id}' exists but is not in drive '{d}' (omit --drive to fetch it)"
+                    );
+                }
+            }
+            (data, identifier.clone())
         } else {
             // Fallback: search by name across drives (or within --drive)
             let resolved = resolve_doc_by_name(&client, id, drive).await?;
