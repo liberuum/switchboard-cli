@@ -98,8 +98,33 @@ async fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
         })
         .collect();
 
+    // Count documents (file nodes) per drive from the state we already fetched
+    let doc_count = |d: &Value| -> usize {
+        d.pointer("/state/global/nodes")
+            .and_then(|v| v.as_array())
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .filter(|n| n["kind"].as_str() == Some("file"))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+
     match format {
-        OutputFormat::Json | OutputFormat::Raw => print_json(&Value::Array(drives)),
+        OutputFormat::Json | OutputFormat::Raw => {
+            let enriched: Vec<Value> = drives
+                .iter()
+                .map(|d| {
+                    let mut e = d.clone();
+                    if let Some(obj) = e.as_object_mut() {
+                        obj.insert("documentCount".into(), Value::from(doc_count(d)));
+                    }
+                    e
+                })
+                .collect();
+            print_json(&Value::Array(enriched))
+        }
         _ => {
             if drives.is_empty() {
                 println!("No drives found.");
@@ -112,10 +137,11 @@ async fn list(format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
                         d["id"].as_str().unwrap_or("-").to_string(),
                         d["name"].as_str().unwrap_or("-").to_string(),
                         d["slug"].as_str().unwrap_or("-").to_string(),
+                        doc_count(d).to_string(),
                     ]
                 })
                 .collect();
-            print_table(&["ID", "Name", "Slug"], &rows);
+            print_table(&["ID", "Name", "Slug", "Docs"], &rows);
         }
     }
 
