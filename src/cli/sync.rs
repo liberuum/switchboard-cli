@@ -22,11 +22,11 @@ pub enum SyncCommand {
         /// Channel ID
         channel_id: String,
         /// Acknowledge up to this outbox sequence number
-        #[arg(long)]
-        ack: Option<i64>,
+        #[arg(long, default_value_t = 0)]
+        ack: i64,
         /// Latest known outbox sequence number
-        #[arg(long)]
-        latest: Option<i64>,
+        #[arg(long, default_value_t = 0)]
+        latest: i64,
     },
 }
 
@@ -55,20 +55,23 @@ async fn touch(input: &str, format: OutputFormat, profile_name: Option<&str>) ->
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
     let input_val = load_json_arg(input)?;
-    let gql_input = helpers::json_to_graphql(&input_val);
 
-    let mutation =
-        format!(r#"mutation {{ touchChannel(input: {gql_input}) {{ id name status }} }}"#);
+    // Pass the input as a GraphQL variable — inlining JSON as a GraphQL
+    // literal breaks on enum-typed fields (they'd be sent as quoted strings).
+    let mutation = "mutation($input: TouchChannelInput!) { touchChannel(input: $input) { success ackOrdinal } }";
+    let vars = serde_json::json!({ "input": input_val });
 
-    let data = client.query(&mutation, None).await?;
-    let channel = &data["touchChannel"];
+    let data = client.query(mutation, Some(&vars)).await?;
+    let result = &data["touchChannel"];
 
     match format {
-        OutputFormat::Json | OutputFormat::Raw => print_json(channel),
+        OutputFormat::Json | OutputFormat::Raw => print_json(result),
         _ => {
-            println!("Channel:  {}", channel["id"].as_str().unwrap_or("-"));
-            println!("Name:     {}", channel["name"].as_str().unwrap_or("-"));
-            println!("Status:   {}", channel["status"].as_str().unwrap_or("-"));
+            println!(
+                "Success:     {}",
+                result["success"].as_bool().unwrap_or(false)
+            );
+            println!("Ack ordinal: {}", result["ackOrdinal"]);
         }
     }
 
@@ -83,20 +86,22 @@ async fn push(
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
     let envelopes_val = load_json_arg(envelopes_input)?;
-    let gql_envelopes = helpers::json_to_graphql(&envelopes_val);
 
-    let mutation = format!(
-        r#"mutation {{ pushSyncEnvelopes(envelopes: {gql_envelopes}) {{ status acknowledged }} }}"#
-    );
+    // pushSyncEnvelopes returns a plain Boolean — no selection set allowed.
+    // Envelopes go through a GraphQL variable so enum fields like
+    // `type: "OPERATIONS"` coerce correctly (inlined literals would be sent
+    // as quoted strings, which enums reject).
+    let mutation =
+        "mutation($envelopes: [SyncEnvelopeInput!]!) { pushSyncEnvelopes(envelopes: $envelopes) }";
+    let vars = serde_json::json!({ "envelopes": envelopes_val });
 
-    let data = client.query(&mutation, None).await?;
+    let data = client.query(mutation, Some(&vars)).await?;
     let result = &data["pushSyncEnvelopes"];
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(result),
         _ => {
-            println!("Status:       {}", result["status"].as_str().unwrap_or("-"));
-            println!("Acknowledged: {}", result["acknowledged"]);
+            println!("Accepted: {}", result.as_bool().unwrap_or(false));
         }
     }
 
@@ -105,26 +110,22 @@ async fn push(
 
 async fn poll(
     channel_id: &str,
-    ack: Option<i64>,
-    latest: Option<i64>,
+    ack: i64,
+    latest: i64,
     format: OutputFormat,
     profile_name: Option<&str>,
 ) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    let mut args = format!(
-        r#"channelId: "{id}""#,
+    // outboxAck and outboxLatest are required (Int!) on the server.
+    let args = format!(
+        r#"channelId: "{id}", outboxAck: {ack}, outboxLatest: {latest}"#,
         id = channel_id.replace('"', r#"\""#)
     );
-    if let Some(a) = ack {
-        args.push_str(&format!(", outboxAck: {a}"));
-    }
-    if let Some(l) = latest {
-        args.push_str(&format!(", outboxLatest: {l}"));
-    }
 
-    let query =
-        format!(r#"{{ pollSyncEnvelopes({args}) {{ channelId envelopes {{ id data }} }} }}"#);
+    let query = format!(
+        r#"{{ pollSyncEnvelopes({args}) {{ ackOrdinal hasMore envelopes {{ type channelMeta {{ id }} key dependsOn cursor {{ remoteName cursorOrdinal lastSyncedAtUtcMs }} operations {{ operation {{ id index timestampUtcMs hash skip error action {{ id type input scope timestampUtcMs }} }} context {{ documentId documentType scope branch ordinal }} }} }} deadLetters {{ documentId error errorType jobId branch scopes operationCount }} }} }}"#
+    );
 
     let data = client.query(&query, None).await?;
     let result = &data["pollSyncEnvelopes"];
@@ -132,10 +133,22 @@ async fn poll(
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(result),
         _ => {
-            let channel = result["channelId"].as_str().unwrap_or("-");
             let envelopes = result["envelopes"].as_array().map(|a| a.len()).unwrap_or(0);
-            println!("Channel:   {channel}");
-            println!("Envelopes: {envelopes}");
+            let dead = result["deadLetters"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0);
+            println!("Channel:     {channel_id}");
+            println!("Ack ordinal: {}", result["ackOrdinal"]);
+            println!(
+                "Has more:    {}",
+                result["hasMore"].as_bool().unwrap_or(false)
+            );
+            println!("Envelopes:   {envelopes}");
+            if dead > 0 {
+                println!("Dead letters: {dead}");
+                print_json(&result["deadLetters"]);
+            }
             if envelopes > 0 {
                 println!();
                 print_json(&result["envelopes"]);
