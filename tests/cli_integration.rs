@@ -486,6 +486,32 @@ fn docs_add_to_and_remove_from() {
         "d2 should contain the doc node after add-to"
     );
 
+    // `docs parents` must report BOTH containing drives. The relationship
+    // index only records the creation-time parent (d1), so this asserts the
+    // node-tree scan that fixes the historical single-drive under-reporting.
+    // The scan reads drive state via findDocuments, which can lag a just-
+    // dispatched ADD_FILE by a moment — retry briefly before failing.
+    let mut parents: Vec<serde_json::Value> = Vec::new();
+    for _ in 0..10 {
+        let (parents_out, _, ok) = run(&["docs", "parents", doc_id, "--format", "json"]);
+        assert!(ok, "parents failed");
+        parents = serde_json::from_str(&parents_out).unwrap();
+        let has_both = parents.iter().any(|p| p["id"].as_str() == Some(d1_id))
+            && parents.iter().any(|p| p["id"].as_str() == Some(d2_id));
+        if has_both {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert!(
+        parents.iter().any(|p| p["id"].as_str() == Some(d1_id)),
+        "d1 (creation drive) should be a parent"
+    );
+    assert!(
+        parents.iter().any(|p| p["id"].as_str() == Some(d2_id)),
+        "d2 (add-to drive) should be a parent"
+    );
+
     // Remove from d2
     let (_, _, ok) = run(&["docs", "remove-from", d2_id, doc_id, "--format", "json"]);
     assert!(ok, "remove-from failed");
@@ -503,6 +529,86 @@ fn docs_add_to_and_remove_from() {
         !d2_nodes.iter().any(|n| n["id"].as_str() == Some(doc_id)),
         "d2 should no longer contain the doc node"
     );
+
+    // Cleanup
+    run(&["drives", "delete", d1_id, d2_id, "-y"]);
+}
+
+/// Deleting a doc that lives in two drives must strip the file node from
+/// BOTH drives' state (no ghost nodes), not just the creation-time parent.
+#[test]
+fn docs_delete_cleans_all_drive_nodes() {
+    let pid = std::process::id();
+
+    let mut drive_ids = Vec::new();
+    for prefix in ["del-a", "del-b"] {
+        let (out, _, ok) = run(&[
+            "drives",
+            "create",
+            "--name",
+            &format!("{prefix}-{pid}"),
+            "--format",
+            "json",
+        ]);
+        assert!(ok, "drive create failed");
+        let drive: serde_json::Value = serde_json::from_str(&out).unwrap();
+        drive_ids.push(drive["id"].as_str().unwrap().to_string());
+    }
+    let (d1_id, d2_id) = (drive_ids[0].as_str(), drive_ids[1].as_str());
+
+    // Create a doc in d1, then also add it to d2
+    let (doc_out, _, ok) = run(&[
+        "docs",
+        "create",
+        "--type",
+        "powerhouse/subgraph",
+        "--name",
+        &format!("deltest-{pid}"),
+        "--drive",
+        d1_id,
+        "--format",
+        "json",
+    ]);
+    assert!(ok, "doc create failed");
+    let doc: serde_json::Value = serde_json::from_str(&doc_out).unwrap();
+    let doc_id = doc["id"].as_str().unwrap();
+
+    let (_, _, ok) = run(&["docs", "add-to", d2_id, doc_id, "--format", "json"]);
+    assert!(ok, "add-to failed");
+
+    // Delete the doc
+    let (_, stderr, ok) = run(&["docs", "delete", doc_id, "-y"]);
+    assert!(ok, "delete failed: {stderr}");
+
+    // Neither drive may retain a file node for the deleted doc. The
+    // DELETE_NODE ops are processed server-side, so allow a short settle
+    // window before declaring a ghost.
+    for drive_id in [d1_id, d2_id] {
+        let mut ghost = true;
+        for _ in 0..10 {
+            let (out, _, ok) = run(&["drives", "get", drive_id, "--format", "json"]);
+            assert!(ok, "drives get failed");
+            let state: serde_json::Value = serde_json::from_str(&out).unwrap();
+            let nodes = state
+                .pointer("/state/global/nodes")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            ghost = nodes.iter().any(|n| n["id"].as_str() == Some(doc_id));
+            if !ghost {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        assert!(
+            !ghost,
+            "drive {drive_id} still references deleted doc {doc_id} (ghost node)"
+        );
+    }
+
+    // And the doc itself must be gone
+    let (_, _, ok) = run(&["docs", "get", doc_id, "--format", "json"]);
+    assert!(!ok, "doc should no longer resolve after delete");
 
     // Cleanup
     run(&["drives", "delete", d1_id, d2_id, "-y"]);

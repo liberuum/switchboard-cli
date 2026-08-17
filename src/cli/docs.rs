@@ -678,27 +678,16 @@ async fn get(
                 println!("Modified: {modified}");
             }
 
-            // Show parent drive info
+            // Show parent drive info. Scans drive node trees (source of
+            // truth) rather than the relationship index, which only records
+            // the creation-time parent — see find_containing_drives.
             let doc_id = doc["id"].as_str().unwrap_or("");
             if !doc_id.is_empty() {
-                let escaped = doc_id.replace('"', r#"\""#);
-                let parents_query = format!(
-                    r#"{{ documentIncomingRelationships(targetIdentifier: "{escaped}", relationshipType: "child") {{ items {{ id name slug documentType }} }} }}"#
-                );
-                if let Ok(parents_data) = client.query(&parents_query, None).await
-                    && let Some(parents) = parents_data
-                        .pointer("/documentIncomingRelationships/items")
-                        .and_then(|v| v.as_array())
-                {
-                    for parent in parents
-                        .iter()
-                        .filter(|p| p["documentType"].as_str() == Some("powerhouse/document-drive"))
-                    {
-                        let pid = parent["id"].as_str().unwrap_or("-");
-                        let pname = parent["name"].as_str().unwrap_or("-");
-                        let pslug = parent["slug"].as_str().unwrap_or("-");
-                        println!("Drive:    {pname} ({pslug}) [{pid}]");
-                    }
+                for parent in find_containing_drives(&client, doc_id).await {
+                    println!(
+                        "Drive:    {} ({}) [{}]",
+                        parent.name, parent.slug, parent.id
+                    );
                 }
             }
 
@@ -1098,27 +1087,106 @@ async fn delete(ids: &[String], skip_confirm: bool, profile_name: Option<&str>) 
     Ok(())
 }
 
-/// Find parent drives of a document (returns their UUIDs).
-async fn find_parent_drives(client: &crate::graphql::GraphQLClient, doc_id: &str) -> Vec<String> {
-    let escaped = doc_id.replace('"', r#"\""#);
-    let query = format!(
-        r#"{{ documentIncomingRelationships(targetIdentifier: "{escaped}", relationshipType: "child") {{ items {{ id documentType }} }} }}"#
-    );
-    client
-        .query(&query, None)
+/// A drive that contains a document (has a file node for it in
+/// `state.global.nodes`), plus the folder the node sits in (None = drive root).
+pub struct ContainingDrive {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    /// (folder_id, folder_name) when the file node lives inside a folder.
+    pub folder: Option<(String, String)>,
+}
+
+/// Enumerate ALL drives whose node tree contains a file entry for `doc_id`.
+///
+/// Do NOT rely on `documentIncomingRelationships` for this: the relationship
+/// index only records the creation-time parent. `DocumentDrive.addFile` (what
+/// `docs add-to` dispatches) adds a `state.global.nodes` entry without
+/// updating the index, so a doc living in two drives is reported with a
+/// single parent there. Drive state is the source of truth — `docs list` and
+/// Connect both read it — so scan every drive's node tree.
+pub async fn find_containing_drives(
+    client: &crate::graphql::GraphQLClient,
+    doc_id: &str,
+) -> Vec<ContainingDrive> {
+    let data = match client
+        .query(
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name slug state } } }"#,
+            None,
+        )
         .await
-        .ok()
-        .and_then(|d| {
-            d.pointer("/documentIncomingRelationships/items")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter(|p| p["documentType"].as_str() == Some("powerhouse/document-drive"))
-                        .filter_map(|p| p["id"].as_str().map(String::from))
-                        .collect()
-                })
-        })
-        .unwrap_or_default()
+    {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+
+    let drives = data
+        .pointer("/findDocuments/items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut result = Vec::new();
+    for drive in &drives {
+        // Skip soft-deleted drives
+        if drive
+            .pointer("/state/document/isDeleted")
+            .and_then(|v| v.as_bool())
+            == Some(true)
+        {
+            continue;
+        }
+        let nodes = match drive
+            .pointer("/state/global/nodes")
+            .and_then(|v| v.as_array())
+        {
+            Some(n) => n,
+            None => continue,
+        };
+        let node = nodes
+            .iter()
+            .find(|n| n["kind"].as_str() == Some("file") && n["id"].as_str() == Some(doc_id));
+        let node = match node {
+            Some(n) => n,
+            None => continue,
+        };
+        let folder = node["parentFolder"]
+            .as_str()
+            .filter(|f| !f.is_empty())
+            .map(|folder_id| {
+                let folder_name = nodes
+                    .iter()
+                    .find(|n| {
+                        n["kind"].as_str() == Some("folder") && n["id"].as_str() == Some(folder_id)
+                    })
+                    .and_then(|n| n["name"].as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                (folder_id.to_string(), folder_name)
+            });
+        result.push(ContainingDrive {
+            id: drive["id"].as_str().unwrap_or("").to_string(),
+            name: drive["name"].as_str().unwrap_or("").to_string(),
+            slug: drive["slug"].as_str().unwrap_or("").to_string(),
+            folder,
+        });
+    }
+    result
+}
+
+/// Find parent drives of a document (returns their UUIDs).
+///
+/// Scans every drive's `state.global.nodes` (source of truth), so drives are
+/// found regardless of whether the doc was created in the drive or added
+/// later via ADD_FILE. Callers (delete's DELETE_NODE pre-step, rename's
+/// updateFile sync) only care about drives that actually hold a file node —
+/// relationship-only parents have no node to clean up or update.
+async fn find_parent_drives(client: &crate::graphql::GraphQLClient, doc_id: &str) -> Vec<String> {
+    find_containing_drives(client, doc_id)
+        .await
+        .into_iter()
+        .map(|d| d.id)
+        .collect()
 }
 
 /// Scan a drive's node tree and return file nodes whose documents don't exist.
@@ -1213,17 +1281,51 @@ async fn rename(
 async fn parents(id: &str, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    let escaped = id.replace('"', r#"\""#);
+    // Resolve slugs/names to the UUID used in drive node trees.
+    let uuid = helpers::resolve_doc(&client, id)
+        .await
+        .unwrap_or_else(|_| id.to_string());
+
+    // Source of truth: every drive whose node tree holds a file entry for the
+    // doc. The relationship index alone under-reports — it only records the
+    // creation-time parent, not drives the doc was added to via ADD_FILE.
+    let containing = find_containing_drives(&client, &uuid).await;
+    let mut items: Vec<Value> = containing
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "id": d.id,
+                "name": d.name,
+                "slug": d.slug,
+                "documentType": "powerhouse/document-drive",
+                "folder": d.folder.as_ref().map(|(fid, fname)| {
+                    serde_json::json!({ "id": fid, "name": fname })
+                }),
+            })
+        })
+        .collect();
+
+    // Merge relationship-index parents on top (covers non-drive parent
+    // documents and drives whose node entry was removed but whose
+    // relationship survives).
+    let escaped = uuid.replace('"', r#"\""#);
     let query = format!(
         r#"{{ documentIncomingRelationships(targetIdentifier: "{escaped}", relationshipType: "child") {{ items {{ id name slug documentType }} totalCount }} }}"#
     );
-
-    let data = client.query(&query, None).await?;
-    let items = data
-        .pointer("/documentIncomingRelationships/items")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    if let Ok(data) = client.query(&query, None).await
+        && let Some(rel_items) = data
+            .pointer("/documentIncomingRelationships/items")
+            .and_then(|v| v.as_array())
+    {
+        for p in rel_items {
+            let pid = p["id"].as_str().unwrap_or("");
+            if !items.iter().any(|existing| existing["id"] == pid) {
+                let mut entry = p.clone();
+                entry["folder"] = Value::Null;
+                items.push(entry);
+            }
+        }
+    }
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&Value::Array(items)),
@@ -1235,14 +1337,20 @@ async fn parents(id: &str, format: OutputFormat, profile_name: Option<&str>) -> 
             let rows: Vec<Vec<String>> = items
                 .iter()
                 .map(|p| {
+                    let folder = p
+                        .pointer("/folder/name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("/")
+                        .to_string();
                     vec![
                         p["id"].as_str().unwrap_or("-").to_string(),
                         p["name"].as_str().unwrap_or("-").to_string(),
                         p["documentType"].as_str().unwrap_or("-").to_string(),
+                        folder,
                     ]
                 })
                 .collect();
-            print_table(&["ID", "Name", "Type"], &rows);
+            print_table(&["ID", "Name", "Type", "Folder"], &rows);
         }
     }
 
