@@ -46,7 +46,7 @@ impl Config {
     pub fn add_profile(&mut self, name: String, profile: Profile) {
         // If this is the first profile or marked default, ensure only one default
         if profile.default || self.profiles.is_empty() {
-            for (_, p) in self.profiles.iter_mut() {
+            for p in self.profiles.values_mut() {
                 p.default = false;
             }
             let mut profile = profile;
