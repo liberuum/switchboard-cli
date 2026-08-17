@@ -23,9 +23,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # Use the runner's preinstalled rustup instead of downloading a
+      # toolchain action: action tarball downloads from codeload.github.com
+      # are rate limited (HTTP 429) and a failure there kills the release.
+      - name: Set up Rust toolchain
+        run: |
+          rustup toolchain install stable --no-self-update --profile minimal \
+            --component rustfmt --component clippy
+          rustup default stable
+          rustc --version && cargo --version
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
@@ -69,6 +75,20 @@ jobs:
               PATCH=$(echo "$CURRENT" | cut -d. -f3)
               NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
             fi
+
+            # Honor a manually pre-bumped Cargo.toml: if its version is ahead
+            # of the tag-derived bump and has not been tagged yet, release that
+            # version instead of silently overriding it (the build job rewrites
+            # Cargo.toml to whatever we resolve here).
+            CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "(.*)"$/\1/')
+            if [ -n "$CARGO_VERSION" ] && [ "$CARGO_VERSION" != "$NEXT" ]; then
+              HIGHEST=$(printf '%s\n%s\n' "$NEXT" "$CARGO_VERSION" | sort -V | tail -1)
+              if [ "$HIGHEST" = "$CARGO_VERSION" ] &&
+                 ! git rev-parse -q --verify "refs/tags/v${CARGO_VERSION}" >/dev/null; then
+                echo "Cargo.toml is pre-bumped to ${CARGO_VERSION} (ahead of ${NEXT}); releasing that."
+                NEXT="$CARGO_VERSION"
+              fi
+            fi
           fi
 
           echo "version=${NEXT}" >> "$GITHUB_OUTPUT"
@@ -95,9 +115,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+        run: |
+          rustup toolchain install stable --no-self-update --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+          rustc --version && cargo --version
 
       - name: Set version in Cargo.toml
         run: |
