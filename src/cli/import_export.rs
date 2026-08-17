@@ -1435,7 +1435,7 @@ async fn build_existing_folder_cache(
     }
 
     // For each folder, walk its parent chain to construct the path key.
-    for (id, _) in folder_info.iter() {
+    for id in folder_info.keys() {
         let mut chain: Vec<String> = Vec::new();
         let mut cur = Some(id.clone());
         while let Some(c) = cur {

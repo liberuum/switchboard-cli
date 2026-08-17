@@ -34,7 +34,7 @@ impl Config {
         if !self.profiles.contains_key(name) {
             return false;
         }
-        for (_, profile) in self.profiles.iter_mut() {
+        for profile in self.profiles.values_mut() {
             profile.default = false;
         }
         if let Some(profile) = self.profiles.get_mut(name) {
