@@ -61,13 +61,27 @@ fn status_progress(status: &str) -> &str {
 async fn status(job_id: &str, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
+    // NOTE: JobInfo fields are `id status result error createdAt completedAt`.
+    // `result` is deliberately NOT selected: the server declares it non-null
+    // (JSONObject!) but resolves null even for completed jobs, so selecting it
+    // turns every jobStatus query into an error.
     let query = format!(
-        r#"{{ jobStatus(jobId: "{id}") {{ id status progress result error createdAt updatedAt }} }}"#,
+        r#"{{ jobStatus(jobId: "{id}") {{ id status error createdAt completedAt }} }}"#,
         id = job_id.replace('"', r#"\""#)
     );
 
     let data = client.query(&query, None).await?;
     let job = &data["jobStatus"];
+
+    // Unknown job ids come back as a synthesized FAILED job with error
+    // "Job not found" — surface that as a clean not-found.
+    if job["error"].as_str() == Some("Job not found") {
+        match format {
+            OutputFormat::Json | OutputFormat::Raw => print_json(job),
+            _ => println!("Job {job_id} not found."),
+        }
+        return Ok(());
+    }
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(job),
@@ -75,17 +89,14 @@ async fn status(job_id: &str, format: OutputFormat, profile_name: Option<&str>) 
             let s = job["status"].as_str().unwrap_or("-");
             println!("Job:      {}", job["id"].as_str().unwrap_or("-"));
             println!("Status:   {}", status_progress(s));
-            if let Some(p) = job["progress"].as_f64() {
-                println!("Progress: {:.0}%", p * 100.0);
-            }
             if let Some(err) = job["error"].as_str().filter(|e| !e.is_empty()) {
                 println!("Error:    {err}");
             }
             if let Some(created) = job["createdAt"].as_str() {
                 println!("Created:  {created}");
             }
-            if let Some(updated) = job["updatedAt"].as_str() {
-                println!("Updated:  {updated}");
+            if let Some(completed) = job["completedAt"].as_str() {
+                println!("Completed: {completed}");
             }
         }
     }
@@ -103,8 +114,9 @@ async fn wait(
     let (_name, profile, client) = helpers::setup(profile_name)?;
 
     // First, check if the job is already in a terminal state.
+    // (`result` is not selectable — see comment in status().)
     let query = format!(
-        r#"{{ jobStatus(jobId: "{id}") {{ id status progress result error }} }}"#,
+        r#"{{ jobStatus(jobId: "{id}") {{ id status error }} }}"#,
         id = job_id.replace('"', r#"\""#)
     );
     if let Ok(data) = client.query(&query, None).await {
@@ -196,7 +208,7 @@ async fn wait(
     let data = client
         .query(
             &format!(
-                r#"{{ jobStatus(jobId: "{id}") {{ id status progress result error }} }}"#,
+                r#"{{ jobStatus(jobId: "{id}") {{ id status error }} }}"#,
                 id = job_id_owned.replace('"', r#"\""#)
             ),
             None,
