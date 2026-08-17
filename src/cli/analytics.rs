@@ -21,7 +21,7 @@ pub enum AnalyticsCommand {
         /// End date (e.g. 2026-12-31)
         #[arg(long)]
         end: Option<String>,
-        /// Granularity (e.g. HOURLY, DAILY, WEEKLY, MONTHLY, ANNUALLY, TOTAL)
+        /// Granularity: hourly, daily, weekly, monthly, quarterly, semiAnnual, annual, total (case-insensitive, so MONTHLY etc. also work)
         #[arg(long)]
         granularity: Option<String>,
         /// Metrics to include (comma-separated)
@@ -163,6 +163,31 @@ async fn currencies(format: OutputFormat, profile_name: Option<&str>) -> Result<
     Ok(())
 }
 
+/// Map a user-supplied granularity to the server's `AnalyticsGranularity`
+/// enum casing, case-insensitively (`MONTHLY` → `monthly`, `semiannual` /
+/// `SEMI_ANNUAL` → `semiAnnual`). Legacy aliases from older help text
+/// (`ANNUALLY`) are accepted too. Unknown values pass through unchanged so
+/// the server can report the valid options.
+fn normalize_granularity(input: &str) -> String {
+    let key: String = input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match key.as_str() {
+        "hourly" => "hourly",
+        "daily" => "daily",
+        "weekly" => "weekly",
+        "monthly" => "monthly",
+        "quarterly" => "quarterly",
+        "semiannual" | "semiannually" => "semiAnnual",
+        "annual" | "annually" => "annual",
+        "total" => "total",
+        _ => return input.to_string(),
+    }
+    .to_string()
+}
+
 async fn series(
     start: Option<String>,
     end: Option<String>,
@@ -183,8 +208,9 @@ async fn series(
         filter_parts.push(format!("end: \"{}\"", e.replace('"', r#"\""#)));
     }
     if let Some(ref g) = granularity {
-        // Granularity is an enum — send unquoted
-        filter_parts.push(format!("granularity: {g}"));
+        // Granularity is an enum — send unquoted, normalized to the server's
+        // casing (the AnalyticsGranularity enum values are lowercase/camelCase).
+        filter_parts.push(format!("granularity: {}", normalize_granularity(g)));
     }
     if let Some(ref m) = metrics {
         let list: String = m
