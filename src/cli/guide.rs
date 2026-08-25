@@ -315,8 +315,13 @@ EXPORT
                                        Export everything (all drives, organized by folders)
   switchboard export drive <slug> --out ./downloads/
                                        Export all documents in a drive
-  switchboard export doc <doc-id> --drive <slug> --out document.phd
-                                       Export a single document
+  switchboard export doc <doc-id> --out document.phd
+                                       Export a single document (add --drive <slug>
+                                       to scope the lookup to one drive)
+
+  Operation history is included by default so archives are fully replayable.
+  Pass --no-ops for a smaller, state-only export (operations.json = {{}}) —
+  the current state is still preserved, but the history is not.
 
   OPERATION FILTERS (available on all export commands):
 
@@ -332,9 +337,10 @@ EXPORT
 
   The .phd ZIP contains:
     header.json        Document metadata (id, type, name, revision, timestamps)
-    state.json         Initial empty state
+    state.json         Base state that operations.json replays from
+                       (with --no-ops this carries the current state)
     current-state.json Current document state
-    operations.json    Full operation history
+    operations.json    Full operation history ({{}} with --no-ops)
 
 IMPORT
 
@@ -359,7 +365,7 @@ EXAMPLES
   switchboard import ./backup/*.phd --drive new-drive
 
   # Move a single doc between instances
-  switchboard -p staging export doc abc123 --drive builders --out doc.phd
+  switchboard -p staging export doc abc123 --out doc.phd
   switchboard -p local import doc.phd --drive local-drive
 
   # Export only specific operation types
@@ -905,7 +911,7 @@ MODELS & OPERATIONS
 IMPORT / EXPORT
   export all [--out <dir>]      Export everything (all drives)
   export drive <id> --out <dir> Export all docs in a drive
-  export doc <id> --drive <id>  Export a document as .phd
+  export doc <id> [--drive <id>] Export a document as .phd
   import <paths...> --drive <id> Import .phd files (or whole directories — folders rebuilt)
                                   [--strict]                    Fail on any rejected op or state mismatch
                                   [--id-mapping <file.json>]    Rewrite UUIDs in op inputs (cross-reactor cloning)

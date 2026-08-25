@@ -544,13 +544,18 @@ ecosystem's drag-and-drop workflow.
 ```
 switchboard export all [-o ./dir/]                           # Export everything
 switchboard export drive <slug> [-o ./dir/]                  # Export all docs in a drive
-switchboard export doc <id> --drive <slug> [-o file.phd]     # Export a single document
+switchboard export doc <id> [--drive <slug>] [-o file.phd]   # Export a single document
 ```
+
+Exports include the full operation history by default, making every `.phd`
+fully replayable on import. On `export doc`, `--drive` is optional — the
+document can be resolved by its ID alone.
 
 **All export commands support operation filters:**
 
 | Flag | Description |
 |------|-------------|
+| `--no-ops` | Omit operation history (state-only export; `state.json` carries the current state) |
 | `--action-types <TYPES>` | Comma-separated action types to include |
 | `--since-revision <N>` | Only operations from revision N onwards |
 | `--from <ISO-8601>` | Only operations from this timestamp |

@@ -60,8 +60,13 @@ pub enum ExportCommand {
         /// Output directory (defaults to ./switchboard-export/)
         #[arg(long, short)]
         out: Option<String>,
-        /// Include operation history (for CLI archival/roundtrips via switchboard import)
+        /// Omit operation history — exports current state only, producing a
+        /// smaller but non-replayable archive
         #[arg(long)]
+        no_ops: bool,
+        /// Deprecated: operation history is now included by default. Accepted
+        /// so existing scripts keep working, but has no effect.
+        #[arg(long, hide = true)]
         with_ops: bool,
         #[command(flatten)]
         filter: OpFilterArgs,
@@ -70,14 +75,19 @@ pub enum ExportCommand {
     Doc {
         /// Document ID
         doc_id: String,
-        /// Drive ID or slug
+        /// Drive ID or slug (optional — omit to resolve the document by ID alone)
         #[arg(long)]
-        drive: String,
+        drive: Option<String>,
         /// Output file path (defaults to <name>.phd)
         #[arg(long, short)]
         out: Option<String>,
-        /// Include operation history (for CLI archival/roundtrips via switchboard import)
+        /// Omit operation history — exports current state only, producing a
+        /// smaller but non-replayable archive
         #[arg(long)]
+        no_ops: bool,
+        /// Deprecated: operation history is now included by default. Accepted
+        /// so existing scripts keep working, but has no effect.
+        #[arg(long, hide = true)]
         with_ops: bool,
         #[command(flatten)]
         filter: OpFilterArgs,
@@ -89,8 +99,13 @@ pub enum ExportCommand {
         /// Output directory (defaults to ./<drive-name>/)
         #[arg(long, short)]
         out: Option<String>,
-        /// Include operation history (for CLI archival/roundtrips via switchboard import)
+        /// Omit operation history — exports current state only, producing a
+        /// smaller but non-replayable archive
         #[arg(long)]
+        no_ops: bool,
+        /// Deprecated: operation history is now included by default. Accepted
+        /// so existing scripts keep working, but has no effect.
+        #[arg(long, hide = true)]
         with_ops: bool,
         #[command(flatten)]
         filter: OpFilterArgs,
@@ -103,24 +118,28 @@ pub async fn run_export(
     profile_name: Option<&str>,
     quiet: bool,
 ) -> Result<()> {
+    // Operation history is included by default; `--no-ops` opts out. The
+    // legacy `--with-ops` flag is accepted and ignored (it is now the default).
     match cmd {
         ExportCommand::All {
             out,
-            with_ops,
+            no_ops,
+            with_ops: _,
             filter,
-        } => export_all(out.as_deref(), with_ops, &filter, profile_name, quiet).await,
+        } => export_all(out.as_deref(), !no_ops, &filter, profile_name, quiet).await,
         ExportCommand::Doc {
             doc_id,
             drive,
             out,
-            with_ops,
+            no_ops,
+            with_ops: _,
             filter,
         } => {
             export_doc(
                 &doc_id,
-                &drive,
+                drive.as_deref(),
                 out.as_deref(),
-                with_ops,
+                !no_ops,
                 &filter,
                 profile_name,
                 quiet,
@@ -130,13 +149,14 @@ pub async fn run_export(
         ExportCommand::Drive {
             drive,
             out,
-            with_ops,
+            no_ops,
+            with_ops: _,
             filter,
         } => {
             export_drive(
                 &drive,
                 out.as_deref(),
-                with_ops,
+                !no_ops,
                 &filter,
                 profile_name,
                 quiet,
@@ -230,7 +250,7 @@ fn build_current_state(state: &Value) -> PhdState {
 
 async fn export_all(
     out_dir: Option<&str>,
-    with_ops: bool,
+    include_ops: bool,
     filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
@@ -374,13 +394,9 @@ async fn export_all(
                 Ok((doc, operations)) => {
                     let header = build_header(&doc, &operations);
                     let state = extract_state(&doc);
-                    let phd_ops = if with_ops {
-                        split_ops_by_scope(&operations)
-                    } else {
-                        empty_ops()
-                    };
                     let current_state = build_current_state(&state);
-                    let initial_state = extract_initial_state(&operations, &current_state);
+                    let (phd_ops, initial_state) =
+                        build_ops_and_initial_state(include_ops, &operations, &current_state);
 
                     let safe_file = sanitize_filename(file_name);
                     let file_path = file_dir.join(format!("{safe_file}.phd"));
@@ -445,30 +461,30 @@ async fn export_all(
 
 async fn export_doc(
     doc_id: &str,
-    drive: &str,
+    drive: Option<&str>,
     out_path: Option<&str>,
-    with_ops: bool,
+    include_ops: bool,
     filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
 ) -> Result<()> {
     let (_name, _profile, client, _cache) = helpers::setup_with_cache(profile_name)?;
 
-    // Resolve document: if drive is provided, use "drive/doc_id" format
-    let identifier = format!("{drive}/{doc_id}");
+    // Resolve document: scope the lookup to the drive when one is given
+    // ("drive/doc" format); otherwise resolve the identifier directly.
+    let identifier = match drive {
+        Some(d) => format!("{d}/{doc_id}"),
+        None => doc_id.to_string(),
+    };
     let resolved_id = helpers::resolve_doc(&client, &identifier).await?;
 
     let (doc, operations) = fetch_document(&client, &resolved_id, filter).await?;
 
     let header = build_header(&doc, &operations);
     let state = extract_state(&doc);
-    let phd_ops = if with_ops {
-        split_ops_by_scope(&operations)
-    } else {
-        empty_ops()
-    };
     let current_state = build_current_state(&state);
-    let initial_state = extract_initial_state(&operations, &current_state);
+    let (phd_ops, initial_state) =
+        build_ops_and_initial_state(include_ops, &operations, &current_state);
 
     // Determine output path
     let safe_name = sanitize_filename(&header.name);
@@ -486,7 +502,7 @@ async fn export_doc(
             "✓".green(),
             abs_path.display(),
             header.document_type,
-            operations.len(),
+            phd_ops.0.values().map(Vec::len).sum::<usize>(),
             format_bytes(file_size),
         );
     }
@@ -497,7 +513,7 @@ async fn export_doc(
 async fn export_drive(
     drive: &str,
     out_dir: Option<&str>,
-    with_ops: bool,
+    include_ops: bool,
     filter: &OpFilterArgs,
     profile_name: Option<&str>,
     quiet: bool,
@@ -571,13 +587,9 @@ async fn export_drive(
                 let state = extract_state(&doc);
 
                 let header = build_header(&doc, &operations);
-                let phd_ops = if with_ops {
-                    split_ops_by_scope(&operations)
-                } else {
-                    empty_ops()
-                };
                 let current_state = build_current_state(&state);
-                let initial_state = extract_initial_state(&operations, &current_state);
+                let (phd_ops, initial_state) =
+                    build_ops_and_initial_state(include_ops, &operations, &current_state);
 
                 // Resolve the folder path for this file
                 let safe_file = sanitize_filename(file_name);
@@ -849,10 +861,26 @@ pub(crate) async fn fetch_document(
     Ok((doc, cleaned_ops))
 }
 
-/// Extract state from a document value. In the new API, state is a JSONObject directly.
-/// Empty operations — matches Connect's export format (`operations.json: {}`)
-fn empty_ops() -> PhdOperations {
-    PhdOperations::default()
+/// Build the operations + initial-state pair for a .phd archive.
+///
+/// The .phd invariant is: `state.json` is the base document that
+/// `operations.json` replays from to reach `current-state.json`.
+/// - With ops: initial state comes from the CREATE/UPGRADE history so the
+///   full replay reproduces the current state.
+/// - Without ops (`--no-ops`): operations.json is `{}` (matching Connect's
+///   export format), so state.json MUST carry the current state — otherwise
+///   the archive opens empty because there is nothing to replay.
+fn build_ops_and_initial_state(
+    include_ops: bool,
+    operations: &[Value],
+    current_state: &PhdState,
+) -> (PhdOperations, PhdState) {
+    if include_ops {
+        let initial = extract_initial_state(operations, current_state);
+        (split_ops_by_scope(operations), initial)
+    } else {
+        (PhdOperations::default(), current_state.clone())
+    }
 }
 
 /// Split operations by scope for the .phd format.
@@ -870,6 +898,7 @@ fn split_ops_by_scope(operations: &[Value]) -> PhdOperations {
     PhdOperations(map)
 }
 
+/// Extract state from a document value. In the new API, state is a JSONObject directly.
 fn extract_state(doc: &Value) -> Value {
     doc.get("state")
         .cloned()
@@ -1830,9 +1859,58 @@ async fn verify_state(
 
 #[cfg(test)]
 mod tests {
-    use super::{has_forward_ref, rewrite_ids_in_value};
+    use super::{build_ops_and_initial_state, has_forward_ref, rewrite_ids_in_value};
+    use crate::phd::PhdState;
     use serde_json::json;
     use std::collections::HashMap;
+
+    fn sample_ops() -> Vec<serde_json::Value> {
+        vec![
+            json!({
+                "action": {
+                    "scope": "document",
+                    "type": "UPGRADE_DOCUMENT",
+                    "input": { "initialState": {
+                        "auth": {},
+                        "document": { "version": 1 },
+                        "global": { "invoiceNo": "" },
+                        "local": {}
+                    } }
+                }
+            }),
+            json!({
+                "action": { "scope": "global", "type": "EDIT_INVOICE",
+                            "input": { "invoiceNo": "24455" } }
+            }),
+        ]
+    }
+
+    fn current_state() -> PhdState {
+        PhdState {
+            global: json!({ "invoiceNo": "24455" }),
+            ..PhdState::default()
+        }
+    }
+
+    #[test]
+    fn with_ops_keeps_history_and_initial_state() {
+        let (ops, initial) = build_ops_and_initial_state(true, &sample_ops(), &current_state());
+        // Both scopes preserved
+        assert_eq!(ops.0.get("document").map(Vec::len), Some(1));
+        assert_eq!(ops.0.get("global").map(Vec::len), Some(1));
+        // Initial state comes from the UPGRADE_DOCUMENT op (pre-replay base)
+        assert_eq!(initial.global["invoiceNo"], "");
+    }
+
+    #[test]
+    fn no_ops_must_carry_current_state() {
+        // The .phd invariant: state.json + replay(operations.json) = document.
+        // With no ops to replay, state.json must BE the current state —
+        // otherwise the archive opens empty (the original export bug).
+        let (ops, initial) = build_ops_and_initial_state(false, &sample_ops(), &current_state());
+        assert!(ops.0.is_empty(), "operations.json must serialize as {{}}");
+        assert_eq!(initial.global["invoiceNo"], "24455");
+    }
 
     fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
