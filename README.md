@@ -253,7 +253,8 @@ All export commands support operation filters: `--action-types <types>` (comma-s
 | `switchboard auth logout [--identity-only]` | Remove token and/or signing identity from current profile |
 | `switchboard auth status` | Show authentication and signing state |
 | `switchboard auth token` | Print the current token |
-| `switchboard docs link <source> <target> -t <TYPE>` | Add a relationship edge (signed when an identity is configured) |
+| `switchboard docs link <source> <target> -t <TYPE> [--reason "…"] [--confidence grounded\|established\|speculative]` | Add a relationship edge; `--reason` stores WHY it exists as edge metadata (signed when an identity is configured) |
+| `switchboard docs annotate <source> <target> -t <TYPE> --reason "…" [--confidence …]` | Set or replace the reason / confidence on an existing edge (`UPDATE_RELATIONSHIP`) |
 | `switchboard docs unlink <source> <target> -t <TYPE>` | Remove a relationship edge |
 
 ### Analytics
@@ -424,9 +425,22 @@ switchboard auth login --renown --app-name my-agent   # what the vault shows bes
 switchboard auth status                    # Signing: on as my-agent (did:key:z…) acting for 0x…
 ```
 
-From then on `docs apply`, `docs mutate`, `docs link` and `docs unlink` send actions through the typed `execute` mutation with a `context.signer`: ECDSA P-256 over `"\x19Signed Operation:\n" + len + timestamp + did + sha256(scope+type+input) + prevStateHash`, exactly what `@renown/sdk` produces, so the reactor stores the action untouched and rejects a tampered one (`InvalidSignatureError`). `docs create` and the model-namespaced paths that build actions server-side remain server-signed.
+From then on `docs apply`, `docs mutate`, `docs link`, `docs annotate` and `docs unlink` send actions through the typed `execute` mutation with a `context.signer`: ECDSA P-256 over `"\x19Signed Operation:\n" + len + timestamp + did + sha256(scope+type+input) + prevStateHash`, exactly what `@renown/sdk` produces, so the reactor stores the action untouched and rejects a tampered one (`InvalidSignatureError`). `docs create` and the model-namespaced paths that build actions server-side remain server-signed.
 
 Per-invocation overrides: `SWITCHBOARD_APP_NAME` (label this run differently), `SWITCHBOARD_IDENTITY_DIR` (another `.ph` directory), `SWITCHBOARD_UNSIGNED=1` (write unsigned on purpose). A configured identity that cannot be loaded is an error, never a silent downgrade to unsigned. The signature proves the key; the key↔address binding is the Renown credential (`.renown.json`, 7-day validity — `auth status` warns when it has expired; renew with `ph login`).
+
+## Edge metadata (the articulation test)
+
+A relationship row in the reactor carries an opaque `metadata` (jsonb). `docs link --reason` fills it with `{ "reason": "…", "confidence": "…" }` so the *why* of an edge is data on the edge, readable by the vault's graph queries (`knowledgeGraphEdges { reason confidence }`) and its health report, instead of prose in a note that nothing can check:
+
+```bash
+switchboard docs link <note-a> <note-b> -t BUILDS_ON \
+  --reason "B generalises A's cache-invalidation claim to every read model" --confidence established
+switchboard docs annotate <note-a> <note-b> -t BUILDS_ON --reason "…"   # replace a reason later
+switchboard docs link <moc> <note> -t CORE_IDEA                          # navigation edges may stay bare
+```
+
+A repeated `docs link` for the same `(source, target, type)` is a no-op in the reactor — metadata included — which is why changing a reason is its own command (`UPDATE_RELATIONSHIP` under the hood). All three commands go through `execute` and are signed by your identity when one is configured.
 
 ## Interactive REPL
 

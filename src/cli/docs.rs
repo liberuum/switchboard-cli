@@ -107,9 +107,12 @@ pub enum DocsCommand {
     Mutate(mutate::MutateArgs),
     /// Add a typed relationship (edge) from one document to another
     ///
-    /// With a signing identity (`auth login --renown`) the ADD_RELATIONSHIP action is
-    /// signed by you and sent through `execute`; otherwise the `addRelationship`
-    /// mutation is used and the Switchboard signs it with its own identity.
+    /// The ADD_RELATIONSHIP action is sent through `execute`; with a signing
+    /// identity (`auth login --renown`) it is signed by you, otherwise the
+    /// Switchboard signs it with its own identity. `--reason` records WHY the
+    /// edge exists as relationship metadata — "A connects to B because …" —
+    /// so the articulation lives on the edge itself. A repeated link is a
+    /// no-op (metadata included); use `docs annotate` to change a reason.
     Link {
         /// Source document ID or slug
         source: String,
@@ -119,6 +122,12 @@ pub enum DocsCommand {
         /// DERIVED_FROM, CORE_IDEA (MoC → note), CHILD_MOC (MoC → MoC)
         #[arg(long, short = 't', default_value = "RELATES_TO")]
         r#type: String,
+        /// Why this edge exists: "<source> connects to <target> because …"
+        #[arg(long, short = 'r')]
+        reason: Option<String>,
+        /// How well-founded the link is
+        #[arg(long, value_parser = ["grounded", "established", "speculative"])]
+        confidence: Option<String>,
     },
     /// Remove a typed relationship (edge) between two documents
     Unlink {
@@ -129,6 +138,26 @@ pub enum DocsCommand {
         /// Relationship type
         #[arg(long, short = 't', default_value = "RELATES_TO")]
         r#type: String,
+    },
+    /// Set or replace the reason / confidence on an existing relationship
+    ///
+    /// Sends UPDATE_RELATIONSHIP, which replaces the edge's metadata in place
+    /// (the edge keeps its position and history). The edge must already exist;
+    /// updating a missing edge changes nothing.
+    Annotate {
+        /// Source document ID or slug
+        source: String,
+        /// Target document ID or slug
+        target: String,
+        /// Relationship type
+        #[arg(long, short = 't', default_value = "RELATES_TO")]
+        r#type: String,
+        /// Why this edge exists: "<source> connects to <target> because …"
+        #[arg(long, short = 'r')]
+        reason: String,
+        /// How well-founded the link is
+        #[arg(long, value_parser = ["grounded", "established", "speculative"])]
+        confidence: Option<String>,
     },
     /// Apply raw actions to a document (async, returns job ID)
     Apply {
@@ -201,12 +230,59 @@ pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&s
             source,
             target,
             r#type,
-        } => relationship(&source, &target, &r#type, true, format, profile_name).await,
+            reason,
+            confidence,
+        } => {
+            let metadata = edge_metadata(reason.as_deref(), confidence.as_deref())?;
+            relationship(
+                &source,
+                &target,
+                &r#type,
+                RelationshipOp::Add,
+                metadata,
+                format,
+                profile_name,
+            )
+            .await
+        }
         DocsCommand::Unlink {
             source,
             target,
             r#type,
-        } => relationship(&source, &target, &r#type, false, format, profile_name).await,
+        } => {
+            relationship(
+                &source,
+                &target,
+                &r#type,
+                RelationshipOp::Remove,
+                None,
+                format,
+                profile_name,
+            )
+            .await
+        }
+        DocsCommand::Annotate {
+            source,
+            target,
+            r#type,
+            reason,
+            confidence,
+        } => {
+            let metadata = edge_metadata(Some(&reason), confidence.as_deref())?;
+            if metadata.is_none() {
+                bail!("--reason cannot be blank");
+            }
+            relationship(
+                &source,
+                &target,
+                &r#type,
+                RelationshipOp::Update,
+                metadata,
+                format,
+                profile_name,
+            )
+            .await
+        }
         DocsCommand::Apply {
             id,
             actions,
@@ -1775,18 +1851,109 @@ pub fn gen_action_id() -> String {
 /// Inject `timestampUtcMs` and `id` into each action object that doesn't already have them.
 /// The `id` field is required by Connect's sync — actions without it cause
 /// "Cannot return null for non-nullable field Action.id" errors.
-/// `docs link` / `docs unlink`.
+/// Which relationship system action `docs link` / `unlink` / `annotate` send.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RelationshipOp {
+    Add,
+    Remove,
+    Update,
+}
+
+impl RelationshipOp {
+    fn action_type(self) -> &'static str {
+        match self {
+            RelationshipOp::Add => "ADD_RELATIONSHIP",
+            RelationshipOp::Remove => "REMOVE_RELATIONSHIP",
+            RelationshipOp::Update => "UPDATE_RELATIONSHIP",
+        }
+    }
+
+    fn verb(self) -> &'static str {
+        match self {
+            RelationshipOp::Add => "Linked",
+            RelationshipOp::Remove => "Unlinked",
+            RelationshipOp::Update => "Annotated",
+        }
+    }
+}
+
+/// The relationship `metadata` object for a reason / confidence pair, or
+/// `None` when neither was given. The reason is trimmed; a blank one is no
+/// reason. Confidence is validated by clap before it gets here.
+pub fn edge_metadata(reason: Option<&str>, confidence: Option<&str>) -> Result<Option<Value>> {
+    let mut metadata = serde_json::Map::new();
+    if let Some(reason) = reason {
+        let reason = reason.trim();
+        if !reason.is_empty() {
+            metadata.insert("reason".into(), Value::String(reason.to_string()));
+        }
+    }
+    if let Some(confidence) = confidence {
+        match confidence {
+            "grounded" | "established" | "speculative" => {
+                metadata.insert("confidence".into(), Value::String(confidence.to_string()));
+            }
+            other => {
+                bail!("--confidence must be grounded, established or speculative (got {other:?})")
+            }
+        }
+    }
+    Ok(if metadata.is_empty() {
+        None
+    } else {
+        Some(Value::Object(metadata))
+    })
+}
+
+/// Build the relationship system action `execute` expects — `document`
+/// scope on the SOURCE document, with `metadata` only when there is any.
+pub fn relationship_action(
+    op: RelationshipOp,
+    source_id: &str,
+    target_id: &str,
+    rel_type: &str,
+    metadata: Option<&Value>,
+) -> Value {
+    let mut input = serde_json::json!({
+        "sourceId": source_id,
+        "targetId": target_id,
+        "relationshipType": rel_type,
+    });
+    match (op, metadata) {
+        // UPDATE always carries the key: `metadata: null` clears it.
+        (RelationshipOp::Update, m) => {
+            input["metadata"] = m.cloned().unwrap_or(Value::Null);
+        }
+        (RelationshipOp::Add, Some(m)) => {
+            input["metadata"] = m.clone();
+        }
+        _ => {}
+    }
+    serde_json::json!({
+        "id": gen_action_id(),
+        "type": op.action_type(),
+        "scope": "document",
+        "timestampUtcMs": iso_now(),
+        "input": input,
+    })
+}
+
+/// `docs link` / `docs unlink` / `docs annotate`.
 ///
-/// ADD_RELATIONSHIP / REMOVE_RELATIONSHIP are reactor system actions in
-/// `document` scope on the SOURCE document — the same thing the
-/// `addRelationship` mutation builds server-side. Sending them ourselves lets
-/// them carry OUR signature, so an agent's edges are attributable like its
-/// content edits. Without an identity we fall back to the mutation.
+/// ADD_RELATIONSHIP / REMOVE_RELATIONSHIP / UPDATE_RELATIONSHIP are reactor
+/// system actions in `document` scope on the SOURCE document — the same thing
+/// the `addRelationship` mutation builds server-side, except that the mutation
+/// cannot carry metadata and has no update form. We send the action ourselves
+/// through `execute`: signed by the configured identity when there is one (so
+/// an agent's edges are attributable like its content edits), otherwise
+/// unsigned, which the Switchboard signs with its own identity exactly as it
+/// does for the mutation.
 async fn relationship(
     source: &str,
     target: &str,
     rel_type: &str,
-    add: bool,
+    op: RelationshipOp,
+    metadata: Option<Value>,
     format: OutputFormat,
     profile_name: Option<&str>,
 ) -> Result<()> {
@@ -1798,70 +1965,60 @@ async fn relationship(
     }
     let source_id = helpers::resolve_doc(&client, source).await?;
     let target_id = helpers::resolve_doc(&client, target).await?;
-    let verb = if add { "Linked" } else { "Unlinked" };
 
+    let mut action = relationship_action(op, &source_id, &target_id, rel_type, metadata.as_ref());
     let signed_as = match identity {
         Some((identity, app_name)) => {
-            let mut action = serde_json::json!({
-                "id": gen_action_id(),
-                "type": if add { "ADD_RELATIONSHIP" } else { "REMOVE_RELATIONSHIP" },
-                "scope": "document",
-                "timestampUtcMs": iso_now(),
-                "input": {
-                    "sourceId": source_id,
-                    "targetId": target_id,
-                    "relationshipType": rel_type,
-                },
-            });
             identity.sign_action(&mut action, &app_name)?;
-            let vars = serde_json::json!({ "id": source_id, "actions": [action] });
-            client
-                .query(
-                    "mutation($id: String!, $actions: [ActionInput!]!) { \
-                     execute(documentIdentifier: $id, actions: $actions, branch: \"main\") { id } }",
-                    Some(&vars),
-                )
-                .await?;
             Some(app_name)
         }
-        None => {
-            let field = if add {
-                "addRelationship"
-            } else {
-                "removeRelationship"
-            };
-            let vars = serde_json::json!({ "s": source_id, "t": target_id, "r": rel_type });
-            client
-                .query(
-                    &format!(
-                        "mutation($s: String!, $t: String!, $r: String!) {{ \
-                         {field}(sourceIdentifier: $s, targetIdentifier: $t, relationshipType: $r, branch: \"main\") {{ id }} }}"
-                    ),
-                    Some(&vars),
-                )
-                .await?;
-            None
-        }
+        None => None,
     };
+    let vars = serde_json::json!({ "id": source_id, "actions": [action] });
+    client
+        .query(
+            "mutation($id: String!, $actions: [ActionInput!]!) { \
+             execute(documentIdentifier: $id, actions: $actions, branch: \"main\") { id } }",
+            Some(&vars),
+        )
+        .await?;
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => print_json(&serde_json::json!({
             "sourceId": source_id,
             "targetId": target_id,
             "relationshipType": rel_type,
-            "added": add,
+            "action": op.action_type(),
+            "added": op == RelationshipOp::Add,
+            "metadata": metadata,
             "signedAs": signed_as,
         })),
-        _ => println!(
-            "{} {verb} {} -[{rel_type}]-> {}{}",
-            "✓".green(),
-            &source_id[..source_id.len().min(8)],
-            &target_id[..target_id.len().min(8)],
-            match signed_as {
-                Some(app) => format!(" (signed as {app})"),
-                None => String::new(),
+        _ => {
+            println!(
+                "{} {} {} -[{rel_type}]-> {}{}",
+                "✓".green(),
+                op.verb(),
+                &source_id[..source_id.len().min(8)],
+                &target_id[..target_id.len().min(8)],
+                match signed_as {
+                    Some(app) => format!(" (signed as {app})"),
+                    None => String::new(),
+                }
+            );
+            if let Some(m) = &metadata {
+                if let Some(reason) = m.get("reason").and_then(Value::as_str) {
+                    println!("  because: {reason}");
+                }
+                if let Some(c) = m.get("confidence").and_then(Value::as_str) {
+                    println!("  confidence: {c}");
+                }
+            } else if op == RelationshipOp::Add {
+                println!(
+                    "  {} no --reason given — the edge carries no articulation",
+                    "note:".yellow()
+                );
             }
-        ),
+        }
     }
     Ok(())
 }
@@ -1928,4 +2085,55 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod relationship_tests {
+    use super::*;
+
+    #[test]
+    fn edge_metadata_keeps_only_what_was_said() {
+        assert!(edge_metadata(None, None).unwrap().is_none());
+        assert!(edge_metadata(Some("   "), None).unwrap().is_none());
+        let m = edge_metadata(Some("  B refines A  "), Some("grounded"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(m["reason"], "B refines A");
+        assert_eq!(m["confidence"], "grounded");
+        let only_conf = edge_metadata(None, Some("speculative")).unwrap().unwrap();
+        assert_eq!(
+            only_conf,
+            serde_json::json!({ "confidence": "speculative" })
+        );
+        assert!(edge_metadata(Some("x"), Some("certain")).is_err());
+    }
+
+    #[test]
+    fn add_carries_metadata_only_when_present() {
+        let bare = relationship_action(RelationshipOp::Add, "s", "t", "RELATES_TO", None);
+        assert_eq!(bare["type"], "ADD_RELATIONSHIP");
+        assert_eq!(bare["scope"], "document");
+        assert!(bare["input"].get("metadata").is_none());
+        assert_eq!(bare["input"]["sourceId"], "s");
+        assert!(bare["id"].as_str().is_some_and(|id| !id.is_empty()));
+
+        let m = serde_json::json!({ "reason": "why" });
+        let with = relationship_action(RelationshipOp::Add, "s", "t", "BUILDS_ON", Some(&m));
+        assert_eq!(with["input"]["metadata"], m);
+        assert_eq!(with["input"]["relationshipType"], "BUILDS_ON");
+    }
+
+    #[test]
+    fn remove_never_carries_metadata_and_update_always_has_the_key() {
+        let m = serde_json::json!({ "reason": "why" });
+        let rm = relationship_action(RelationshipOp::Remove, "s", "t", "RELATES_TO", Some(&m));
+        assert_eq!(rm["type"], "REMOVE_RELATIONSHIP");
+        assert!(rm["input"].get("metadata").is_none());
+
+        let up = relationship_action(RelationshipOp::Update, "s", "t", "RELATES_TO", Some(&m));
+        assert_eq!(up["type"], "UPDATE_RELATIONSHIP");
+        assert_eq!(up["input"]["metadata"], m);
+        let clear = relationship_action(RelationshipOp::Update, "s", "t", "RELATES_TO", None);
+        assert!(clear["input"]["metadata"].is_null());
+    }
 }

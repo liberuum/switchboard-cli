@@ -931,7 +931,9 @@ IMPORT / EXPORT
 AUTH
   auth login [--token <jwt>]    Authenticate
   auth login --renown           Sign writes with your `ph login` identity
-  docs link <src> <tgt> -t TYPE Add a relationship edge (signed with an identity)
+  docs link <src> <tgt> -t TYPE [--reason "…"] [--confidence LEVEL]
+                                Add a relationship edge; --reason is why it exists
+  docs annotate <src> <tgt> -t TYPE --reason "…"  Replace an edge's reason / confidence
   auth logout                   Remove token
   auth status                   Show auth state
   auth token                    Print current token
