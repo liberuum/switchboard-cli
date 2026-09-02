@@ -37,7 +37,8 @@ pub struct MutateArgs {
 }
 
 pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
-    let (pname, _profile, client, mut cache) = helpers::setup_with_cache(profile_name)?;
+    let (pname, profile, client, mut cache) = helpers::setup_with_cache(profile_name)?;
+    let identity = helpers::load_identity(&profile)?;
 
     // Resolve doc identifier (name or UUID).
     // When --drive is given, scope the lookup to that drive.
@@ -180,6 +181,54 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
     // Build mutation using GraphQL variables to avoid string-interpolation issues
     // (newlines, special chars in values get properly serialized by serde)
     let has_input_arg = operation.args.iter().any(|a| a.name == "input");
+
+    // Signed path. The model-namespaced mutation (`KnowledgeNote { setTitle }`)
+    // builds the action SERVER-side, so it can only ever carry the
+    // Switchboard's signature. With an identity configured we instead send
+    // the action ourselves — `setTitle` is the codegen's camelCase of the
+    // operation type `SET_TITLE`, and the input is the same object — through
+    // the typed `execute`, signed. The server still validates the input
+    // against the model; a refused action lands as an operation with
+    // `error`, exactly as it would through the namespaced mutation.
+    if let (Some((identity, app_name)), true) = (&identity, has_input_arg) {
+        let action_type = camel_to_screaming_snake(&operation.operation);
+        let mut action = serde_json::json!({
+            "id": crate::cli::docs::gen_action_id(),
+            "type": action_type,
+            "scope": "global",
+            "timestampUtcMs": crate::cli::docs::iso_now(),
+            "input": input_value,
+        });
+        identity.sign_action(&mut action, app_name)?;
+        eprintln!(
+            "Running: {}",
+            format!(
+                "{}(docId: \"{}\") — signed as {app_name}",
+                operation.full_name,
+                &resolved_doc_id[..resolved_doc_id.len().min(12)]
+            )
+            .dimmed()
+        );
+        let vars = serde_json::json!({ "id": resolved_doc_id, "actions": [action] });
+        let data = client
+            .query(
+                "mutation($id: String!, $actions: [ActionInput!]!) { \
+                 execute(documentIdentifier: $id, actions: $actions, branch: \"main\") { id name } }",
+                Some(&vars),
+            )
+            .await?;
+        // Same shape the namespaced mutation prints, so callers parsing the
+        // output see no difference between signed and unsigned runs.
+        let doc = &data["execute"];
+        let shaped = serde_json::json!({
+            model.namespace.clone(): { operation.operation.clone(): { "id": doc["id"], "name": doc["name"] } }
+        });
+        match format {
+            OutputFormat::Json | OutputFormat::Raw => print_json(&shaped),
+            _ => println!("{} Mutation applied (signed).", "✓".green()),
+        }
+        return Ok(());
+    }
 
     // All typed mutations return *MutationResult which requires a selection set
     let selection = "{ id name }";
@@ -379,4 +428,41 @@ async fn try_field_editor(
     }
 
     Ok(Some((input, fields)))
+}
+
+/// `setMetadataListField` → `SET_METADATA_LIST_FIELD`: the codegen names a
+/// model mutation by camel-casing the operation type, so this is its inverse.
+/// Digits stay attached to the preceding word (`addV2Field` → `ADD_V2_FIELD`).
+pub fn camel_to_screaming_snake(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(ch.to_ascii_uppercase());
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::camel_to_screaming_snake;
+
+    #[test]
+    fn camel_case_operation_names_map_to_action_types() {
+        assert_eq!(camel_to_screaming_snake("setTitle"), "SET_TITLE");
+        assert_eq!(
+            camel_to_screaming_snake("setMetadataListField"),
+            "SET_METADATA_LIST_FIELD"
+        );
+        assert_eq!(
+            camel_to_screaming_snake("addExtractedClaim"),
+            "ADD_EXTRACTED_CLAIM"
+        );
+        assert_eq!(
+            camel_to_screaming_snake("resolveTension"),
+            "RESOLVE_TENSION"
+        );
+        assert_eq!(camel_to_screaming_snake("addV2Field"), "ADD_V2_FIELD");
+    }
 }

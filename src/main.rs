@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod graphql;
+mod identity;
 mod output;
 mod phd;
 

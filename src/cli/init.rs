@@ -129,10 +129,14 @@ pub async fn run() -> Result<()> {
         .get_profile(&name)
         .map(|p| p.default)
         .unwrap_or(false);
+    // Re-initialising a profile keeps its signing identity: the URL changed,
+    // not who is writing.
+    let identity = config.get_profile(&name).and_then(|p| p.identity.clone());
     let profile = Profile {
         url,
         token,
         default: config.profiles.is_empty() || was_default,
+        identity,
     };
     config.add_profile(name.clone(), profile);
     save_config(&config)?;

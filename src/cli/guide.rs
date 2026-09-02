@@ -440,9 +440,20 @@ When configured, every request includes an Authorization: Bearer header.
 COMMANDS
 
   switchboard auth login [--token <jwt>]   Save a bearer token (interactive or flag)
-  switchboard auth logout                  Remove token from current profile
-  switchboard auth status                  Show authentication state
+  switchboard auth login --renown          Sign every write with your `ph login` identity
+      [--ph-dir <dir>] [--app-name <name>]   (dir with .keypair.json/.renown.json; label shown in vaults)
+  switchboard auth logout [--identity-only] Remove token and/or signing identity
+  switchboard auth status                  Show authentication and signing state
   switchboard auth token                   Print the current token
+
+SIGNED WRITES
+
+  Without an identity the Switchboard signs your actions with ITS identity and
+  attributes them to whoever ran `ph login` on the server. With
+  `auth login --renown`, docs apply / mutate / link / unlink are signed
+  client-side (ECDSA P-256, the @renown/sdk scheme) and stored untouched, so
+  the vault sees your key, your address and your --app-name. Overrides per run:
+  SWITCHBOARD_APP_NAME, SWITCHBOARD_IDENTITY_DIR, SWITCHBOARD_UNSIGNED=1.
 
 TOKEN PRIORITY
 
@@ -919,6 +930,8 @@ IMPORT / EXPORT
 
 AUTH
   auth login [--token <jwt>]    Authenticate
+  auth login --renown           Sign writes with your `ph login` identity
+  docs link <src> <tgt> -t TYPE Add a relationship edge (signed with an identity)
   auth logout                   Remove token
   auth status                   Show auth state
   auth token                    Print current token

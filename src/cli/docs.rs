@@ -105,6 +105,31 @@ pub enum DocsCommand {
     },
     /// Interactive field-by-field editor (use --op to skip operation picker, --input for scripting)
     Mutate(mutate::MutateArgs),
+    /// Add a typed relationship (edge) from one document to another
+    ///
+    /// With a signing identity (`auth login --renown`) the ADD_RELATIONSHIP action is
+    /// signed by you and sent through `execute`; otherwise the `addRelationship`
+    /// mutation is used and the Switchboard signs it with its own identity.
+    Link {
+        /// Source document ID or slug
+        source: String,
+        /// Target document ID or slug
+        target: String,
+        /// Relationship type, e.g. RELATES_TO, BUILDS_ON, CONTRADICTS, SUPERSEDES,
+        /// DERIVED_FROM, CORE_IDEA (MoC → note), CHILD_MOC (MoC → MoC)
+        #[arg(long, short = 't', default_value = "RELATES_TO")]
+        r#type: String,
+    },
+    /// Remove a typed relationship (edge) between two documents
+    Unlink {
+        /// Source document ID or slug
+        source: String,
+        /// Target document ID or slug
+        target: String,
+        /// Relationship type
+        #[arg(long, short = 't', default_value = "RELATES_TO")]
+        r#type: String,
+    },
     /// Apply raw actions to a document (async, returns job ID)
     Apply {
         /// Document ID or slug
@@ -172,6 +197,16 @@ pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&s
             move_docs(&ids, &from, &to, format, profile_name).await
         }
         DocsCommand::Mutate(args) => mutate::run(args, format, profile_name).await,
+        DocsCommand::Link {
+            source,
+            target,
+            r#type,
+        } => relationship(&source, &target, &r#type, true, format, profile_name).await,
+        DocsCommand::Unlink {
+            source,
+            target,
+            r#type,
+        } => relationship(&source, &target, &r#type, false, format, profile_name).await,
         DocsCommand::Apply {
             id,
             actions,
@@ -1580,7 +1615,8 @@ async fn apply(
     format: OutputFormat,
     profile_name: Option<&str>,
 ) -> Result<()> {
-    let (_name, _profile, client) = helpers::setup(profile_name)?;
+    let (_name, profile, client) = helpers::setup(profile_name)?;
+    let identity = helpers::load_identity(&profile)?;
 
     // Read actions JSON from --actions, --file, or stdin
     let actions_json = match (actions_arg, file_arg) {
@@ -1618,28 +1654,65 @@ async fn apply(
         .await
         .unwrap_or_else(|_| id.to_string());
 
-    let vars = serde_json::json!({
-        "documentIdentifier": resolved_id,
-        "actions": actions,
-    });
-
-    // Use async variant so we get a job ID
-    let data = client
-        .query(
-            "mutation($documentIdentifier: String!, $actions: [JSONObject!]!) { \
-             mutateDocumentAsync(documentIdentifier: $documentIdentifier, actions: $actions) }",
-            Some(&vars),
-        )
-        .await?;
-
-    let job_id = data["mutateDocumentAsync"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-
-    if job_id.is_empty() {
-        bail!("No job ID returned from mutateDocumentAsync");
-    }
+    let job_id = match identity {
+        // Signed: every action carries our signature and goes through the
+        // typed `executeAsync`, the wire form that accepts `context.signer`.
+        // The reactor stores a pre-signed action untouched, so the operation
+        // is attributed to this key — not to the Switchboard's identity.
+        Some((identity, app_name)) => {
+            let actions = sign_actions(actions, &identity, &app_name)?;
+            let vars = serde_json::json!({
+                "documentIdentifier": resolved_id,
+                "actions": actions,
+            });
+            let data = client
+                .query(
+                    "mutation($documentIdentifier: String!, $actions: [ActionInput!]!) { \
+                     executeAsync(documentIdentifier: $documentIdentifier, actions: $actions, branch: \"main\") { id status error } }",
+                    Some(&vars),
+                )
+                .await?;
+            let job = &data["executeAsync"];
+            let job_id = job["id"].as_str().unwrap_or("").to_string();
+            if job_id.is_empty() {
+                bail!("No job ID returned from executeAsync");
+            }
+            eprintln!(
+                "{}",
+                format!(
+                    "Signed {} action(s) as {} ({})",
+                    actions_len(&vars),
+                    app_name,
+                    identity.did
+                )
+                .dimmed()
+            );
+            job_id
+        }
+        // Unsigned (no identity configured): legacy path, unchanged. The
+        // Switchboard signs these with its own identity.
+        None => {
+            let vars = serde_json::json!({
+                "documentIdentifier": resolved_id,
+                "actions": actions,
+            });
+            let data = client
+                .query(
+                    "mutation($documentIdentifier: String!, $actions: [JSONObject!]!) { \
+                     mutateDocumentAsync(documentIdentifier: $documentIdentifier, actions: $actions) }",
+                    Some(&vars),
+                )
+                .await?;
+            let job_id = data["mutateDocumentAsync"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            if job_id.is_empty() {
+                bail!("No job ID returned from mutateDocumentAsync");
+            }
+            job_id
+        }
+    };
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => {
@@ -1702,6 +1775,125 @@ pub fn gen_action_id() -> String {
 /// Inject `timestampUtcMs` and `id` into each action object that doesn't already have them.
 /// The `id` field is required by Connect's sync — actions without it cause
 /// "Cannot return null for non-nullable field Action.id" errors.
+/// `docs link` / `docs unlink`.
+///
+/// ADD_RELATIONSHIP / REMOVE_RELATIONSHIP are reactor system actions in
+/// `document` scope on the SOURCE document — the same thing the
+/// `addRelationship` mutation builds server-side. Sending them ourselves lets
+/// them carry OUR signature, so an agent's edges are attributable like its
+/// content edits. Without an identity we fall back to the mutation.
+async fn relationship(
+    source: &str,
+    target: &str,
+    rel_type: &str,
+    add: bool,
+    format: OutputFormat,
+    profile_name: Option<&str>,
+) -> Result<()> {
+    let (_name, profile, client) = helpers::setup(profile_name)?;
+    let identity = helpers::load_identity(&profile)?;
+    let rel_type = rel_type.trim();
+    if rel_type.is_empty() {
+        bail!("relationship type cannot be empty");
+    }
+    let source_id = helpers::resolve_doc(&client, source).await?;
+    let target_id = helpers::resolve_doc(&client, target).await?;
+    let verb = if add { "Linked" } else { "Unlinked" };
+
+    let signed_as = match identity {
+        Some((identity, app_name)) => {
+            let mut action = serde_json::json!({
+                "id": gen_action_id(),
+                "type": if add { "ADD_RELATIONSHIP" } else { "REMOVE_RELATIONSHIP" },
+                "scope": "document",
+                "timestampUtcMs": iso_now(),
+                "input": {
+                    "sourceId": source_id,
+                    "targetId": target_id,
+                    "relationshipType": rel_type,
+                },
+            });
+            identity.sign_action(&mut action, &app_name)?;
+            let vars = serde_json::json!({ "id": source_id, "actions": [action] });
+            client
+                .query(
+                    "mutation($id: String!, $actions: [ActionInput!]!) { \
+                     execute(documentIdentifier: $id, actions: $actions, branch: \"main\") { id } }",
+                    Some(&vars),
+                )
+                .await?;
+            Some(app_name)
+        }
+        None => {
+            let field = if add {
+                "addRelationship"
+            } else {
+                "removeRelationship"
+            };
+            let vars = serde_json::json!({ "s": source_id, "t": target_id, "r": rel_type });
+            client
+                .query(
+                    &format!(
+                        "mutation($s: String!, $t: String!, $r: String!) {{ \
+                         {field}(sourceIdentifier: $s, targetIdentifier: $t, relationshipType: $r, branch: \"main\") {{ id }} }}"
+                    ),
+                    Some(&vars),
+                )
+                .await?;
+            None
+        }
+    };
+
+    match format {
+        OutputFormat::Json | OutputFormat::Raw => print_json(&serde_json::json!({
+            "sourceId": source_id,
+            "targetId": target_id,
+            "relationshipType": rel_type,
+            "added": add,
+            "signedAs": signed_as,
+        })),
+        _ => println!(
+            "{} {verb} {} -[{rel_type}]-> {}{}",
+            "✓".green(),
+            &source_id[..source_id.len().min(8)],
+            &target_id[..target_id.len().min(8)],
+            match signed_as {
+                Some(app) => format!(" (signed as {app})"),
+                None => String::new(),
+            }
+        ),
+    }
+    Ok(())
+}
+
+fn actions_len(vars: &Value) -> usize {
+    vars["actions"].as_array().map(|a| a.len()).unwrap_or(0)
+}
+
+/// Sign every action in place for the typed `ActionInput` wire form. Ensures
+/// the fields `ActionInput` declares non-null (`input`, `scope`) are present:
+/// a bare action with no input is legal for `mutateDocument`'s JSONObject but
+/// is refused whole-request by the typed mutation.
+pub fn sign_actions(
+    actions: Value,
+    identity: &crate::identity::Identity,
+    app_name: &str,
+) -> Result<Value> {
+    let Value::Array(mut arr) = actions else {
+        bail!("Actions must be a JSON array");
+    };
+    for action in &mut arr {
+        if let Value::Object(map) = action {
+            map.entry("input")
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            map.entry("scope")
+                .or_insert_with(|| Value::String("global".to_string()));
+        }
+        identity.sign_action(action, app_name)?;
+    }
+    Ok(Value::Array(arr))
+}
+
 fn stamp_actions(actions: Value) -> Value {
     let Value::Array(mut arr) = actions else {
         return actions;

@@ -1,3 +1,3 @@
 pub mod profiles;
 
-pub use profiles::{Config, Profile, load_config, save_config};
+pub use profiles::{Config, IdentityConfig, Profile, load_config, save_config};

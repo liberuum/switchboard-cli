@@ -10,6 +10,23 @@ pub struct Profile {
     pub token: Option<String>,
     #[serde(default)]
     pub default: bool,
+    /// Renown identity used to SIGN every action this profile writes. Only a
+    /// reference to the `ph login` files — never the key material itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentityConfig>,
+}
+
+/// Where the profile's signing identity lives and what it calls itself.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdentityConfig {
+    /// Directory holding `.keypair.json` and `.renown.json`, as written by
+    /// `ph login` (that command writes them into `<cwd>/.ph`).
+    pub ph_dir: String,
+    /// The `signer.app.name` stamped on every operation — the label the
+    /// vault shows beside the verified key, e.g. `switchboard-cli` or
+    /// `powerhouse-knowledge`. Unsigned metadata: the key is the proof, the
+    /// name is what the writer chose to be called.
+    pub app_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

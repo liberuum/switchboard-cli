@@ -1,4 +1,5 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use colored::Colorize;
 
 use crate::config::{Config, Profile, load_config};
 use crate::graphql::introspection::load_cache;
@@ -32,6 +33,62 @@ pub fn setup(profile_name: Option<&str>) -> Result<(String, Profile, GraphQLClie
     let (name, profile) = resolve_profile(&config, profile_name)?;
     let client = build_client(&profile);
     Ok((name, profile, client))
+}
+
+/// The signing identity for a profile, if one is configured.
+///
+/// Resolution order: `SWITCHBOARD_UNSIGNED=1` disables signing for this
+/// invocation; `SWITCHBOARD_IDENTITY_DIR` / `SWITCHBOARD_APP_NAME` override the
+/// profile's values (so a plugin can name itself per call without touching
+/// the user's config); otherwise the profile's `identity` block. `None` means
+/// "write unsigned" — the Switchboard then signs with its own identity.
+///
+/// A configured identity that fails to load is an ERROR, not a silent
+/// downgrade: the user asked for signed writes, and an unsigned write would
+/// be attributed to whoever the server is logged in as.
+pub fn load_identity(profile: &Profile) -> Result<Option<(crate::identity::Identity, String)>> {
+    if std::env::var("SWITCHBOARD_UNSIGNED")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let env_dir = std::env::var("SWITCHBOARD_IDENTITY_DIR").ok();
+    let env_app = std::env::var("SWITCHBOARD_APP_NAME").ok();
+    let (dir, app_name) = match (&profile.identity, env_dir) {
+        (_, Some(dir)) => (
+            std::path::PathBuf::from(dir),
+            env_app
+                .clone()
+                .or_else(|| profile.identity.as_ref().map(|i| i.app_name.clone()))
+                .unwrap_or_else(|| "switchboard-cli".to_string()),
+        ),
+        (Some(cfg), None) => (
+            std::path::PathBuf::from(&cfg.ph_dir),
+            env_app.clone().unwrap_or_else(|| cfg.app_name.clone()),
+        ),
+        (None, None) => return Ok(None),
+    };
+    let identity = crate::identity::Identity::load(&dir).with_context(|| {
+        format!(
+            "signing identity configured but unusable ({}). Run `ph login` there and \
+             `switchboard auth login --renown --ph-dir {}` again, or set SWITCHBOARD_UNSIGNED=1 \
+             to write unsigned on purpose.",
+            dir.display(),
+            dir.display()
+        )
+    })?;
+    if identity.credential_expired() {
+        eprintln!(
+            "{} Renown credential for {} expired on {} — operations are still signed by this key, \
+             but the key↔address binding is stale. Run `ph login` in {} to renew.",
+            "⚠".yellow(),
+            identity.did,
+            identity.credential_expires().unwrap_or("?"),
+            dir.display()
+        );
+    }
+    Ok(Some((identity, app_name)))
 }
 
 /// Load config, resolve profile, build client, and load introspection cache

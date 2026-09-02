@@ -242,9 +242,12 @@ All export commands support operation filters: `--action-types <types>` (comma-s
 | Command | Description |
 |---------|-------------|
 | `switchboard auth login [--token <jwt>]` | Save a bearer token |
-| `switchboard auth logout` | Remove token from current profile |
-| `switchboard auth status` | Show authentication state |
+| `switchboard auth login --renown [--ph-dir <dir>] [--app-name <name>]` | Sign every write with your `ph login` identity (see [Signed writes](#signed-writes)) |
+| `switchboard auth logout [--identity-only]` | Remove token and/or signing identity from current profile |
+| `switchboard auth status` | Show authentication and signing state |
 | `switchboard auth token` | Print the current token |
+| `switchboard docs link <source> <target> -t <TYPE>` | Add a relationship edge (signed when an identity is configured) |
+| `switchboard docs unlink <source> <target> -t <TYPE>` | Remove a relationship edge |
 
 ### Analytics
 
@@ -402,6 +405,21 @@ switchboard auth login --token "eyJhbG..."
 export SWITCHBOARD_TOKEN="eyJhbG..."
 switchboard drives list
 ```
+
+## Signed writes
+
+A Switchboard signs every unsigned action it applies with **its own** Renown identity and stamps the user from **its own** `ph login` session — so on a shared server every write from every client is attributed to whoever logged the server in. To be attributed yourself, sign client-side:
+
+```bash
+ph login                                   # once: creates .ph/.keypair.json + .ph/.renown.json
+switchboard auth login --renown            # point the profile at that identity (path only, never the key)
+switchboard auth login --renown --app-name my-agent   # what the vault shows beside your key
+switchboard auth status                    # Signing: on as my-agent (did:key:z…) acting for 0x…
+```
+
+From then on `docs apply`, `docs mutate`, `docs link` and `docs unlink` send actions through the typed `execute` mutation with a `context.signer`: ECDSA P-256 over `"\x19Signed Operation:\n" + len + timestamp + did + sha256(scope+type+input) + prevStateHash`, exactly what `@renown/sdk` produces, so the reactor stores the action untouched and rejects a tampered one (`InvalidSignatureError`). `docs create` and the model-namespaced paths that build actions server-side remain server-signed.
+
+Per-invocation overrides: `SWITCHBOARD_APP_NAME` (label this run differently), `SWITCHBOARD_IDENTITY_DIR` (another `.ph` directory), `SWITCHBOARD_UNSIGNED=1` (write unsigned on purpose). A configured identity that cannot be loaded is an error, never a silent downgrade to unsigned. The signature proves the key; the key↔address binding is the Renown credential (`.renown.json`, 7-day validity — `auth status` warns when it has expired; renew with `ph login`).
 
 ## Interactive REPL
 
