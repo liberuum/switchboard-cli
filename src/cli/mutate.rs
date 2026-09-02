@@ -29,6 +29,11 @@ pub struct MutateArgs {
     /// Drive ID or slug (helps resolve document by name)
     #[arg(long)]
     pub drive: Option<String>,
+
+    /// Permit string fields that contain a literal backslash-escape (`\n` as two
+    /// characters). Off by default: that is almost always a shell-quoting bug.
+    #[arg(long)]
+    pub allow_literal_escapes: bool,
 }
 
 pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
@@ -125,7 +130,10 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
 
     let input_value: Value = match effective_input {
         Some(input) => {
-            serde_json::from_str(input).map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?
+            let parsed: Value = serde_json::from_str(input)
+                .map_err(|e| anyhow::anyhow!("Invalid input JSON: {e}"))?;
+            crate::cli::helpers::reject_literal_escapes(&parsed, args.allow_literal_escapes)?;
+            parsed
         }
         None => {
             let input_args: Vec<_> = operation

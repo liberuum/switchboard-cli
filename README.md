@@ -204,8 +204,8 @@ history. Aborts if the destination already has a drive with the same slug.
 | `switchboard docs add-to <parent> <ids...>` | Add documents as children of a parent |
 | `switchboard docs remove-from <parent> <ids...>` | Remove documents from a parent |
 | `switchboard docs move <ids...> --from <src> --to <dst>` | Move documents between parents |
-| `switchboard docs apply <id> --actions '<json>' [--file <file>] [--wait]` | Dispatch raw actions via `mutateDocument` — pass actions inline or from a file; `--wait` blocks until async completion |
-| `switchboard docs mutate <id-or-name> [--op <op>] [--input '<json>'] [--input-file <file>] [--drive <slug>]` | Interactive field-by-field editor — omit `--op` for operation picker; pass `--input` / `--input-file` for scripting |
+| `switchboard docs apply <id> --actions '<json>' [--file <file>] [--wait] [--allow-literal-escapes]` | Dispatch raw actions via `mutateDocument` — pass actions inline or from a file; `--wait` blocks until async completion. Refuses string fields containing a literal `\n`/`\t`/`\r` (a double-encoding bug that stores `\n` in note bodies) unless `--allow-literal-escapes` |
+| `switchboard docs mutate <id-or-name> [--op <op>] [--input '<json>'] [--input-file <file>] [--drive <slug>] [--allow-literal-escapes]` | Interactive field-by-field editor — omit `--op` for operation picker; pass `--input` / `--input-file` for scripting. Same literal-escape guard as `apply` |
 
 ### Folders
 

@@ -391,3 +391,107 @@ pub async fn resolve_drive_and_parent(
         ),
     }
 }
+
+/// Find string values that contain a *literal* backslash-escape sequence
+/// (`\n`, `\t`, `\r` as two characters) rather than the control character.
+///
+/// This is almost always double encoding, not intent: a bash `"\n"` is two
+/// characters, and when that text is handed to a program that JSON-encodes it
+/// the backslash is escaped again, so the note is stored with the text `\n`
+/// where its paragraphs should be. The reactor accepts it — it is a valid
+/// string — and the write reports success, so nothing downstream catches it.
+/// Refusing at the CLI is the only point where the mistake is both detectable
+/// and cheap to fix. (A single-encoded `\n` in JSON text is fine: it parses
+/// to a real newline and never reaches this check.)
+///
+/// Returns the JSON paths of every offending string so the error names the
+/// exact field. Empty when the payload is clean.
+pub fn find_literal_escapes(value: &serde_json::Value) -> Vec<String> {
+    fn walk(v: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => {
+                if s.contains("\\n") || s.contains("\\t") || s.contains("\\r") {
+                    out.push(path.to_string());
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    walk(item, &format!("{path}[{i}]"), out);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (k, item) in map {
+                    let next = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    walk(item, &next, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(value, "", &mut out);
+    out
+}
+
+/// Refuse a write payload that contains literal escape sequences unless the
+/// caller opted in. The message tells the agent what happened and how to fix
+/// the *cause* (serialize with a real JSON tool), plus the override for the
+/// rare case where a string legitimately contains the text `\n`.
+pub fn reject_literal_escapes(value: &serde_json::Value, allow: bool) -> anyhow::Result<()> {
+    if allow {
+        return Ok(());
+    }
+    let hits = find_literal_escapes(value);
+    if hits.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Refusing to write: {} string field(s) contain a literal backslash-escape (the two characters \\n, \\t or \\r) instead of a real line break:\n  {}\n\
+         Cause: the text already held the two characters backslash-n when it was JSON-encoded, so they were escaped again (double encoding). \
+         Typical source: a bash \"\\n\" passed as an argument into a script that then serializes it.\n\
+         Fix: make the string hold real line breaks BEFORE encoding — write the body in a file or heredoc (or build it inside Python), JSON-encode it once, and pass via --file / --input-file. Then read the document back and check for real newlines.\n\
+         If the text genuinely must contain a literal backslash-n, re-run with --allow-literal-escapes.",
+        hits.len(),
+        hits.join("\n  ")
+    );
+}
+
+#[cfg(test)]
+mod literal_escape_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn clean_payload_passes() {
+        let v = json!([{ "type": "SET_CONTENT", "input": { "content": "line one\nline two", "updatedAt": "x" } }]);
+        assert!(find_literal_escapes(&v).is_empty());
+        assert!(reject_literal_escapes(&v, false).is_ok());
+    }
+
+    #[test]
+    fn literal_backslash_n_is_reported_with_its_path() {
+        // The string below contains a backslash followed by n — two characters.
+        let v = json!([{ "type": "SET_CONTENT", "input": { "content": "## Claim\\n\\nBody", "updatedAt": "x" } }]);
+        let hits = find_literal_escapes(&v);
+        assert_eq!(hits, vec!["[0].input.content".to_string()]);
+        let err = reject_literal_escapes(&v, false).unwrap_err().to_string();
+        assert!(err.contains("[0].input.content"));
+        assert!(err.contains("--allow-literal-escapes"));
+    }
+
+    #[test]
+    fn override_flag_lets_it_through() {
+        let v = json!({ "content": "shows the escape \\n in prose" });
+        assert!(reject_literal_escapes(&v, true).is_ok());
+    }
+
+    #[test]
+    fn nested_objects_and_tabs_are_found() {
+        let v = json!({ "a": { "b": ["ok", "bad\\tcell"] }, "c": "fine" });
+        assert_eq!(find_literal_escapes(&v), vec!["a.b[1]".to_string()]);
+    }
+}

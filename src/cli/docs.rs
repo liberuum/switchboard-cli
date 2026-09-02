@@ -118,6 +118,11 @@ pub enum DocsCommand {
         /// Wait for the job to complete
         #[arg(long)]
         wait: bool,
+        /// Permit string fields that contain a literal backslash-escape (`\n` as two
+        /// characters). Off by default: that is almost always a shell-quoting bug that
+        /// would store `\n` in a note body instead of line breaks.
+        #[arg(long)]
+        allow_literal_escapes: bool,
     },
 }
 
@@ -172,7 +177,19 @@ pub async fn run(cmd: DocsCommand, format: OutputFormat, profile_name: Option<&s
             actions,
             file,
             wait,
-        } => apply(&id, actions, file, wait, format, profile_name).await,
+            allow_literal_escapes,
+        } => {
+            apply(
+                &id,
+                actions,
+                file,
+                wait,
+                allow_literal_escapes,
+                format,
+                profile_name,
+            )
+            .await
+        }
     }
 }
 
@@ -1559,6 +1576,7 @@ async fn apply(
     actions_arg: Option<String>,
     file_arg: Option<String>,
     wait: bool,
+    allow_literal_escapes: bool,
     format: OutputFormat,
     profile_name: Option<&str>,
 ) -> Result<()> {
@@ -1586,6 +1604,10 @@ async fn apply(
     if !actions.is_array() {
         bail!("Actions must be a JSON array");
     }
+
+    // Refuse payloads whose strings carry a literal `\n` — a shell-quoting bug
+    // the reactor would happily persist as broken note content.
+    helpers::reject_literal_escapes(&actions, allow_literal_escapes)?;
 
     // Auto-populate timestampUtcMs on each action if missing.
     // The reactor's operation store requires this field but the generic
