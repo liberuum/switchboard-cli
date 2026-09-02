@@ -60,8 +60,24 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize a new Switchboard connection
-    Init,
+    /// Initialize a new Switchboard connection (interactive, or non-interactive with --url)
+    Init {
+        /// Switchboard GraphQL URL (skips the prompt; `/graphql` is appended if missing)
+        #[arg(long)]
+        url: Option<String>,
+        /// Profile name (default: derived from the URL host)
+        #[arg(long, requires = "url")]
+        name: Option<String>,
+        /// Bearer token to store (optional)
+        #[arg(long, requires = "url")]
+        token: Option<String>,
+        /// Make this profile the default (default: only when it is the first profile)
+        #[arg(long, requires = "url")]
+        use_profile: bool,
+        /// Overwrite an existing profile of the same name without asking
+        #[arg(long, requires = "url")]
+        force: bool,
+    },
 
     /// Manage connection profiles
     #[command(subcommand)]
@@ -188,7 +204,16 @@ pub async fn dispatch(
     quiet: bool,
 ) -> Result<()> {
     match command {
-        Commands::Init => init::run().await,
+        Commands::Init {
+            url,
+            name,
+            token,
+            use_profile,
+            force,
+        } => match url {
+            Some(url) => init::run_non_interactive(url, name, token, use_profile, force).await,
+            None => init::run().await,
+        },
         Commands::Config(cmd) => config::run(cmd, format, profile).await,
         Commands::Introspect => introspect::run(profile, quiet).await,
         Commands::Ping => ping(profile, quiet).await,

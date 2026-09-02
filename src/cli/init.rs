@@ -6,6 +6,86 @@ use crate::config::{Profile, load_config, save_config};
 use crate::graphql::GraphQLClient;
 use crate::graphql::introspection::{run_introspection, save_cache};
 
+/// `switchboard init --url … [--name …] [--token …] [--use-profile] [--force]`
+///
+/// The scriptable form: no prompts, so an agent or a setup script can create a
+/// profile. Connection and introspection are attempted exactly as in the
+/// interactive flow, but a failure is reported and the profile is still
+/// saved — the caller asked for a profile, and `switchboard ping` will tell
+/// it the truth about the connection afterwards.
+pub async fn run_non_interactive(
+    url: String,
+    name: Option<String>,
+    token: Option<String>,
+    use_profile: bool,
+    force: bool,
+) -> Result<()> {
+    let mut config = load_config()?;
+    let url = normalize_url(&strip_terminal_escapes(&url));
+    let name = name.unwrap_or_else(|| profile_name_from_url(&url));
+    if config.get_profile(&name).is_some() && !force {
+        anyhow::bail!("Profile '{name}' already exists. Pass --force to overwrite it.");
+    }
+    let token = token
+        .map(|t| strip_terminal_escapes(&t))
+        .filter(|t| !t.is_empty());
+
+    let client = GraphQLClient::new(url.clone(), token.clone());
+    let test_query = r#"{ findDocuments(search: { type: "powerhouse/document-drive" }, paging: { limit: 1 }) { totalCount } }"#;
+    let connected = match client.query(test_query, None).await {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("{} Connection failed: {e}", "⚠".yellow());
+            false
+        }
+    };
+    let mut models = 0usize;
+    if connected {
+        match run_introspection(&client).await {
+            Ok(cache) => {
+                models = cache.models.len();
+                save_cache(&name, &cache)?;
+            }
+            Err(e) => eprintln!(
+                "{} Introspection failed: {e}. Retry with `switchboard introspect`.",
+                "⚠".yellow()
+            ),
+        }
+    }
+
+    let existing = config.get_profile(&name).cloned();
+    let profile = Profile {
+        url: url.clone(),
+        token,
+        default: use_profile
+            || config.profiles.is_empty()
+            || existing.as_ref().map(|p| p.default).unwrap_or(false),
+        identity: existing.and_then(|p| p.identity),
+    };
+    config.add_profile(name.clone(), profile);
+    save_config(&config)?;
+
+    println!(
+        "{} Profile \"{name}\" saved for {url} ({}{}).",
+        "✓".green(),
+        if connected {
+            format!("connected, {models} document models")
+        } else {
+            "not reachable right now".to_string()
+        },
+        if config
+            .get_profile(&name)
+            .map(|p| p.default)
+            .unwrap_or(false)
+        {
+            "; now the default"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
 pub async fn run() -> Result<()> {
     let mut config = load_config()?;
 

@@ -128,6 +128,12 @@ switchboard init
 
 The wizard prompts for a GraphQL URL, validates the connection, discovers all document models via introspection, and saves the profile.
 
+Scripts and agents can skip the prompts:
+
+```bash
+switchboard init --url https://<host>/graphql --name my-vault --use-profile   # --token <jwt>, --force to overwrite
+```
+
 ### 2. Explore
 
 ```bash
@@ -171,6 +177,7 @@ history. Aborts if the destination already has a drive with the same slug.
 | Command | Description |
 |---------|-------------|
 | `switchboard init` | Interactive first-run wizard |
+| `switchboard init --url <url> [--name <n>] [--token <jwt>] [--use-profile] [--force]` | Non-interactive profile creation |
 | `switchboard config list` | List all profiles |
 | `switchboard config show` | Show active profile details |
 | `switchboard config use <name>` | Switch the default profile |
