@@ -171,6 +171,28 @@ jobs:
           cd artifacts
           sha256sum * > checksums-sha256.txt
 
+      # GitHub's generated notes only list pull requests; this repo releases
+      # from direct pushes, so they came out empty and `switchboard update`
+      # showed a changelog with nothing under the version. List the commit
+      # subjects since the previous tag of the same channel instead. Must be
+      # a `## ` heading placed BEFORE "## Install": the updater strips from
+      # "## Install" to the next `## ` heading.
+      - name: Collect changes since the previous release
+        id: changes
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "staging" ]; then
+            PREV=$(git tag -l 'v0.0.0-staging.*' --sort=-v:refname | head -1)
+          else
+            PREV=$(git tag -l 'v*' --sort=-v:refname | grep -v staging | head -1)
+          fi
+          RANGE="${PREV:+${PREV}..}HEAD"
+          {
+            echo 'list<<CHANGES_EOF'
+            git log --no-merges --invert-grep --grep='^chore: release v' --format='- %s (%h)' "$RANGE" | head -50
+            echo 'CHANGES_EOF'
+          } >> "$GITHUB_OUTPUT"
+          echo "Changes since ${PREV:-the beginning}:"; git log --no-merges --oneline "$RANGE" | head -50
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -180,6 +202,10 @@ jobs:
           prerelease: ${{ github.ref_name == 'staging' }}
           generate_release_notes: true
           body: |
+            ## Changes
+
+            ${{ steps.changes.outputs.list }}
+
             ## Install
 
             ```bash
