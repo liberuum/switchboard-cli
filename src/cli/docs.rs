@@ -994,6 +994,55 @@ pub fn print_tree(nodes: &[Value], parent: Option<&str>, indent: &str) {
     }
 }
 
+/// Build the guidance appended to a `createDocument` timeout.
+///
+/// The request reached the server, so the document may exist. Look for one
+/// with the name just attempted so the error can name its id instead of
+/// leaving the user to guess between "retry" and "clean up".
+async fn timed_out_create_hint(
+    client: &crate::graphql::GraphQLClient,
+    drive_id: &str,
+    name: &str,
+    parent_folder: Option<&str>,
+) -> String {
+    let existing = fetch_drive_nodes(client, drive_id)
+        .await
+        .ok()
+        .and_then(|(_, _, nodes)| {
+            nodes
+                .iter()
+                .find(|n| {
+                    n["kind"].as_str() == Some("file")
+                        && n["name"]
+                            .as_str()
+                            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                })
+                .and_then(|n| n["id"].as_str().map(|id| id.to_string()))
+        });
+
+    match existing {
+        Some(doc_id) => {
+            let placement = match parent_folder {
+                Some(folder) => format!(
+                    " It is at the drive root, not in folder {folder}; place it with \
+                     `switchboard docs move {doc_id} --from {drive_id} --to {folder}`."
+                ),
+                None => String::new(),
+            };
+            format!(
+                "The create DID take effect: drive {drive_id} now holds a document named \
+                 \"{name}\" (id {doc_id}).{placement} Do NOT re-run `docs create` — that \
+                 makes a duplicate."
+            )
+        }
+        None => format!(
+            "The create may still have been applied. Check drive {drive_id} for a document \
+             named \"{name}\" (`switchboard docs list --drive {drive_id}`) before re-running \
+             `docs create`, or you will end up with a duplicate."
+        ),
+    }
+}
+
 async fn create(
     doc_type: Option<String>,
     name: Option<String>,
@@ -1058,13 +1107,10 @@ async fn create(
     // namespaced createDocument mutation that atomically adds the doc to the drive.
     let namespace = cache.find_model(&doc_type).map(|m| m.namespace.clone());
 
-    let mut vars = serde_json::json!({
+    let vars = serde_json::json!({
         "name": name,
         "parentIdentifier": drive_id,
     });
-    if let Some(ref folder_id) = parent_folder {
-        vars["slug"] = serde_json::json!(folder_id); // parentFolder not directly supported
-    }
 
     let ns = match &namespace {
         Some(ns) if !ns.is_empty() => ns.clone(),
@@ -1079,7 +1125,19 @@ async fn create(
         ns,
     );
 
-    let create_data = client.query(&mutation, Some(&vars)).await?;
+    // A read timeout here does NOT mean the create failed — the server may
+    // have executed it. Re-running `docs create` is what produces the
+    // duplicate "(copy) 1" documents, so instead look the document up by name
+    // and tell the user what to do with it.
+    let create_data = match client.query(&mutation, Some(&vars)).await {
+        Ok(data) => data,
+        Err(e) if crate::graphql::is_timeout_error(&e) => {
+            let hint =
+                timed_out_create_hint(&client, &drive_id, &name, parent_folder.as_deref()).await;
+            return Err(e.context(hint));
+        }
+        Err(e) => return Err(e),
+    };
 
     let doc_id = create_data
         .get(ns.as_str())
@@ -1098,7 +1156,14 @@ async fn create(
                 "targetParentFolder": folder_id,
             }
         });
-        let _ = client.query(move_mutation, Some(&move_vars)).await;
+        if let Err(e) = client.query(move_mutation, Some(&move_vars)).await {
+            return Err(e.context(format!(
+                "Document \"{name}\" was created (id {doc_id}) but could not be moved into \
+                 folder {folder_id} — it is sitting at the root of drive {drive_id}. \
+                 Place it with `switchboard docs move {doc_id} --from {drive_id} --to {folder_id}`; \
+                 do NOT re-run `docs create`, that makes a duplicate."
+            )));
+        }
     }
 
     let data = serde_json::json!({ "id": doc_id });
