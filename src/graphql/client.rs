@@ -124,8 +124,8 @@ impl GraphQLClient {
             .context("Failed to parse GraphQL response")?;
 
         if let Some(errors) = gql_response.errors.filter(|e| !e.is_empty()) {
-            let messages: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
-            bail!("GraphQL errors:\n  {}", messages.join("\n  "));
+            let messages = errors.into_iter().map(|e| e.message).collect();
+            return Err(anyhow::Error::new(ServerErrors(messages)));
         }
 
         gql_response.data.context("No data in GraphQL response")
@@ -134,6 +134,27 @@ impl GraphQLClient {
     pub fn has_token(&self) -> bool {
         self.token.is_some()
     }
+}
+
+/// Errors the server answered with, as opposed to ones the transport
+/// produced. A schema mismatch — an older Switchboard rejecting a field this
+/// CLI selects — lands here, which lets a caller retry with a narrower
+/// selection instead of retrying a dead connection.
+#[derive(Debug)]
+pub struct ServerErrors(pub Vec<String>);
+
+impl std::fmt::Display for ServerErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GraphQL errors:\n  {}", self.0.join("\n  "))
+    }
+}
+
+impl std::error::Error for ServerErrors {}
+
+/// True when the server answered with GraphQL errors.
+pub fn is_server_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<ServerErrors>().is_some())
 }
 
 /// True when `err` was caused by a request timing out after the connection
@@ -151,6 +172,23 @@ pub fn is_timeout_error(err: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An older Switchboard rejecting `JobInfo.result` must stay recognizable
+    /// after `.context()` wrapping — `jobs status` keys its narrower-selection
+    /// retry off this, and must not retry a dead connection that way.
+    #[test]
+    fn a_server_error_is_told_from_a_transport_one() {
+        let err = anyhow::Error::new(ServerErrors(vec![
+            "Cannot return null for non-nullable field JobInfo.result.".to_string(),
+        ]))
+        .context("jobStatus failed");
+        assert!(is_server_error(&err));
+        assert!(!is_timeout_error(&err));
+        assert!(format!("{err:#}").contains("JobInfo.result"));
+
+        let transport = anyhow::anyhow!("Failed to connect to http://localhost:4001/graphql");
+        assert!(!is_server_error(&transport));
+    }
 
     /// A read timeout must stay recognizable after `.context()` wrapping —
     /// `docs create` keys its "the document may exist" recovery off this.
