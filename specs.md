@@ -906,6 +906,11 @@ only reports, and exits 0. `--format json` prints the job object as the server s
 it, `result` included — nothing is reshaped. A server that does not report
 per-action outcomes prints the plain status line and exits as before.
 
+The tally counts the actions that produced an operation — an action that produced
+none has no entry to report. So the server's own `allApplied` can say the batch fell
+short while every action it detailed applied; `jobs wait` says exactly that and still
+exits 1, rather than inventing a count of actions it cannot name.
+
 ---
 
 ### 14. Sync Channels

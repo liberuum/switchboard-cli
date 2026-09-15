@@ -584,6 +584,11 @@ ACTION OUTCOMES
     Job abc123 finished: READ_READY (1/2 applied)
       ✗ a2 [global#5]: reducer error: name is required
 
+  The tally counts the actions that produced an operation. An action
+  that produced none has no entry, so a server can report the batch as
+  incomplete while every action it detailed applied — `jobs wait` says
+  so and still exits non-zero.
+
   Servers that do not report per-action outcomes print the plain
   status line, unchanged.
 

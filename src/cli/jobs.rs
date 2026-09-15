@@ -88,11 +88,15 @@ impl SubmittedAction {
 }
 
 /// `JobInfo.result`: one entry per submitted action that produced an
-/// operation, plus whether every one of them applied.
+/// operation, plus the server's own verdict on the batch.
 #[derive(Debug, PartialEq)]
 struct JobResult {
     actions: Vec<SubmittedAction>,
-    all_applied: bool,
+    /// The server's `allApplied`, kept separate from the entries. False here
+    /// with every entry applied is not a contradiction: an action that
+    /// produced no operation has no entry at all, so the entries cannot
+    /// account for it.
+    server_all_applied: bool,
 }
 
 impl JobResult {
@@ -103,8 +107,28 @@ impl JobResult {
             .count()
     }
 
+    /// Entries that say the action did not apply. Never the whole story —
+    /// see `server_all_applied`.
+    fn rejected_count(&self) -> usize {
+        self.actions.len() - self.applied_count()
+    }
+
+    /// The per-action detail is authoritative in one direction only: an entry
+    /// that says "did not apply" outvotes a summary claiming success, and the
+    /// summary outvotes entries that are all clean.
+    fn all_applied(&self) -> bool {
+        self.server_all_applied && self.rejected_count() == 0
+    }
+
     fn tally(&self) -> String {
-        format!("{}/{} applied", self.applied_count(), self.actions.len())
+        let counted = format!("{}/{} applied", self.applied_count(), self.actions.len());
+        // Every action the server detailed applied, yet it says the batch did
+        // not. Printing the bare count here would read as a clean success.
+        if self.server_all_applied || self.rejected_count() > 0 {
+            counted
+        } else {
+            format!("{counted}, but the server reports the batch as not fully applied")
+        }
     }
 
     /// One line per action that did not apply, saying which and why.
@@ -165,14 +189,10 @@ fn parse_job_result(job: &Value) -> Option<JobResult> {
         })
         .collect();
 
-    // The per-action detail is authoritative: a summary claiming everything
-    // applied cannot outvote an entry that says otherwise.
-    let all_applied = job["result"]["allApplied"].as_bool().unwrap_or(true)
-        && actions.iter().all(|a| a.outcome == Outcome::Applied);
-
     Some(JobResult {
         actions,
-        all_applied,
+        // Absent means the server has no verdict to give; the entries decide.
+        server_all_applied: job["result"]["allApplied"].as_bool().unwrap_or(true),
     })
 }
 
@@ -385,13 +405,22 @@ fn print_job_result(
     }
 
     if let Some(s) = summary
-        && !s.all_applied
+        && !s.all_applied()
     {
-        let rejected = s.actions.len() - s.applied_count();
-        anyhow::bail!(
-            "{rejected} of {} submitted action(s) did not apply",
-            s.actions.len()
-        );
+        // `actions` holds only the submitted actions that produced an
+        // operation, so it cannot be used as the submitted count. When the
+        // server's verdict is the only thing objecting, say that instead of
+        // reporting "0 of N did not apply".
+        return match s.rejected_count() {
+            0 => Err(anyhow::anyhow!(
+                "the server reports the batch as not fully applied, though every action it \
+                 detailed applied — at least one submitted action produced no operation"
+            )),
+            rejected => Err(anyhow::anyhow!(
+                "{rejected} of {} reported action(s) did not apply",
+                s.actions.len()
+            )),
+        };
     }
 
     Ok(())
@@ -479,7 +508,7 @@ mod tests {
         }));
 
         let summary = parse_job_result(&job).expect("result should parse");
-        assert!(!summary.all_applied);
+        assert!(!summary.all_applied());
         assert_eq!(summary.tally(), "1/3 applied");
         assert_eq!(
             summary.failure_lines(),
@@ -498,7 +527,7 @@ mod tests {
         }));
 
         let summary = parse_job_result(&job).expect("result should parse");
-        assert!(summary.all_applied);
+        assert!(summary.all_applied());
         assert_eq!(summary.tally(), "1/1 applied");
         assert!(summary.failure_lines().is_empty());
     }
@@ -535,7 +564,7 @@ mod tests {
                   "kind": "denied", "reason": "nope" },
             ],
         }));
-        assert!(!parse_job_result(&job).unwrap().all_applied);
+        assert!(!parse_job_result(&job).unwrap().all_applied());
     }
 
     /// And a summary that contradicts its own entries does not get the benefit
@@ -547,7 +576,7 @@ mod tests {
             "actions": [{ "actionId": "a1", "scope": "global", "index": 0,
                           "kind": "reducer-error", "message": "boom" }],
         }));
-        assert!(!parse_job_result(&job).unwrap().all_applied);
+        assert!(!parse_job_result(&job).unwrap().all_applied());
     }
 
     /// A kind added after this CLI shipped is reported verbatim, never counted
@@ -558,7 +587,7 @@ mod tests {
             "actions": [{ "actionId": "a1", "scope": "global", "index": 0, "kind": "deferred" }],
         }));
         let summary = parse_job_result(&job).unwrap();
-        assert!(!summary.all_applied);
+        assert!(!summary.all_applied());
         assert_eq!(
             summary.failure_lines(),
             vec!["✗ a1 [global#0]: unrecognized outcome 'deferred'".to_string()]
@@ -595,9 +624,38 @@ mod tests {
         }));
         let err = print_job_result(&rejected, "job-1", "READ_READY", OutputFormat::Json)
             .expect_err("a partial failure must not exit clean");
-        assert!(err.to_string().contains("1 of 2 submitted action(s)"));
+        assert!(err.to_string().contains("1 of 2 reported action(s)"));
 
         let unknown = json!({ "id": "job-1", "status": "READ_READY", "error": null });
         assert!(print_job_result(&unknown, "job-1", "READ_READY", OutputFormat::Json).is_ok());
+    }
+
+    /// An action that produced no operation gets no entry, so the server can
+    /// say `allApplied: false` over a set of entries that all applied. The
+    /// entries must not be mistaken for the submitted count: doing so
+    /// printed a clean `2/2 applied` and then bailed with the nonsense
+    /// "0 of 2 submitted action(s) did not apply".
+    #[test]
+    fn a_verdict_with_nothing_to_point_at_is_still_a_failure() {
+        let job = job_with(json!({
+            "allApplied": false,
+            "actions": [
+                { "actionId": "a1", "scope": "global", "index": 0, "kind": "applied" },
+                { "actionId": "a2", "scope": "global", "index": 1, "kind": "applied" },
+            ],
+        }));
+        let summary = parse_job_result(&job).expect("a summary");
+        assert!(!summary.all_applied());
+        assert_eq!(summary.rejected_count(), 0);
+        assert_eq!(
+            summary.tally(),
+            "2/2 applied, but the server reports the batch as not fully applied"
+        );
+
+        let err = print_job_result(&job, "job-1", "READ_READY", OutputFormat::Json)
+            .expect_err("a batch the server calls incomplete must not exit clean");
+        let message = err.to_string();
+        assert!(message.contains("produced no operation"), "{message}");
+        assert!(!message.contains("0 of"), "{message}");
     }
 }
