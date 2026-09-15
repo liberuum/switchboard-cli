@@ -88,9 +88,21 @@ impl GraphQLClient {
                     );
                     continue;
                 }
+                Err(e) if e.is_timeout() => {
+                    // The connection succeeded; only the response timed out.
+                    // The server received the request and may have executed
+                    // it, so this is never retried and must not be reported
+                    // as a connection failure.
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "Timed out waiting for a response from {}. \
+                         The request reached the server and the operation may have completed \
+                         — check before retrying.",
+                        self.url
+                    )));
+                }
                 Err(e) => {
                     return Err(
-                        anyhow::Error::new(e).context(format!("Failed to connect to {}", self.url))
+                        anyhow::Error::new(e).context(format!("Request to {} failed", self.url))
                     );
                 }
             }
@@ -121,5 +133,74 @@ impl GraphQLClient {
 
     pub fn has_token(&self) -> bool {
         self.token.is_some()
+    }
+}
+
+/// True when `err` was caused by a request timing out after the connection
+/// was established — the server received the request and may have executed
+/// it. Callers of mutating operations use this to report a maybe-applied
+/// write instead of a plain failure.
+pub fn is_timeout_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|e| e.is_timeout() && !e.is_connect())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A read timeout must stay recognizable after `.context()` wrapping —
+    /// `docs create` keys its "the document may exist" recovery off this.
+    #[tokio::test]
+    async fn timeout_survives_context_wrapping() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept but never respond, so the request times out mid-response.
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            drop(stream);
+        });
+
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_millis(300))
+            .build()
+            .unwrap();
+        let err = client
+            .post(format!("http://{addr}/graphql"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_timeout());
+
+        let wrapped = anyhow::Error::new(err).context("Timed out waiting for a response");
+        assert!(is_timeout_error(&wrapped));
+    }
+
+    #[tokio::test]
+    async fn connect_failure_is_not_a_timeout() {
+        // Bind then drop, so the port is free and the connect is refused.
+        let addr = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = client
+            .post(format!("http://{addr}/graphql"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap_err();
+
+        let wrapped = anyhow::Error::new(err).context("Failed to connect");
+        assert!(!is_timeout_error(&wrapped));
     }
 }
