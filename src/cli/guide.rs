@@ -573,6 +573,20 @@ WEBSOCKET-BASED WAITING
   real-time status updates, completing as soon as the job finishes.
   This is more efficient and responsive than periodic polling.
 
+ACTION OUTCOMES
+
+  A reducer error or a permission denial does not fail the job: the
+  operation is still written and the job still reaches READ_READY. So
+  `jobs status` and `jobs wait` report what became of each action the
+  job was given, and `jobs wait` exits non-zero when they did not all
+  apply:
+
+    Job abc123 finished: READ_READY (1/2 applied)
+      ✗ a2 [global#5]: reducer error: name is required
+
+  Servers that do not report per-action outcomes print the plain
+  status line, unchanged.
+
 STATUS PROGRESSION
 
   `jobs status`, `jobs watch`, and `jobs wait` display a visual

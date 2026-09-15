@@ -211,7 +211,7 @@ history. Aborts if the destination already has a drive with the same slug.
 | `switchboard docs add-to <parent> <ids...>` | Add documents as children of a parent |
 | `switchboard docs remove-from <parent> <ids...>` | Remove documents from a parent |
 | `switchboard docs move <ids...> --from <src> --to <dst>` | Move documents between parents |
-| `switchboard docs apply <id> --actions '<json>' [--file <file>] [--wait] [--allow-literal-escapes]` | Dispatch raw actions via `mutateDocument` — pass actions inline or from a file; `--wait` blocks until async completion. Refuses string fields containing a literal `\n`/`\t`/`\r` (a double-encoding bug that stores `\n` in note bodies) unless `--allow-literal-escapes` |
+| `switchboard docs apply <id> --actions '<json>' [--file <file>] [--wait] [--allow-literal-escapes]` | Dispatch raw actions via `mutateDocument` — pass actions inline or from a file; `--wait` blocks until async completion and fails if any action was rejected. Refuses string fields containing a literal `\n`/`\t`/`\r` (a double-encoding bug that stores `\n` in note bodies) unless `--allow-literal-escapes` |
 | `switchboard docs mutate <id-or-name> [--op <op>] [--input '<json>'] [--input-file <file>] [--drive <slug>] [--allow-literal-escapes]` | Interactive field-by-field editor — omit `--op` for operation picker; pass `--input` / `--input-file` for scripting. Same literal-escape guard as `apply` |
 
 ### Folders
@@ -272,8 +272,8 @@ All export commands support operation filters: `--action-types <types>` (comma-s
 |---------|-------------|
 | `switchboard watch docs [--type <type>] [--drive <id>] [--doc <id>] [--exec <cmd>]` | Stream document change events via WebSocket. Enriched output includes slug, timestamps, revisions, and context. `--exec` runs a command for each event with JSON on stdin and `$SWITCHBOARD_EVENT` set |
 | `switchboard watch job <job-id>` | Stream job status updates |
-| `switchboard jobs status <job-id>` | Get current job status with visual progression bar |
-| `switchboard jobs wait <job-id> [--timeout <secs>]` | Block until a job completes via WebSocket subscription (no polling) |
+| `switchboard jobs status <job-id>` | Get current job status with visual progression bar, and what became of each action the job was given |
+| `switchboard jobs wait <job-id> [--timeout <secs>]` | Block until a job completes via WebSocket subscription (no polling). Exits non-zero, naming the action and the reason, when the job's actions did not all apply |
 | `switchboard jobs watch <job-id>` | Stream job status updates via WebSocket with visual progression bar |
 | `switchboard sync touch <input>` | Create/update a sync channel |
 | `switchboard sync push <envelopes>` | Push sync envelopes |

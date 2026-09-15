@@ -1806,6 +1806,9 @@ async fn apply(
                 "documentIdentifier": resolved_id,
                 "actions": actions,
             });
+            // `result` is not selected: the job has just been submitted, so it
+            // has none, and older servers declare the field non-null and error
+            // the whole mutation over it. `--wait` reads it off `jobStatus`.
             let data = client
                 .query(
                     "mutation($documentIdentifier: String!, $actions: [ActionInput!]!) { \

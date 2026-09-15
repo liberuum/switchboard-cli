@@ -890,6 +890,22 @@ switchboard jobs watch <job-id>                              # Stream updates vi
 
 For long-running mutations dispatched via `mutateDocumentAsync` (e.g., `docs apply`).
 
+**Per-action outcomes.** A reducer error or a permission denial does not fail the
+job — the operation is written anyway and the job still reaches `READ_READY`. The
+job's `result` reports what became of each submitted action, so `jobs status` and
+`jobs wait` name the ones that did not apply:
+
+```
+$ switchboard jobs wait abc123
+Job abc123 finished: READ_READY (1/2 applied)
+  ✗ a2 [global#5]: reducer error: name is required
+```
+
+`jobs wait` (and therefore `docs apply --wait`) exits 1 in that case. `jobs status`
+only reports, and exits 0. `--format json` prints the job object as the server sent
+it, `result` included — nothing is reshaped. A server that does not report
+per-action outcomes prints the plain status line and exits as before.
+
 ---
 
 ### 14. Sync Channels
