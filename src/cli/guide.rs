@@ -220,6 +220,7 @@ COMMANDS
                                        Hierarchical folder/file view
   switchboard docs create              Interactive document creation
   switchboard docs create --type <type> --name <name> --drive <slug>
+                                       [--parent-folder <folder-id>]
                                        Scripted creation
   switchboard docs delete <ids...> [-y] Delete one or more documents (batch)
   switchboard docs rename <id> <name>  Rename a document
@@ -572,6 +573,25 @@ WEBSOCKET-BASED WAITING
   It connects to the server's subscription endpoint and receives
   real-time status updates, completing as soon as the job finishes.
   This is more efficient and responsive than periodic polling.
+
+ACTION OUTCOMES
+
+  A reducer error or a permission denial does not fail the job: the
+  operation is still written and the job still reaches READ_READY. So
+  `jobs status` and `jobs wait` report what became of each action the
+  job was given, and `jobs wait` exits non-zero when they did not all
+  apply:
+
+    Job abc123 finished: READ_READY (1/2 applied)
+      ✗ a2 [global#5]: reducer error: name is required
+
+  The tally counts the actions that produced an operation. An action
+  that produced none has no entry, so a server can report the batch as
+  incomplete while every action it detailed applied — `jobs wait` says
+  so and still exits non-zero.
+
+  Servers that do not report per-action outcomes print the plain
+  status line, unchanged.
 
 STATUS PROGRESSION
 

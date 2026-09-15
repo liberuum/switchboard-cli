@@ -994,6 +994,65 @@ pub fn print_tree(nodes: &[Value], parent: Option<&str>, indent: &str) {
     }
 }
 
+/// Bounded: the server has just failed to answer within its full request
+/// timeout, and this hint only decorates a message printed either way.
+const CREATE_HINT_LOOKUP: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Guidance for a `createDocument` timeout: the request reached the server,
+/// so the document may exist. A name match is never reported as proof — the
+/// drive may simply have held one already.
+async fn timed_out_create_hint(
+    client: &crate::graphql::GraphQLClient,
+    drive_id: &str,
+    name: &str,
+    parent_folder: Option<&str>,
+) -> String {
+    let at_root = tokio::time::timeout(CREATE_HINT_LOOKUP, fetch_drive_nodes(client, drive_id))
+        .await
+        .ok()
+        .and_then(|fetched| fetched.ok())
+        .and_then(|(_, _, nodes)| root_document_named(&nodes, name));
+
+    match at_root {
+        Some(doc_id) => {
+            let placement = match parent_folder {
+                Some(folder) => format!(
+                    " It is at the drive root, not in folder {folder}; if it is the one just \
+                     created, place it with \
+                     `switchboard docs move {doc_id} --from {drive_id} --to {folder}`."
+                ),
+                None => String::new(),
+            };
+            format!(
+                "The create may well have taken effect: drive {drive_id} holds a document \
+                 named \"{name}\" at its root (id {doc_id}).{placement} Check that document \
+                 before re-running `docs create` — if it is the one just created, re-running \
+                 makes a duplicate."
+            )
+        }
+        None => format!(
+            "The create may still have been applied. Check drive {drive_id} for a document \
+             named \"{name}\" (`switchboard docs list --drive {drive_id}`) before re-running \
+             `docs create`, or you will end up with a duplicate."
+        ),
+    }
+}
+
+/// Root only: `createDocument` lands the document there, and the
+/// `--parent-folder` move has not run yet.
+fn root_document_named(nodes: &[Value], name: &str) -> Option<String> {
+    nodes
+        .iter()
+        .find(|n| {
+            n["kind"].as_str() == Some("file")
+                && matches!(n["parentFolder"].as_str(), None | Some(""))
+                && n["name"]
+                    .as_str()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .and_then(|n| n["id"].as_str().map(|id| id.to_string()))
+}
+
 async fn create(
     doc_type: Option<String>,
     name: Option<String>,
@@ -1058,13 +1117,10 @@ async fn create(
     // namespaced createDocument mutation that atomically adds the doc to the drive.
     let namespace = cache.find_model(&doc_type).map(|m| m.namespace.clone());
 
-    let mut vars = serde_json::json!({
+    let vars = serde_json::json!({
         "name": name,
         "parentIdentifier": drive_id,
     });
-    if let Some(ref folder_id) = parent_folder {
-        vars["slug"] = serde_json::json!(folder_id); // parentFolder not directly supported
-    }
 
     let ns = match &namespace {
         Some(ns) if !ns.is_empty() => ns.clone(),
@@ -1079,7 +1135,17 @@ async fn create(
         ns,
     );
 
-    let create_data = client.query(&mutation, Some(&vars)).await?;
+    // A read timeout does not mean the create failed; re-running it is what
+    // produces the duplicate "(copy) 1" documents.
+    let create_data = match client.query(&mutation, Some(&vars)).await {
+        Ok(data) => data,
+        Err(e) if crate::graphql::is_timeout_error(&e) => {
+            let hint =
+                timed_out_create_hint(&client, &drive_id, &name, parent_folder.as_deref()).await;
+            return Err(e.context(hint));
+        }
+        Err(e) => return Err(e),
+    };
 
     let doc_id = create_data
         .get(ns.as_str())
@@ -1098,7 +1164,34 @@ async fn create(
                 "targetParentFolder": folder_id,
             }
         });
-        let _ = client.query(move_mutation, Some(&move_vars)).await;
+        if let Err(e) = client.query(move_mutation, Some(&move_vars)).await {
+            let placement = if crate::graphql::is_timeout_error(&e) {
+                format!(
+                    "the move may or may not have taken effect — check whether it is in folder \
+                     {folder_id} or still at the root of drive {drive_id}, and if it is at the \
+                     root, place it with \
+                     `switchboard docs move {doc_id} --from {drive_id} --to {folder_id}`"
+                )
+            } else {
+                format!(
+                    "it is sitting at the root of drive {drive_id}. Place it with \
+                     `switchboard docs move {doc_id} --from {drive_id} --to {folder_id}`"
+                )
+            };
+            // Returning Err skips the JSON print below, leaving a script no
+            // way to recover the id of a document that does exist.
+            if matches!(format, OutputFormat::Json | OutputFormat::Raw) {
+                print_json(&serde_json::json!({
+                    "id": doc_id,
+                    "folderMoveFailed": format!("{e:#}"),
+                }));
+            }
+            return Err(e.context(format!(
+                "Document \"{name}\" was created (id {doc_id}) but could not be moved into \
+                 folder {folder_id} — {placement}; do NOT re-run `docs create`, that makes a \
+                 duplicate."
+            )));
+        }
     }
 
     let data = serde_json::json!({ "id": doc_id });
@@ -2085,6 +2178,46 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod create_recovery_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_the_drive_root_is_a_candidate() {
+        let nodes = vec![
+            json!({ "id": "folder-1", "kind": "folder", "name": "Invoices" }),
+            json!({ "id": "nested", "kind": "file", "name": "Q1 Invoice",
+                    "parentFolder": "folder-1" }),
+        ];
+        assert_eq!(root_document_named(&nodes, "Q1 Invoice"), None);
+
+        let mut with_root = nodes.clone();
+        with_root.push(
+            json!({ "id": "root-doc", "kind": "file", "name": "q1 invoice",
+                               "parentFolder": null }),
+        );
+        assert_eq!(
+            root_document_named(&with_root, "Q1 Invoice"),
+            Some("root-doc".to_string())
+        );
+    }
+
+    #[test]
+    fn an_empty_parent_is_the_root_and_a_folder_is_never_a_match() {
+        let empty_parent = vec![json!({ "id": "d", "kind": "file", "name": "Notes",
+                                        "parentFolder": "" })];
+        assert_eq!(
+            root_document_named(&empty_parent, "Notes"),
+            Some("d".to_string())
+        );
+
+        let folder = vec![json!({ "id": "f", "kind": "folder", "name": "Notes",
+                                  "parentFolder": null })];
+        assert_eq!(root_document_named(&folder, "Notes"), None);
+    }
 }
 
 #[cfg(test)]

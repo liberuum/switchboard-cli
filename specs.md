@@ -298,7 +298,7 @@ Maps to GraphQL:
 switchboard docs list [--drive <slug>] [--type <type>]       # Also supports --format svg/png/mermaid --out <file>
 switchboard docs get <id-or-name> [--drive <slug>] [--state] [--out <file>]
 switchboard docs tree [<slug>]
-switchboard docs create [--type <type>] [--name <name>] [--drive <slug>]
+switchboard docs create [--type <type>] [--name <name>] [--drive <slug>] [--parent-folder <id>]
 switchboard docs delete <ids-or-names...> [-y]
 switchboard docs rename <id-or-name> <new-name>
 switchboard docs parents <id-or-name>
@@ -890,6 +890,27 @@ switchboard jobs watch <job-id>                              # Stream updates vi
 
 For long-running mutations dispatched via `mutateDocumentAsync` (e.g., `docs apply`).
 
+**Per-action outcomes.** A reducer error or a permission denial does not fail the
+job — the operation is written anyway and the job still reaches `READ_READY`. The
+job's `result` reports what became of each submitted action, so `jobs status` and
+`jobs wait` name the ones that did not apply:
+
+```
+$ switchboard jobs wait abc123
+Job abc123 finished: READ_READY (1/2 applied)
+  ✗ a2 [global#5]: reducer error: name is required
+```
+
+`jobs wait` (and therefore `docs apply --wait`) exits 1 in that case. `jobs status`
+only reports, and exits 0. `--format json` prints the job object as the server sent
+it, `result` included — nothing is reshaped. A server that does not report
+per-action outcomes prints the plain status line and exits as before.
+
+The tally counts the actions that produced an operation — an action that produced
+none has no entry to report. So the server's own `allApplied` can say the batch fell
+short while every action it detailed applied; `jobs wait` says exactly that and still
+exits 1, rather than inventing a count of actions it cannot name.
+
 ---
 
 ### 14. Sync Channels
@@ -1216,6 +1237,12 @@ $ switchboard docs get Acaldas --drive builders --state --format json | jq '.sta
 # Create a document (scripted)
 $ switchboard docs create --type powerhouse/invoice --name "Q1 Invoice" --drive my-drive --format json
 [{"id": "41d2cae7-...", "name": "Q1 Invoice", ...}]
+
+# Create inside a folder (created at the root, then moved). A failed move
+# exits non-zero but still prints the id, so a script never loses it:
+$ switchboard docs create --type powerhouse/invoice --name "Q1 Invoice" \
+    --drive my-drive --parent-folder 8f21c0de-... --format json
+{"id": "41d2cae7-...", "folderMoveFailed": "..."}
 
 # Mutate a document
 $ switchboard docs mutate 41d2cae7-... --op editInvoice --input '{"amount": 2000}' --format json
