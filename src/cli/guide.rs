@@ -220,6 +220,7 @@ COMMANDS
                                        Hierarchical folder/file view
   switchboard docs create              Interactive document creation
   switchboard docs create --type <type> --name <name> --drive <slug>
+                                       [--parent-folder <folder-id>]
                                        Scripted creation
   switchboard docs delete <ids...> [-y] Delete one or more documents (batch)
   switchboard docs rename <id> <name>  Rename a document

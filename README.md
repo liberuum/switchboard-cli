@@ -204,7 +204,7 @@ history. Aborts if the destination already has a drive with the same slug.
 | `switchboard docs list [--drive <slug>]` | List documents (all drives, or filtered by `--drive`; add `--type` to filter) |
 | `switchboard docs get <id-or-name> [--drive <slug>] [--state] [--out <file>]` | Get document details (auto-detects drive; `--state` includes full state) |
 | `switchboard docs tree [<slug>]` | Hierarchical folder/file view — all drives if no argument, single drive if slug given |
-| `switchboard docs create` | Interactive creation with drive picker (or pass `--type`, `--name`, `--drive`) |
+| `switchboard docs create [--parent-folder <id>]` | Interactive creation with drive picker (or pass `--type`, `--name`, `--drive`; `--parent-folder` places it inside a folder) |
 | `switchboard docs delete <ids-or-names...>` | Delete one or more documents — batch API (use `-y` to skip confirmation) |
 | `switchboard docs rename <id> <name>` | Rename a document |
 | `switchboard docs parents <id>` | Show parent documents (reverse tree traversal) |

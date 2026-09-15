@@ -298,7 +298,7 @@ Maps to GraphQL:
 switchboard docs list [--drive <slug>] [--type <type>]       # Also supports --format svg/png/mermaid --out <file>
 switchboard docs get <id-or-name> [--drive <slug>] [--state] [--out <file>]
 switchboard docs tree [<slug>]
-switchboard docs create [--type <type>] [--name <name>] [--drive <slug>]
+switchboard docs create [--type <type>] [--name <name>] [--drive <slug>] [--parent-folder <id>]
 switchboard docs delete <ids-or-names...> [-y]
 switchboard docs rename <id-or-name> <new-name>
 switchboard docs parents <id-or-name>
@@ -1237,6 +1237,13 @@ $ switchboard docs get Acaldas --drive builders --state --format json | jq '.sta
 # Create a document (scripted)
 $ switchboard docs create --type powerhouse/invoice --name "Q1 Invoice" --drive my-drive --format json
 [{"id": "41d2cae7-...", "name": "Q1 Invoice", ...}]
+
+# Create inside a folder. The document is made at the drive root and then
+# moved, so if the move fails the command exits non-zero — and still prints
+# the id, with the reason, so the document is never lost to a script:
+$ switchboard docs create --type powerhouse/invoice --name "Q1 Invoice" \
+    --drive my-drive --parent-folder 8f21c0de-... --format json
+{"id": "41d2cae7-...", "folderMoveFailed": "..."}
 
 # Mutate a document
 $ switchboard docs mutate 41d2cae7-... --op editInvoice --input '{"amount": 2000}' --format json

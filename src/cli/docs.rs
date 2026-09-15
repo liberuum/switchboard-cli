@@ -1179,11 +1179,36 @@ async fn create(
             }
         });
         if let Err(e) = client.query(move_mutation, Some(&move_vars)).await {
+            // A read timeout is the one failure that may have applied
+            // anyway, so it gets a question about where the document ended
+            // up rather than an assertion.
+            let placement = if crate::graphql::is_timeout_error(&e) {
+                format!(
+                    "the move may or may not have taken effect — check whether it is in folder \
+                     {folder_id} or still at the root of drive {drive_id}, and if it is at the \
+                     root, place it with \
+                     `switchboard docs move {doc_id} --from {drive_id} --to {folder_id}`"
+                )
+            } else {
+                format!(
+                    "it is sitting at the root of drive {drive_id}. Place it with \
+                     `switchboard docs move {doc_id} --from {drive_id} --to {folder_id}`"
+                )
+            };
+            // The document exists whatever became of the move, but returning
+            // Err skips the JSON print below — so a script piping stdout to
+            // `jq` would get nothing and the id would survive only as prose
+            // in the error chain. Emit it before failing.
+            if matches!(format, OutputFormat::Json | OutputFormat::Raw) {
+                print_json(&serde_json::json!({
+                    "id": doc_id,
+                    "folderMoveFailed": format!("{e:#}"),
+                }));
+            }
             return Err(e.context(format!(
                 "Document \"{name}\" was created (id {doc_id}) but could not be moved into \
-                 folder {folder_id} — it is sitting at the root of drive {drive_id}. \
-                 Place it with `switchboard docs move {doc_id} --from {drive_id} --to {folder_id}`; \
-                 do NOT re-run `docs create`, that makes a duplicate."
+                 folder {folder_id} — {placement}; do NOT re-run `docs create`, that makes a \
+                 duplicate."
             )));
         }
     }
