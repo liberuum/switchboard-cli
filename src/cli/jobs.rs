@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde_json::Value;
 
@@ -196,14 +196,28 @@ fn parse_job_result(job: &Value) -> Option<JobResult> {
     })
 }
 
+/// True when the server's complaint is specifically about `JobInfo.result`:
+/// an older Switchboard resolving its non-null `result` to null, or a schema
+/// with no such field, which fails validation instead. Both name the field.
+///
+/// Anything else — a bad job id, an expired token — is the caller's to see.
+/// Retrying those costs a second round trip and then reports whichever of the
+/// two failures is less accurate.
+fn rejects_job_result(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}");
+    message.contains("JobInfo") && message.contains("result")
+}
+
 /// Query `jobStatus`, selecting `result`.
 ///
 /// `JobInfo.result` carries what became of each submitted action. Older
 /// Switchboards declare it `JSONObject!` and resolve it null, which nullifies
-/// the whole selection and errors the query; fall back to the result-less
-/// selection there, so this CLI keeps working against a server that simply has
-/// no per-action detail to give. Only a server-answered error triggers the
-/// retry — a dead connection is reported as-is rather than dialled twice.
+/// the whole selection and errors the query; older ones still have no such
+/// field, which fails validation (HTTP 400). Fall back to the result-less
+/// selection in both cases, so this CLI keeps working against a server that
+/// simply has no per-action detail to give. Only a server answering about
+/// that field triggers the retry — a dead connection is reported as-is rather
+/// than dialled twice.
 async fn query_job_status(client: &crate::graphql::GraphQLClient, job_id: &str) -> Result<Value> {
     let id = job_id.replace('"', r#"\""#);
     let with_result = format!(
@@ -211,11 +225,13 @@ async fn query_job_status(client: &crate::graphql::GraphQLClient, job_id: &str) 
     );
     match client.query(&with_result, None).await {
         Ok(data) => Ok(data),
-        Err(e) if crate::graphql::is_server_error(&e) => {
+        Err(e) if crate::graphql::is_server_error(&e) && rejects_job_result(&e) => {
             let legacy = format!(
                 r#"{{ jobStatus(jobId: "{id}") {{ id status error createdAt completedAt }} }}"#
             );
-            client.query(&legacy, None).await.map_err(|_| e)
+            client.query(&legacy, None).await.with_context(|| {
+                format!("the server rejected the `result` selection ({e:#}), and the query without it also failed")
+            })
         }
         Err(e) => Err(e),
     }
@@ -628,6 +644,32 @@ mod tests {
 
         let unknown = json!({ "id": "job-1", "status": "READ_READY", "error": null });
         assert!(print_job_result(&unknown, "job-1", "READ_READY", OutputFormat::Json).is_ok());
+    }
+
+    /// The `result`-less retry exists for one server bug. Spending a second
+    /// round trip on a bad job id or an expired token only buys a second
+    /// failure, and the first one is then thrown away.
+    #[test]
+    fn only_a_result_rejection_earns_a_second_round_trip() {
+        let non_null = anyhow::anyhow!(
+            "GraphQL errors:\n  Cannot return null for non-nullable field JobInfo.result."
+        );
+        assert!(rejects_job_result(&non_null));
+
+        let unknown_field = anyhow::anyhow!(
+            "HTTP 400 Bad Request: GraphQL errors:\n  Cannot query field \"result\" on type \"JobInfo\"."
+        );
+        assert!(rejects_job_result(&unknown_field));
+
+        for unrelated in [
+            "GraphQL errors:\n  Job not found",
+            "GraphQL errors:\n  Unauthorized: token expired",
+        ] {
+            assert!(
+                !rejects_job_result(&anyhow::anyhow!("{unrelated}")),
+                "{unrelated}"
+            );
+        }
     }
 
     /// An action that produced no operation gets no entry, so the server can
