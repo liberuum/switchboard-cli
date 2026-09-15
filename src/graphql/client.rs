@@ -89,10 +89,6 @@ impl GraphQLClient {
                     continue;
                 }
                 Err(e) if e.is_timeout() => {
-                    // The connection succeeded; only the response timed out.
-                    // The server received the request and may have executed
-                    // it, so this is never retried and must not be reported
-                    // as a connection failure.
                     return Err(anyhow::Error::new(e).context(timed_out_message(&self.url)));
                 }
                 Err(e) => {
@@ -110,11 +106,6 @@ impl GraphQLClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            // 504/408 are the other half of "reached the server, no answer
-            // came back in time" — a gateway saying so on the upstream's
-            // behalf. The operation may have executed, exactly as with a read
-            // timeout, so it must carry the same warning and not read as a
-            // plain HTTP failure.
             if status == reqwest::StatusCode::GATEWAY_TIMEOUT
                 || status == reqwest::StatusCode::REQUEST_TIMEOUT
             {
@@ -123,11 +114,7 @@ impl GraphQLClient {
                         .context(timed_out_message(&self.url)),
                 );
             }
-            // A GraphQL error can arrive with a non-2xx status: a query that
-            // names a field the schema lacks fails validation, which both
-            // graphql-yoga and Apollo answer with HTTP 400. The server did
-            // answer, so report it as a server error — callers key their
-            // narrower-selection fallbacks off that.
+            // Validation errors come back non-2xx (HTTP 400 in yoga and Apollo).
             if let Some(messages) = graphql_error_messages(&body) {
                 return Err(
                     anyhow::Error::new(ServerErrors(messages)).context(format!("HTTP {status}"))
@@ -154,16 +141,12 @@ impl GraphQLClient {
     }
 }
 
-/// The GraphQL error messages carried by a response body, if it is a GraphQL
-/// error response at all. A gateway's HTML error page is not.
 fn graphql_error_messages(body: &str) -> Option<Vec<String>> {
     let parsed: GraphQLResponse = serde_json::from_str(body).ok()?;
     let errors = parsed.errors.filter(|e| !e.is_empty())?;
     Some(errors.into_iter().map(|e| e.message).collect())
 }
 
-/// The one wording for "the request reached the server and no answer came
-/// back in time", shared by the read-timeout and gateway-timeout paths.
 fn timed_out_message(url: &str) -> String {
     format!(
         "Timed out waiting for a response from {url}. \
@@ -172,9 +155,7 @@ fn timed_out_message(url: &str) -> String {
     )
 }
 
-/// A request that reached the server with no answer coming back in time,
-/// reported by a gateway rather than by the socket. Carries the same
-/// maybe-applied warning as a read timeout.
+/// A gateway's 504/408: reached the server, no answer in time.
 #[derive(Debug)]
 pub struct MaybeApplied(String);
 
@@ -186,10 +167,7 @@ impl std::fmt::Display for MaybeApplied {
 
 impl std::error::Error for MaybeApplied {}
 
-/// Errors the server answered with, as opposed to ones the transport
-/// produced. A schema mismatch — an older Switchboard rejecting a field this
-/// CLI selects — lands here, which lets a caller retry with a narrower
-/// selection instead of retrying a dead connection.
+/// Errors the server answered with, as opposed to ones the transport produced.
 #[derive(Debug)]
 pub struct ServerErrors(pub Vec<String>);
 
@@ -201,17 +179,13 @@ impl std::fmt::Display for ServerErrors {
 
 impl std::error::Error for ServerErrors {}
 
-/// True when the server answered with GraphQL errors.
 pub fn is_server_error(err: &anyhow::Error) -> bool {
     err.chain()
         .any(|cause| cause.downcast_ref::<ServerErrors>().is_some())
 }
 
-/// True when `err` was caused by a request timing out after the connection
-/// was established — whether the socket gave up waiting or a gateway answered
-/// 504/408. Either way the server received the request and may have executed
-/// it. Callers of mutating operations use this to report a maybe-applied
-/// write instead of a plain failure.
+/// True when the request reached the server but no answer came back in time,
+/// so a mutation may have been applied anyway.
 pub fn is_timeout_error(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause.downcast_ref::<MaybeApplied>().is_some()
@@ -225,9 +199,6 @@ pub fn is_timeout_error(err: &anyhow::Error) -> bool {
 mod tests {
     use super::*;
 
-    /// An older Switchboard rejecting `JobInfo.result` must stay recognizable
-    /// after `.context()` wrapping — `jobs status` keys its narrower-selection
-    /// retry off this, and must not retry a dead connection that way.
     #[test]
     fn a_server_error_is_told_from_a_transport_one() {
         let err = anyhow::Error::new(ServerErrors(vec![
@@ -242,8 +213,6 @@ mod tests {
         assert!(!is_server_error(&transport));
     }
 
-    /// A read timeout must stay recognizable after `.context()` wrapping —
-    /// `docs create` keys its "the document may exist" recovery off this.
     #[tokio::test]
     async fn timeout_survives_context_wrapping() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -294,9 +263,7 @@ mod tests {
         assert!(!is_timeout_error(&wrapped));
     }
 
-    /// A gateway timeout is a successful HTTP exchange, so nothing in the
-    /// error chain is a `reqwest::Error` — it still has to reach the
-    /// maybe-applied path that stops `docs create` being re-run.
+    // A gateway timeout is a successful HTTP exchange: no `reqwest::Error` in the chain.
     #[test]
     fn a_gateway_timeout_is_a_maybe_applied_timeout() {
         let err = anyhow::Error::new(MaybeApplied("HTTP 504 Gateway Timeout: ".to_string()))
@@ -306,9 +273,6 @@ mod tests {
         assert!(format!("{err:#}").contains("may have completed"));
     }
 
-    /// A schema with no `JobInfo.result` fails *validation*, which yoga and
-    /// Apollo answer with HTTP 400 — `jobs status` must still see a server
-    /// error there, not an opaque HTTP failure.
     #[test]
     fn a_non_2xx_graphql_body_is_a_server_error() {
         let body =
@@ -317,9 +281,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert!(messages[0].contains("JobInfo"));
 
-        // A gateway's HTML error page is not a GraphQL answer.
         assert!(graphql_error_messages("<html>502 Bad Gateway</html>").is_none());
-        // Neither is a 200-shaped body with no errors.
         assert!(graphql_error_messages(r#"{"data":{"x":1}}"#).is_none());
     }
 }

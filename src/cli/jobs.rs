@@ -58,13 +58,12 @@ fn status_progress(status: &str) -> &str {
     }
 }
 
-/// What became of one action the caller submitted.
 #[derive(Debug, PartialEq)]
 enum Outcome {
     Applied,
     ReducerError(String),
     Denied(String),
-    /// A kind this CLI does not know. Never counted as applied.
+    /// Never counted as applied.
     Unknown(String),
 }
 
@@ -87,15 +86,11 @@ impl SubmittedAction {
     }
 }
 
-/// `JobInfo.result`: one entry per submitted action that produced an
-/// operation, plus the server's own verdict on the batch.
+/// One entry per submitted action *that produced an operation* — an action
+/// producing none has no entry, so the entries are not the submitted count.
 #[derive(Debug, PartialEq)]
 struct JobResult {
     actions: Vec<SubmittedAction>,
-    /// The server's `allApplied`, kept separate from the entries. False here
-    /// with every entry applied is not a contradiction: an action that
-    /// produced no operation has no entry at all, so the entries cannot
-    /// account for it.
     server_all_applied: bool,
 }
 
@@ -107,23 +102,16 @@ impl JobResult {
             .count()
     }
 
-    /// Entries that say the action did not apply. Never the whole story —
-    /// see `server_all_applied`.
     fn rejected_count(&self) -> usize {
         self.actions.len() - self.applied_count()
     }
 
-    /// The per-action detail is authoritative in one direction only: an entry
-    /// that says "did not apply" outvotes a summary claiming success, and the
-    /// summary outvotes entries that are all clean.
     fn all_applied(&self) -> bool {
         self.server_all_applied && self.rejected_count() == 0
     }
 
     fn tally(&self) -> String {
         let counted = format!("{}/{} applied", self.applied_count(), self.actions.len());
-        // Every action the server detailed applied, yet it says the batch did
-        // not. Printing the bare count here would read as a clean success.
         if self.server_all_applied || self.rejected_count() > 0 {
             counted
         } else {
@@ -131,7 +119,6 @@ impl JobResult {
         }
     }
 
-    /// One line per action that did not apply, saying which and why.
     fn failure_lines(&self) -> Vec<String> {
         self.actions
             .iter()
@@ -148,13 +135,8 @@ impl JobResult {
     }
 }
 
-/// Read `result` off a `JobInfo` or a `jobChanges` event.
-///
-/// Returns `None` when there is no per-action information to report, which is
-/// what every Switchboard before the job-result fix gives: `jobStatus` omits
-/// the field and `jobChanges` sends `{}`, because its `result` was declared
-/// non-null. Absence is never reported as success — the caller falls back to
-/// the plain status line.
+/// `None` when the server reports no per-action detail, which is never
+/// success — pre-fix servers omit the field or send `{}`.
 fn parse_job_result(job: &Value) -> Option<JobResult> {
     let entries = job.pointer("/result/actions")?.as_array()?;
     if entries.is_empty() {
@@ -191,33 +173,17 @@ fn parse_job_result(job: &Value) -> Option<JobResult> {
 
     Some(JobResult {
         actions,
-        // Absent means the server has no verdict to give; the entries decide.
         server_all_applied: job["result"]["allApplied"].as_bool().unwrap_or(true),
     })
 }
 
-/// True when the server's complaint is specifically about `JobInfo.result`:
-/// an older Switchboard resolving its non-null `result` to null, or a schema
-/// with no such field, which fails validation instead. Both name the field.
-///
-/// Anything else — a bad job id, an expired token — is the caller's to see.
-/// Retrying those costs a second round trip and then reports whichever of the
-/// two failures is less accurate.
 fn rejects_job_result(err: &anyhow::Error) -> bool {
     let message = format!("{err:#}");
     message.contains("JobInfo") && message.contains("result")
 }
 
-/// Query `jobStatus`, selecting `result`.
-///
-/// `JobInfo.result` carries what became of each submitted action. Older
-/// Switchboards declare it `JSONObject!` and resolve it null, which nullifies
-/// the whole selection and errors the query; older ones still have no such
-/// field, which fails validation (HTTP 400). Fall back to the result-less
-/// selection in both cases, so this CLI keeps working against a server that
-/// simply has no per-action detail to give. Only a server answering about
-/// that field triggers the retry — a dead connection is reported as-is rather
-/// than dialled twice.
+/// Older Switchboards can't serve `JobInfo.result` — they resolve the
+/// non-null field to null, or lack it entirely — so retry without it.
 async fn query_job_status(client: &crate::graphql::GraphQLClient, job_id: &str) -> Result<Value> {
     let id = job_id.replace('"', r#"\""#);
     let with_result = format!(
@@ -317,10 +283,6 @@ async fn wait(
         .trim_start_matches("http://");
     let ws_url = format!("{ws_scheme}://{host}/graphql/subscriptions");
 
-    // `result` is safe to select here on every server: the pre-fix ones declare
-    // `JobChangeEvent.result` non-null and publish `{}` rather than null, which
-    // `parse_job_result` reads as "no per-action detail". It was only
-    // `jobStatus` that errored on it.
     let subscription = format!(
         r#"subscription {{ jobChanges(jobId: "{id}") {{ jobId status result error }} }}"#,
         id = job_id.replace('"', r#"\""#)
@@ -386,14 +348,9 @@ async fn wait(
     print_job_result(job, &job_id_owned, status_str, format)
 }
 
-/// Print a finished job, then fail if the actions it was given did not all
-/// apply.
-///
-/// A reducer error or a denial does not fail the job — the operation is still
-/// written, the job still reaches READ_READY — so the status line alone would
-/// report a partly-rejected batch as a clean success. Exit non-zero instead,
-/// after printing, so both a human and a script see it. JSON output is the job
-/// object as the server sent it, `result` included: nothing is reshaped.
+/// A reducer error or denial does not fail the job, so a partly-rejected
+/// batch would otherwise read as a clean success. Exit non-zero after
+/// printing.
 fn print_job_result(
     job: &Value,
     job_id: &str,
@@ -423,10 +380,6 @@ fn print_job_result(
     if let Some(s) = summary
         && !s.all_applied()
     {
-        // `actions` holds only the submitted actions that produced an
-        // operation, so it cannot be used as the submitted count. When the
-        // server's verdict is the only thing objecting, say that instead of
-        // reporting "0 of N did not apply".
         return match s.rejected_count() {
             0 => Err(anyhow::anyhow!(
                 "the server reports the batch as not fully applied, though every action it \
@@ -548,8 +501,6 @@ mod tests {
         assert!(summary.failure_lines().is_empty());
     }
 
-    /// A pre-fix Switchboard cannot select `result` on `jobStatus` at all, so
-    /// the field is simply absent. That is missing information, not success.
     #[test]
     fn an_absent_result_yields_no_summary() {
         let job = json!({ "id": "job-1", "status": "READ_READY", "error": null });
@@ -561,16 +512,12 @@ mod tests {
         assert_eq!(parse_job_result(&job_with(Value::Null)), None);
     }
 
-    /// What a pre-fix server publishes on the `jobChanges` subscription, where
-    /// `result` is declared non-null: an empty object standing in for nothing.
     #[test]
     fn an_empty_result_object_yields_no_summary() {
         assert_eq!(parse_job_result(&job_with(json!({}))), None);
         assert_eq!(parse_job_result(&job_with(json!({ "actions": [] }))), None);
     }
 
-    /// `allApplied` is derived when the server omits it, so an older shape of
-    /// the field cannot turn a rejection into a success.
     #[test]
     fn all_applied_is_derived_when_missing() {
         let job = job_with(json!({
@@ -583,8 +530,6 @@ mod tests {
         assert!(!parse_job_result(&job).unwrap().all_applied());
     }
 
-    /// And a summary that contradicts its own entries does not get the benefit
-    /// of the doubt.
     #[test]
     fn a_rejected_action_outvotes_all_applied() {
         let job = job_with(json!({
@@ -595,8 +540,6 @@ mod tests {
         assert!(!parse_job_result(&job).unwrap().all_applied());
     }
 
-    /// A kind added after this CLI shipped is reported verbatim, never counted
-    /// as applied.
     #[test]
     fn an_unknown_kind_is_not_success() {
         let job = job_with(json!({
@@ -610,7 +553,6 @@ mod tests {
         );
     }
 
-    /// Missing detail must not panic or read as success.
     #[test]
     fn missing_fields_degrade_to_placeholders() {
         let job = job_with(json!({
@@ -626,8 +568,6 @@ mod tests {
         );
     }
 
-    /// A partly-rejected batch exits non-zero; the same job with no result
-    /// reported keeps today's exit code.
     #[test]
     fn a_partial_failure_is_an_error() {
         let rejected = job_with(json!({
@@ -646,9 +586,6 @@ mod tests {
         assert!(print_job_result(&unknown, "job-1", "READ_READY", OutputFormat::Json).is_ok());
     }
 
-    /// The `result`-less retry exists for one server bug. Spending a second
-    /// round trip on a bad job id or an expired token only buys a second
-    /// failure, and the first one is then thrown away.
     #[test]
     fn only_a_result_rejection_earns_a_second_round_trip() {
         let non_null = anyhow::anyhow!(
@@ -672,11 +609,6 @@ mod tests {
         }
     }
 
-    /// An action that produced no operation gets no entry, so the server can
-    /// say `allApplied: false` over a set of entries that all applied. The
-    /// entries must not be mistaken for the submitted count: doing so
-    /// printed a clean `2/2 applied` and then bailed with the nonsense
-    /// "0 of 2 submitted action(s) did not apply".
     #[test]
     fn a_verdict_with_nothing_to_point_at_is_still_a_failure() {
         let job = job_with(json!({

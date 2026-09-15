@@ -994,25 +994,13 @@ pub fn print_tree(nodes: &[Value], parent: Option<&str>, indent: &str) {
     }
 }
 
-/// How long to spend looking the document up after a create timed out. The
-/// server just failed to answer within its full request timeout; waiting that
-/// long again before saying anything would double the silence, and the hint
-/// is only an aid to a message that is printed either way.
+/// Bounded: the server has just failed to answer within its full request
+/// timeout, and this hint only decorates a message printed either way.
 const CREATE_HINT_LOOKUP: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Build the guidance appended to a `createDocument` timeout.
-///
-/// The request reached the server, so the document may exist. Look for one
-/// with the name just attempted so the error can name its id instead of
-/// leaving the user to guess between "retry" and "clean up".
-///
-/// Only the drive root is searched, and the match is never reported as proof:
-/// `createDocument` puts the document at the root and the `--parent-folder`
-/// move has not run yet, so a same-named document in some folder is somebody
-/// else's — and a same-named document at the root may be too, if the drive
-/// already had one. Telling the user "the create took effect" about a
-/// pre-existing document would point them at the wrong id and talk them out
-/// of the retry they actually need.
+/// Guidance for a `createDocument` timeout: the request reached the server,
+/// so the document may exist. A name match is never reported as proof — the
+/// drive may simply have held one already.
 async fn timed_out_create_hint(
     client: &crate::graphql::GraphQLClient,
     drive_id: &str,
@@ -1050,8 +1038,8 @@ async fn timed_out_create_hint(
     }
 }
 
-/// The id of a document sitting at the drive root under this name. Folders
-/// and anything nested are not candidates — see `timed_out_create_hint`.
+/// Root only: `createDocument` lands the document there, and the
+/// `--parent-folder` move has not run yet.
 fn root_document_named(nodes: &[Value], name: &str) -> Option<String> {
     nodes
         .iter()
@@ -1147,10 +1135,8 @@ async fn create(
         ns,
     );
 
-    // A read timeout here does NOT mean the create failed — the server may
-    // have executed it. Re-running `docs create` is what produces the
-    // duplicate "(copy) 1" documents, so instead look the document up by name
-    // and tell the user what to do with it.
+    // A read timeout does not mean the create failed; re-running it is what
+    // produces the duplicate "(copy) 1" documents.
     let create_data = match client.query(&mutation, Some(&vars)).await {
         Ok(data) => data,
         Err(e) if crate::graphql::is_timeout_error(&e) => {
@@ -1179,9 +1165,6 @@ async fn create(
             }
         });
         if let Err(e) = client.query(move_mutation, Some(&move_vars)).await {
-            // A read timeout is the one failure that may have applied
-            // anyway, so it gets a question about where the document ended
-            // up rather than an assertion.
             let placement = if crate::graphql::is_timeout_error(&e) {
                 format!(
                     "the move may or may not have taken effect — check whether it is in folder \
@@ -1195,10 +1178,8 @@ async fn create(
                      `switchboard docs move {doc_id} --from {drive_id} --to {folder_id}`"
                 )
             };
-            // The document exists whatever became of the move, but returning
-            // Err skips the JSON print below — so a script piping stdout to
-            // `jq` would get nothing and the id would survive only as prose
-            // in the error chain. Emit it before failing.
+            // Returning Err skips the JSON print below, leaving a script no
+            // way to recover the id of a document that does exist.
             if matches!(format, OutputFormat::Json | OutputFormat::Raw) {
                 print_json(&serde_json::json!({
                     "id": doc_id,
@@ -1853,9 +1834,6 @@ async fn apply(
                 "documentIdentifier": resolved_id,
                 "actions": actions,
             });
-            // `result` is not selected: the job has just been submitted, so it
-            // has none, and older servers declare the field non-null and error
-            // the whole mutation over it. `--wait` reads it off `jobStatus`.
             let data = client
                 .query(
                     "mutation($documentIdentifier: String!, $actions: [ActionInput!]!) { \
@@ -2207,11 +2185,6 @@ mod create_recovery_tests {
     use super::*;
     use serde_json::json;
 
-    /// After a create times out, only a root-level name match is a candidate:
-    /// `createDocument` lands the document at the root, and the
-    /// `--parent-folder` move has not run yet. Matching anywhere in the drive
-    /// made an unrelated document in some folder look like proof the create
-    /// took effect, which suppressed the retry the user actually needed.
     #[test]
     fn only_the_drive_root_is_a_candidate() {
         let nodes = vec![
@@ -2232,8 +2205,6 @@ mod create_recovery_tests {
         );
     }
 
-    /// Some servers say "" rather than null for a root node, and a folder of
-    /// the same name is never the document that was created.
     #[test]
     fn an_empty_parent_is_the_root_and_a_folder_is_never_a_match() {
         let empty_parent = vec![json!({ "id": "d", "kind": "file", "name": "Notes",

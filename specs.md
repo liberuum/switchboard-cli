@@ -1238,9 +1238,8 @@ $ switchboard docs get Acaldas --drive builders --state --format json | jq '.sta
 $ switchboard docs create --type powerhouse/invoice --name "Q1 Invoice" --drive my-drive --format json
 [{"id": "41d2cae7-...", "name": "Q1 Invoice", ...}]
 
-# Create inside a folder. The document is made at the drive root and then
-# moved, so if the move fails the command exits non-zero — and still prints
-# the id, with the reason, so the document is never lost to a script:
+# Create inside a folder (created at the root, then moved). A failed move
+# exits non-zero but still prints the id, so a script never loses it:
 $ switchboard docs create --type powerhouse/invoice --name "Q1 Invoice" \
     --drive my-drive --parent-folder 8f21c0de-... --format json
 {"id": "41d2cae7-...", "folderMoveFailed": "..."}
