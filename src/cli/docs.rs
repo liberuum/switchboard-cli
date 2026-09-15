@@ -994,44 +994,51 @@ pub fn print_tree(nodes: &[Value], parent: Option<&str>, indent: &str) {
     }
 }
 
+/// How long to spend looking the document up after a create timed out. The
+/// server just failed to answer within its full request timeout; waiting that
+/// long again before saying anything would double the silence, and the hint
+/// is only an aid to a message that is printed either way.
+const CREATE_HINT_LOOKUP: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Build the guidance appended to a `createDocument` timeout.
 ///
 /// The request reached the server, so the document may exist. Look for one
 /// with the name just attempted so the error can name its id instead of
 /// leaving the user to guess between "retry" and "clean up".
+///
+/// Only the drive root is searched, and the match is never reported as proof:
+/// `createDocument` puts the document at the root and the `--parent-folder`
+/// move has not run yet, so a same-named document in some folder is somebody
+/// else's — and a same-named document at the root may be too, if the drive
+/// already had one. Telling the user "the create took effect" about a
+/// pre-existing document would point them at the wrong id and talk them out
+/// of the retry they actually need.
 async fn timed_out_create_hint(
     client: &crate::graphql::GraphQLClient,
     drive_id: &str,
     name: &str,
     parent_folder: Option<&str>,
 ) -> String {
-    let existing = fetch_drive_nodes(client, drive_id)
+    let at_root = tokio::time::timeout(CREATE_HINT_LOOKUP, fetch_drive_nodes(client, drive_id))
         .await
         .ok()
-        .and_then(|(_, _, nodes)| {
-            nodes
-                .iter()
-                .find(|n| {
-                    n["kind"].as_str() == Some("file")
-                        && n["name"]
-                            .as_str()
-                            .is_some_and(|n| n.eq_ignore_ascii_case(name))
-                })
-                .and_then(|n| n["id"].as_str().map(|id| id.to_string()))
-        });
+        .and_then(|fetched| fetched.ok())
+        .and_then(|(_, _, nodes)| root_document_named(&nodes, name));
 
-    match existing {
+    match at_root {
         Some(doc_id) => {
             let placement = match parent_folder {
                 Some(folder) => format!(
-                    " It is at the drive root, not in folder {folder}; place it with \
+                    " It is at the drive root, not in folder {folder}; if it is the one just \
+                     created, place it with \
                      `switchboard docs move {doc_id} --from {drive_id} --to {folder}`."
                 ),
                 None => String::new(),
             };
             format!(
-                "The create DID take effect: drive {drive_id} now holds a document named \
-                 \"{name}\" (id {doc_id}).{placement} Do NOT re-run `docs create` — that \
+                "The create may well have taken effect: drive {drive_id} holds a document \
+                 named \"{name}\" at its root (id {doc_id}).{placement} Check that document \
+                 before re-running `docs create` — if it is the one just created, re-running \
                  makes a duplicate."
             )
         }
@@ -1041,6 +1048,21 @@ async fn timed_out_create_hint(
              `docs create`, or you will end up with a duplicate."
         ),
     }
+}
+
+/// The id of a document sitting at the drive root under this name. Folders
+/// and anything nested are not candidates — see `timed_out_create_hint`.
+fn root_document_named(nodes: &[Value], name: &str) -> Option<String> {
+    nodes
+        .iter()
+        .find(|n| {
+            n["kind"].as_str() == Some("file")
+                && matches!(n["parentFolder"].as_str(), None | Some(""))
+                && n["name"]
+                    .as_str()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .and_then(|n| n["id"].as_str().map(|id| id.to_string()))
 }
 
 async fn create(
@@ -2153,6 +2175,53 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod create_recovery_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// After a create times out, only a root-level name match is a candidate:
+    /// `createDocument` lands the document at the root, and the
+    /// `--parent-folder` move has not run yet. Matching anywhere in the drive
+    /// made an unrelated document in some folder look like proof the create
+    /// took effect, which suppressed the retry the user actually needed.
+    #[test]
+    fn only_the_drive_root_is_a_candidate() {
+        let nodes = vec![
+            json!({ "id": "folder-1", "kind": "folder", "name": "Invoices" }),
+            json!({ "id": "nested", "kind": "file", "name": "Q1 Invoice",
+                    "parentFolder": "folder-1" }),
+        ];
+        assert_eq!(root_document_named(&nodes, "Q1 Invoice"), None);
+
+        let mut with_root = nodes.clone();
+        with_root.push(
+            json!({ "id": "root-doc", "kind": "file", "name": "q1 invoice",
+                               "parentFolder": null }),
+        );
+        assert_eq!(
+            root_document_named(&with_root, "Q1 Invoice"),
+            Some("root-doc".to_string())
+        );
+    }
+
+    /// Some servers say "" rather than null for a root node, and a folder of
+    /// the same name is never the document that was created.
+    #[test]
+    fn an_empty_parent_is_the_root_and_a_folder_is_never_a_match() {
+        let empty_parent = vec![json!({ "id": "d", "kind": "file", "name": "Notes",
+                                        "parentFolder": "" })];
+        assert_eq!(
+            root_document_named(&empty_parent, "Notes"),
+            Some("d".to_string())
+        );
+
+        let folder = vec![json!({ "id": "f", "kind": "folder", "name": "Notes",
+                                  "parentFolder": null })];
+        assert_eq!(root_document_named(&folder, "Notes"), None);
+    }
 }
 
 #[cfg(test)]
