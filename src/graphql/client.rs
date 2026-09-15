@@ -93,12 +93,7 @@ impl GraphQLClient {
                     // The server received the request and may have executed
                     // it, so this is never retried and must not be reported
                     // as a connection failure.
-                    return Err(anyhow::Error::new(e).context(format!(
-                        "Timed out waiting for a response from {}. \
-                         The request reached the server and the operation may have completed \
-                         — check before retrying.",
-                        self.url
-                    )));
+                    return Err(anyhow::Error::new(e).context(timed_out_message(&self.url)));
                 }
                 Err(e) => {
                     return Err(
@@ -115,6 +110,29 @@ impl GraphQLClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            // 504/408 are the other half of "reached the server, no answer
+            // came back in time" — a gateway saying so on the upstream's
+            // behalf. The operation may have executed, exactly as with a read
+            // timeout, so it must carry the same warning and not read as a
+            // plain HTTP failure.
+            if status == reqwest::StatusCode::GATEWAY_TIMEOUT
+                || status == reqwest::StatusCode::REQUEST_TIMEOUT
+            {
+                return Err(
+                    anyhow::Error::new(MaybeApplied(format!("HTTP {status}: {body}")))
+                        .context(timed_out_message(&self.url)),
+                );
+            }
+            // A GraphQL error can arrive with a non-2xx status: a query that
+            // names a field the schema lacks fails validation, which both
+            // graphql-yoga and Apollo answer with HTTP 400. The server did
+            // answer, so report it as a server error — callers key their
+            // narrower-selection fallbacks off that.
+            if let Some(messages) = graphql_error_messages(&body) {
+                return Err(
+                    anyhow::Error::new(ServerErrors(messages)).context(format!("HTTP {status}"))
+                );
+            }
             bail!("HTTP {status}: {body}");
         }
 
@@ -135,6 +153,38 @@ impl GraphQLClient {
         self.token.is_some()
     }
 }
+
+/// The GraphQL error messages carried by a response body, if it is a GraphQL
+/// error response at all. A gateway's HTML error page is not.
+fn graphql_error_messages(body: &str) -> Option<Vec<String>> {
+    let parsed: GraphQLResponse = serde_json::from_str(body).ok()?;
+    let errors = parsed.errors.filter(|e| !e.is_empty())?;
+    Some(errors.into_iter().map(|e| e.message).collect())
+}
+
+/// The one wording for "the request reached the server and no answer came
+/// back in time", shared by the read-timeout and gateway-timeout paths.
+fn timed_out_message(url: &str) -> String {
+    format!(
+        "Timed out waiting for a response from {url}. \
+         The request reached the server and the operation may have completed \
+         — check before retrying."
+    )
+}
+
+/// A request that reached the server with no answer coming back in time,
+/// reported by a gateway rather than by the socket. Carries the same
+/// maybe-applied warning as a read timeout.
+#[derive(Debug)]
+pub struct MaybeApplied(String);
+
+impl std::fmt::Display for MaybeApplied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MaybeApplied {}
 
 /// Errors the server answered with, as opposed to ones the transport
 /// produced. A schema mismatch — an older Switchboard rejecting a field this
@@ -158,14 +208,16 @@ pub fn is_server_error(err: &anyhow::Error) -> bool {
 }
 
 /// True when `err` was caused by a request timing out after the connection
-/// was established — the server received the request and may have executed
+/// was established — whether the socket gave up waiting or a gateway answered
+/// 504/408. Either way the server received the request and may have executed
 /// it. Callers of mutating operations use this to report a maybe-applied
 /// write instead of a plain failure.
 pub fn is_timeout_error(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
-        cause
-            .downcast_ref::<reqwest::Error>()
-            .is_some_and(|e| e.is_timeout() && !e.is_connect())
+        cause.downcast_ref::<MaybeApplied>().is_some()
+            || cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|e| e.is_timeout() && !e.is_connect())
     })
 }
 
@@ -240,5 +292,34 @@ mod tests {
 
         let wrapped = anyhow::Error::new(err).context("Failed to connect");
         assert!(!is_timeout_error(&wrapped));
+    }
+
+    /// A gateway timeout is a successful HTTP exchange, so nothing in the
+    /// error chain is a `reqwest::Error` — it still has to reach the
+    /// maybe-applied path that stops `docs create` being re-run.
+    #[test]
+    fn a_gateway_timeout_is_a_maybe_applied_timeout() {
+        let err = anyhow::Error::new(MaybeApplied("HTTP 504 Gateway Timeout: ".to_string()))
+            .context(timed_out_message("http://localhost:4001/graphql"));
+        assert!(is_timeout_error(&err));
+        assert!(!is_server_error(&err));
+        assert!(format!("{err:#}").contains("may have completed"));
+    }
+
+    /// A schema with no `JobInfo.result` fails *validation*, which yoga and
+    /// Apollo answer with HTTP 400 — `jobs status` must still see a server
+    /// error there, not an opaque HTTP failure.
+    #[test]
+    fn a_non_2xx_graphql_body_is_a_server_error() {
+        let body =
+            r#"{"errors":[{"message":"Cannot query field \"result\" on type \"JobInfo\"."}]}"#;
+        let messages = graphql_error_messages(body).expect("a GraphQL error body");
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("JobInfo"));
+
+        // A gateway's HTML error page is not a GraphQL answer.
+        assert!(graphql_error_messages("<html>502 Bad Gateway</html>").is_none());
+        // Neither is a 200-shaped body with no errors.
+        assert!(graphql_error_messages(r#"{"data":{"x":1}}"#).is_none());
     }
 }
