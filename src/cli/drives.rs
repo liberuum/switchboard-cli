@@ -4,8 +4,6 @@ use colored::Colorize;
 use dialoguer::{Confirm, Input};
 use serde_json::Value;
 
-use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL};
-
 use crate::cli::helpers;
 use crate::output::{self, OutputFormat, print_json, print_table};
 
@@ -242,7 +240,7 @@ async fn get(
 
                 if files > 0 || folders > 0 {
                     println!();
-                    print_drive_tree(nodes, None, "");
+                    print_drive_tree(nodes);
                 }
             }
         }
@@ -467,10 +465,20 @@ async fn find_drive_uuid_by_name(
         .map(String::from)
 }
 
-/// Print drive contents as a hybrid tree (folders) + table (documents) view.
-/// Folders are rendered with tree connectors; documents inside each folder are
-/// displayed as a formatted table indented under the folder.
-fn print_drive_tree(nodes: &[Value], parent: Option<&str>, indent: &str) {
+/// Print drive contents as a folder/document tree, one line per node.
+fn print_drive_tree(nodes: &[Value]) {
+    for line in drive_tree_lines(nodes, None, "") {
+        println!("{line}");
+    }
+}
+
+/// The tree under `parent`: folders as `📁 name/`, documents as
+/// `📄 name  type  id`, one line each. Type and id are dimmed so the name
+/// reads first, and are not padded into columns — document names run to
+/// ~100 characters, so aligning them would make a folder wider than the table
+/// this replaces. The id is kept whole and last, where it is easy to copy.
+/// Within a folder, documents come before sub-folders.
+fn drive_tree_lines(nodes: &[Value], parent: Option<&str>, indent: &str) -> Vec<String> {
     let children: Vec<&Value> = nodes
         .iter()
         .filter(|n| {
@@ -481,54 +489,49 @@ fn print_drive_tree(nodes: &[Value], parent: Option<&str>, indent: &str) {
             }
         })
         .collect();
-
-    let folders: Vec<&Value> = children
+    let files = children
         .iter()
-        .filter(|n| n["kind"].as_str() == Some("folder"))
-        .copied()
-        .collect();
-
-    let files: Vec<&Value> = children
+        .filter(|n| n["kind"].as_str() == Some("file"));
+    let folders = children
         .iter()
-        .filter(|n| n["kind"].as_str() == Some("file"))
-        .copied()
-        .collect();
+        .filter(|n| n["kind"].as_str() == Some("folder"));
+    let ordered: Vec<&Value> = files.chain(folders).copied().collect();
 
-    // Render documents as an indented table
-    if !files.is_empty() {
-        let mut table = Table::new();
-        table
-            .load_preset(UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Disabled);
-        table.set_header(["ID", "Name", "Type"]);
-        for f in &files {
-            table.add_row(vec![
-                f["id"].as_str().unwrap_or("-"),
-                f["name"].as_str().unwrap_or("-"),
-                f["documentType"].as_str().unwrap_or("-"),
-            ]);
-        }
-        for line in table.to_string().lines() {
-            println!("{indent}{line}");
-        }
-    }
-
-    // Render sub-folders as tree entries
-    for (i, folder) in folders.iter().enumerate() {
-        let is_last = i == folders.len() - 1;
+    let mut lines = Vec::new();
+    for (i, node) in ordered.iter().enumerate() {
+        let is_last = i + 1 == ordered.len();
         let connector = if is_last {
             "\u{2514}\u{2500}\u{2500} "
         } else {
             "\u{251c}\u{2500}\u{2500} "
         };
-        let child_indent = if is_last { "    " } else { "\u{2502}   " };
-
-        let name = folder["name"].as_str().unwrap_or("-");
-        let id = folder["id"].as_str().unwrap_or("");
-
-        println!("{indent}{connector}\u{1f4c1} {name}/");
-        print_drive_tree(nodes, Some(id), &format!("{indent}{child_indent}"));
+        let name = node["name"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("-");
+        if node["kind"].as_str() == Some("folder") {
+            lines.push(format!("{indent}{connector}\u{1f4c1} {name}/"));
+            // A folder with no id would match the root's children and recurse
+            // forever; list the folder, not its (unaddressable) contents.
+            if let Some(id) = node["id"].as_str().filter(|s| !s.is_empty()) {
+                let child_indent = if is_last { "    " } else { "\u{2502}   " };
+                lines.extend(drive_tree_lines(
+                    nodes,
+                    Some(id),
+                    &format!("{indent}{child_indent}"),
+                ));
+            }
+        } else {
+            let doc_type = node["documentType"].as_str().unwrap_or("-");
+            let id = node["id"].as_str().unwrap_or("-");
+            lines.push(format!(
+                "{indent}{connector}\u{1f4c4} {name}  {}  {}",
+                doc_type.dimmed(),
+                id.dimmed()
+            ));
+        }
     }
+    lines
 }
 
 async fn check(id: &str, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
@@ -671,4 +674,37 @@ async fn fix(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drive_tree_is_one_line_per_node_with_name_type_and_id() {
+        colored::control::set_override(false);
+        let nodes = serde_json::json!([
+            { "id": "f1", "kind": "file", "name": "readme", "documentType": "bai/note", "parentFolder": null },
+            { "id": "k", "kind": "folder", "name": "knowledge", "parentFolder": "" },
+            { "id": "f2", "kind": "file", "name": "m6", "documentType": "bai/moc", "parentFolder": "k" },
+            { "id": "n", "kind": "folder", "name": "notes", "parentFolder": "k" },
+            { "id": "f3", "kind": "file", "name": "", "documentType": "bai/moc", "parentFolder": "k" },
+            { "id": "f4", "kind": "file", "name": "a long note name", "documentType": "bai/knowledge-note", "parentFolder": "n" },
+            // No id: listed, never recursed into (it would match the root).
+            { "id": "", "kind": "folder", "name": "ghost", "parentFolder": null }
+        ]);
+        let lines = drive_tree_lines(nodes.as_array().unwrap(), None, "");
+        assert_eq!(
+            lines,
+            [
+                "├── 📄 readme  bai/note  f1",
+                "├── 📁 knowledge/",
+                "│   ├── 📄 m6  bai/moc  f2",
+                "│   ├── 📄 -  bai/moc  f3",
+                "│   └── 📁 notes/",
+                "│       └── 📄 a long note name  bai/knowledge-note  f4",
+                "└── 📁 ghost/",
+            ]
+        );
+    }
 }
