@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use colored::Colorize;
 use dialoguer::{Input, Select};
@@ -1819,9 +1819,8 @@ async fn apply(
     // mutateDocument resolver doesn't inject it (unlike model-specific resolvers).
     let actions = stamp_actions(actions);
 
-    let resolved_id = helpers::resolve_doc(&client, id)
-        .await
-        .unwrap_or_else(|_| id.to_string());
+    let resolved = helpers::resolve_doc(&client, id).await;
+    let resolved_id = resolved.as_deref().unwrap_or(id).to_string();
 
     let job_id = match identity {
         // Signed: every action carries our signature and goes through the
@@ -1829,7 +1828,13 @@ async fn apply(
         // The reactor stores a pre-signed action untouched, so the operation
         // is attributed to this key — not to the Switchboard's identity.
         Some((identity, app_name)) => {
-            let actions = sign_actions(actions, &identity, &app_name)?;
+            // A v2 signature covers the document id, and the reactor resolves
+            // a slug before it verifies — signing the raw fallback would sign
+            // a preimage the reactor never builds.
+            let document_id = resolved.with_context(|| {
+                format!("cannot sign for '{id}': it did not resolve to a document")
+            })?;
+            let actions = sign_actions(actions, &identity, &app_name, &document_id, "main")?;
             let vars = serde_json::json!({
                 "documentIdentifier": resolved_id,
                 "actions": actions,
@@ -2062,7 +2067,7 @@ async fn relationship(
     let mut action = relationship_action(op, &source_id, &target_id, rel_type, metadata.as_ref());
     let signed_as = match identity {
         Some((identity, app_name)) => {
-            identity.sign_action(&mut action, &app_name)?;
+            identity.sign_action(&mut action, &app_name, &source_id, "main")?;
             Some(app_name)
         }
         None => None,
@@ -2128,6 +2133,8 @@ pub fn sign_actions(
     actions: Value,
     identity: &crate::identity::Identity,
     app_name: &str,
+    document_id: &str,
+    branch: &str,
 ) -> Result<Value> {
     let Value::Array(mut arr) = actions else {
         bail!("Actions must be a JSON array");
@@ -2139,7 +2146,7 @@ pub fn sign_actions(
             map.entry("scope")
                 .or_insert_with(|| Value::String("global".to_string()));
         }
-        identity.sign_action(action, app_name)?;
+        identity.sign_action(action, app_name, document_id, branch)?;
     }
     Ok(Value::Array(arr))
 }
