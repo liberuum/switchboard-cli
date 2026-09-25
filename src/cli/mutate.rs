@@ -199,7 +199,7 @@ pub async fn run(args: MutateArgs, format: OutputFormat, profile_name: Option<&s
             "timestampUtcMs": crate::cli::docs::iso_now(),
             "input": input_value,
         });
-        identity.sign_action(&mut action, app_name)?;
+        identity.sign_action(&mut action, app_name, &resolved_doc_id, "main")?;
         eprintln!(
             "Running: {}",
             format!(

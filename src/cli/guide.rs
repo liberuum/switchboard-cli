@@ -452,7 +452,7 @@ SIGNED WRITES
   Without an identity the Switchboard signs your actions with ITS identity and
   attributes them to whoever ran `ph login` on the server. With
   `auth login --renown`, docs apply / mutate / link / unlink are signed
-  client-side (ECDSA P-256, the @renown/sdk scheme) and stored untouched, so
+  client-side (ECDSA P-256, the reactor's v2 scheme) and stored untouched, so
   the vault sees your key, your address and your --app-name. Overrides per run:
   SWITCHBOARD_APP_NAME, SWITCHBOARD_IDENTITY_DIR, SWITCHBOARD_UNSIGNED=1.
 

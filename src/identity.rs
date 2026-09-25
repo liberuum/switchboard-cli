@@ -11,21 +11,38 @@
 //! `app.name` lets an agent name itself (`powerhouse-knowledge`) so a vault
 //! can tell agent writes from a human's in Connect.
 //!
-//! # What is signed, byte for byte (mirrors `@renown/sdk` `RenownCryptoSigner`)
+//! # What is signed, byte for byte (mirrors `@powerhousedao/shared` `signActionV2`)
 //!
 //! ```text
-//! actionHash = base64( sha256( scope + type + JSON.stringify(input) ) )
+//! preimage   = canonicalJson([ "v2", documentId, branch, scope, type, id,
+//!                              timestampUtcMs, input, user.address,
+//!                              user.networkId, user.chainId, app.key ])
+//! actionHash = "v2:" + base64url( sha256( preimage ) )        — unpadded
 //! params     = [ unixSeconds, did:key, actionHash, prevStateHash ]
 //! message    = "\x19Signed Operation:\n" + len(params.join("")) + params.join("")
 //! signature  = ECDSA P-256 / SHA-256 over message, raw r||s, "0x" + hex
 //! tuple      = params + [signature]      — transported joined by ", "
 //! ```
 //!
+//! This is the reactor's v2 scheme (6.2.3-dev.24, #3088). Unlike the legacy
+//! hash over `scope + type + input`, it binds the signature to one action in
+//! one document: a v2-required document — every one a dev.24 reactor creates
+//! — refuses a legacy tuple outright (`SCHEME_BELOW_POLICY`). The message
+//! layout is unchanged, so a Switchboard older than dev.24, which checks only
+//! the ECDSA over the tuple, accepts a v2 tuple too; the CLI therefore always
+//! signs v2.
+//!
 //! The leading `0x19` byte is the EIP-191 domain prefix and is invisible in a
-//! terminal; leave it out and every signature fails verification. `input` is
-//! serialized with the key order the caller wrote (`serde_json` with
-//! `preserve_order`), which is also the order sent on the wire, so anyone
-//! recomputing the hash from the stored input gets the same bytes.
+//! terminal; leave it out and every signature fails verification.
+//!
+//! `documentId` is the document the action is stored in, which is not always
+//! the one the job was submitted for — see [`signing_document_id`].
+//!
+//! `canonicalJson` is `safe-stable-stringify`: object keys sorted by UTF-16
+//! code unit, and numbers written as JavaScript writes them. The reactor
+//! hashes the value JavaScript parsed off the wire, so `serde_json`'s own
+//! output would not do: it keeps insertion order and writes `2.0`, `-0.0`
+//! and `1e21` where JavaScript writes `2`, `0` and `1e+21`.
 //!
 //! `prevStateHash` is left empty, as the Switchboard's own signer does when an
 //! action carries no `prevOpHash`; the wire records it rather than enforcing it.
@@ -201,10 +218,22 @@ impl Identity {
     }
 
     /// Sign one action in place: sets `context.signer` with the user, the
-    /// app (`app_name`, this did) and a single signature tuple. An action
+    /// app (`app_name`, this did) and a single v2 signature tuple. An action
     /// that already carries signatures is left alone — the reactor treats
     /// those as authoritative and so must we.
-    pub fn sign_action(&self, action: &mut Value, app_name: &str) -> Result<()> {
+    ///
+    /// `document_id` and `branch` are those of the job the action is
+    /// submitted with: the v2 hash covers the document the action is stored
+    /// in, which [`signing_document_id`] derives from them. `document_id` must
+    /// be the resolved id, never a slug — the reactor resolves slugs before
+    /// it verifies, so a slug here signs a different preimage.
+    pub fn sign_action(
+        &self,
+        action: &mut Value,
+        app_name: &str,
+        document_id: &str,
+        branch: &str,
+    ) -> Result<()> {
         let obj = action
             .as_object_mut()
             .ok_or_else(|| anyhow!("action is not a JSON object"))?;
@@ -217,22 +246,38 @@ impl Identity {
         if already_signed {
             return Ok(());
         }
-        let scope = obj
-            .get("scope")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("action has no `scope`"))?
-            .to_string();
-        let action_type = obj
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("action has no `type`"))?
-            .to_string();
+        // The v2 preimage refuses an action with no input, and whatever is
+        // hashed has to be what goes on the wire — so make `{}` explicit.
         let input = obj
-            .get("input")
-            .cloned()
-            .unwrap_or(Value::Object(Default::default()));
+            .entry("input")
+            .or_insert_with(|| Value::Object(Default::default()))
+            .clone();
+        let field = |name: &str| -> Result<String> {
+            obj.get(name)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| anyhow!("action has no `{name}`, which the v2 signature covers"))
+        };
+        let scope = field("scope")?;
+        let action_type = field("type")?;
+        let id = field("id")?;
+        let timestamp = field("timestampUtcMs")?;
 
-        let tuple = self.sign(&scope, &action_type, &input, "", unix_seconds_now());
+        let target = signing_document_id(&action_type, &input, document_id);
+        let hash = action_hash_v2(&ActionPreimage {
+            document_id: &target,
+            branch,
+            scope: &scope,
+            action_type: &action_type,
+            id: &id,
+            timestamp_utc_ms: &timestamp,
+            input: &input,
+            address: &self.user.address,
+            network_id: &self.user.network_id,
+            chain_id: self.user.chain_id,
+            app_key: &self.did,
+        });
+        let tuple = self.sign_tuple(hash, unix_seconds_now());
         let signer = serde_json::json!({
             "user": {
                 "address": self.user.address,
@@ -256,21 +301,14 @@ impl Identity {
         Ok(())
     }
 
-    /// Produce the 5-element signature tuple for an action's parts.
-    pub fn sign(
-        &self,
-        scope: &str,
-        action_type: &str,
-        input: &Value,
-        prev_state_hash: &str,
-        unix_seconds: u64,
-    ) -> [String; 5] {
-        let hash = action_hash(scope, action_type, input);
+    /// The 5-element signature tuple for an action hash: the signing time,
+    /// this did, the hash, an empty `prevStateHash`, then the signature.
+    pub fn sign_tuple(&self, hash: String, unix_seconds: u64) -> [String; 5] {
         let params = [
             unix_seconds.to_string(),
             self.did.clone(),
             hash,
-            prev_state_hash.to_string(),
+            String::new(),
         ];
         let message = signature_message(&params);
         let signature: Signature = self.signing_key.sign(&message);
@@ -280,10 +318,78 @@ impl Identity {
     }
 }
 
-/// `base64(sha256(scope + type + JSON.stringify(input)))`.
-pub fn action_hash(scope: &str, action_type: &str, input: &Value) -> String {
-    let payload = format!("{scope}{action_type}{}", compact_json(input));
-    base64::engine::general_purpose::STANDARD.encode(Sha256::digest(payload.as_bytes()))
+/// Everything the v2 hash covers, in the order of the reactor's preimage.
+pub struct ActionPreimage<'a> {
+    pub document_id: &'a str,
+    pub branch: &'a str,
+    pub scope: &'a str,
+    pub action_type: &'a str,
+    pub id: &'a str,
+    pub timestamp_utc_ms: &'a str,
+    pub input: &'a Value,
+    pub address: &'a str,
+    pub network_id: &'a str,
+    pub chain_id: i64,
+    pub app_key: &'a str,
+}
+
+/// Actions the reactor reduces itself, onto the document scope.
+const DOCUMENT_SCOPE_ACTION_TYPES: [&str; 6] = [
+    "CREATE_DOCUMENT",
+    "DELETE_DOCUMENT",
+    "UPGRADE_DOCUMENT",
+    "ADD_RELATIONSHIP",
+    "REMOVE_RELATIONSHIP",
+    "UPDATE_RELATIONSHIP",
+];
+
+/// The document an action is stored in, and so signed against
+/// (`actionSigningTarget`). A relationship action lands on its `sourceId`,
+/// the reactor's other document-scope actions on their `input.documentId`,
+/// and everything else on the document the job was submitted for — which is
+/// also the fallback when the input names none.
+pub fn signing_document_id(action_type: &str, input: &Value, job_document_id: &str) -> String {
+    if !DOCUMENT_SCOPE_ACTION_TYPES.contains(&action_type) {
+        return job_document_id.to_string();
+    }
+    let key = if action_type.ends_with("_RELATIONSHIP") {
+        "sourceId"
+    } else {
+        "documentId"
+    };
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .unwrap_or(job_document_id)
+        .to_string()
+}
+
+/// The canonical JSON the v2 hash is taken over (`actionPreimageV2`).
+pub fn action_preimage_v2(p: &ActionPreimage) -> String {
+    canonical_json(&serde_json::json!([
+        "v2",
+        p.document_id,
+        p.branch,
+        p.scope,
+        p.action_type,
+        p.id,
+        p.timestamp_utc_ms,
+        p.input,
+        p.address,
+        p.network_id,
+        p.chain_id,
+        p.app_key,
+    ]))
+}
+
+/// `"v2:" + base64url(sha256(preimage))`, unpadded (`hashActionV2`).
+pub fn action_hash_v2(p: &ActionPreimage) -> String {
+    let digest = Sha256::digest(action_preimage_v2(p).as_bytes());
+    format!(
+        "v2:{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+    )
 }
 
 /// The bytes that are signed: prefix + length + concatenated params.
@@ -298,9 +404,102 @@ pub fn signature_message(params: &[String; 4]) -> Vec<u8> {
     .into_bytes()
 }
 
-/// `JSON.stringify` parity: compact, insertion-ordered (preserve_order).
-fn compact_json(v: &Value) -> String {
-    serde_json::to_string(v).unwrap_or_default()
+/// `safe-stable-stringify`'s output: compact, object keys sorted, numbers as
+/// JavaScript writes them.
+pub fn canonical_json(value: &Value) -> String {
+    let mut out = String::new();
+    write_canonical(value, &mut out);
+    out
+}
+
+fn write_canonical(value: &Value, out: &mut String) {
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => out.push_str(&js_number(n)),
+        Value::String(s) => out.push_str(&json_string(s)),
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical(item, out);
+            }
+            out.push(']');
+        }
+        Value::Object(map) => {
+            // JavaScript's default sort compares UTF-16 code units, which is
+            // not UTF-8 byte order once a key holds an astral character.
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+            out.push('{');
+            for (i, key) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&json_string(key));
+                out.push(':');
+                write_canonical(&map[key], out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// A JSON string literal. `serde_json` escapes exactly what `JSON.stringify`
+/// does — `"`, `\`, the short forms, other C0 controls as `\u00xx` — and
+/// writes everything else raw.
+fn json_string(s: &str) -> String {
+    serde_json::to_string(s).expect("a str always serializes")
+}
+
+/// A JSON number as `JSON.stringify` writes it (`Number::toString`). An
+/// integer beyond 2^53 is formatted from its `f64`, because that is the value
+/// JavaScript holds once it has parsed the wire.
+fn js_number(n: &serde_json::Number) -> String {
+    const MAX_SAFE: u64 = 1 << 53;
+    if let Some(i) = n.as_i64()
+        && i.unsigned_abs() <= MAX_SAFE
+    {
+        return i.to_string();
+    }
+    if let Some(u) = n.as_u64()
+        && u <= MAX_SAFE
+    {
+        return u.to_string();
+    }
+    // A serde_json number is always finite, so there is no NaN/Infinity case.
+    js_f64(n.as_f64().unwrap_or_default())
+}
+
+/// ECMAScript `Number::toString(x)` for a finite `x`.
+fn js_f64(x: f64) -> String {
+    if x == 0.0 {
+        return "0".to_string(); // -0 too
+    }
+    // `{:e}` is the shortest representation that round-trips — the same
+    // digits JavaScript picks — as `d[.ddd]e<exp>`.
+    let sci = format!("{:e}", x.abs());
+    let (mantissa, exp) = sci.split_once('e').expect("LowerExp has an exponent");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let k = digits.len() as i32;
+    // x = 0.d1d2…dk × 10^n
+    let n = exp.parse::<i32>().expect("LowerExp exponent is an integer") + 1;
+    let body = if k <= n && n <= 21 {
+        format!("{digits}{}", "0".repeat((n - k) as usize))
+    } else if 0 < n && n <= 21 {
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if -6 < n && n <= 0 {
+        format!("0.{}{digits}", "0".repeat((-n) as usize))
+    } else {
+        let e = n - 1;
+        let sign = if e >= 0 { "+" } else { "-" };
+        let (first, rest) = digits.split_at(1);
+        let point = if rest.is_empty() { "" } else { "." };
+        format!("{first}{point}{rest}e{sign}{}", e.abs())
+    };
+    if x < 0.0 { format!("-{body}") } else { body }
 }
 
 fn did_key_from_public(key: &p256::ecdsa::VerifyingKey) -> Result<String> {
@@ -375,20 +574,64 @@ mod tests {
         }
     }
 
+    /// Vectors produced by the reactor's own `hashActionV2` (see
+    /// `tests/fixtures/gen_v2_vectors.mjs`). Each input is JSON *text*, parsed
+    /// here by serde_json exactly as the CLI parses what it is given.
     #[test]
-    fn action_hash_matches_js_sha256_of_scope_type_input() {
-        // node: crypto.createHash("sha256").update("globalSET_TITLE{}").digest("base64")
-        assert_eq!(
-            action_hash("global", "SET_TITLE", &serde_json::json!({})),
-            "WzeFpsIT3tXHGq4vMdGkPGH3+lVzmdc1aeScx6N/AQI="
+    fn v2_hash_matches_the_reactor_for_every_vector() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/v2_vectors.json")).unwrap();
+        let signer = &fixture["signer"];
+        let vectors = fixture["vectors"].as_array().unwrap();
+        assert!(
+            vectors.len() >= 13,
+            "fixture lost vectors: {}",
+            vectors.len()
         );
+        for v in vectors {
+            let name = v["name"].as_str().unwrap();
+            let input: Value = serde_json::from_str(v["inputText"].as_str().unwrap()).unwrap();
+            let action_type = v["type"].as_str().unwrap();
+            let target =
+                signing_document_id(action_type, &input, v["jobDocumentId"].as_str().unwrap());
+            assert_eq!(
+                target, v["expectedTargetDocumentId"],
+                "{name}: signed against the wrong document"
+            );
+            let preimage = ActionPreimage {
+                document_id: &target,
+                branch: v["branch"].as_str().unwrap(),
+                scope: v["scope"].as_str().unwrap(),
+                action_type,
+                id: v["id"].as_str().unwrap(),
+                timestamp_utc_ms: v["timestampUtcMs"].as_str().unwrap(),
+                input: &input,
+                address: signer["user"]["address"].as_str().unwrap(),
+                network_id: signer["user"]["networkId"].as_str().unwrap(),
+                chain_id: signer["user"]["chainId"].as_i64().unwrap(),
+                app_key: signer["app"]["key"].as_str().unwrap(),
+            };
+            assert_eq!(
+                action_preimage_v2(&preimage),
+                v["expectedPreimage"].as_str().unwrap(),
+                "{name}: preimage differs from the reactor's"
+            );
+            assert_eq!(
+                action_hash_v2(&preimage),
+                v["expectedHash"].as_str().unwrap(),
+                "{name}: hash differs from the reactor's"
+            );
+        }
     }
 
     #[test]
-    fn action_hash_preserves_the_callers_key_order() {
-        // {"b":1,"a":2} must NOT be re-sorted — JSON.stringify keeps insertion order.
-        let input: Value = serde_json::from_str(r#"{"b":1,"a":2}"#).unwrap();
-        assert_eq!(compact_json(&input), r#"{"b":1,"a":2}"#);
+    fn canonical_json_sorts_keys_at_every_depth_and_keeps_array_order() {
+        let input: Value =
+            serde_json::from_str(r#"{"b":1,"a":{"d":[3,{"z":1,"y":2}],"c":2}}"#).unwrap();
+        assert_eq!(
+            canonical_json(&input),
+            r#"{"a":{"c":2,"d":[3,{"y":2,"z":1}]},"b":1}"#
+        );
     }
 
     #[test]
@@ -418,13 +661,19 @@ mod tests {
     #[test]
     fn signature_verifies_against_the_did_key() {
         let id = test_identity();
-        let input = serde_json::json!({ "title": "t", "updatedAt": "2026-09-02T00:00:00.000Z" });
-        let tuple = id.sign("global", "SET_TITLE", &input, "", 1788349213);
+        let hash = "v2:8CmPfRq3fy5X27Wz8xGHmwTM1-MSp680B4YDjOlxM9A".to_string();
+        let tuple = id.sign_tuple(hash.clone(), 1788349213);
         assert_eq!(tuple[0], "1788349213");
         assert_eq!(tuple[1], id.did);
-        assert_eq!(tuple[2], action_hash("global", "SET_TITLE", &input));
+        assert_eq!(tuple[2], hash);
         assert_eq!(tuple[3], "");
+        // v2TupleProblem: "0x" and 128 LOWERCASE hex digits.
         assert!(tuple[4].starts_with("0x") && tuple[4].len() == 2 + 128);
+        assert!(
+            tuple[4][2..]
+                .chars()
+                .all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+        );
 
         let message = signature_message(&[
             tuple[0].clone(),
@@ -458,7 +707,8 @@ mod tests {
             "id": "a1", "type": "SET_TITLE", "scope": "global", "timestampUtcMs": "2026-09-02T00:00:00.000Z",
             "input": { "title": "t", "updatedAt": "2026-09-02T00:00:00.000Z" }
         });
-        id.sign_action(&mut action, "switchboard-cli").unwrap();
+        id.sign_action(&mut action, "switchboard-cli", "DOC", "main")
+            .unwrap();
         let signer = &action["context"]["signer"];
         assert_eq!(signer["app"]["name"], "switchboard-cli");
         assert_eq!(signer["app"]["key"], id.did);
@@ -472,11 +722,72 @@ mod tests {
             .collect();
         assert_eq!(parts.len(), 5);
         assert_eq!(parts[1], id.did);
+        assert_eq!(parts[2], expected_hash(&id, &action, "DOC"));
 
         // Already signed → untouched.
         let before = action.clone();
-        id.sign_action(&mut action, "other-app").unwrap();
+        id.sign_action(&mut action, "other-app", "DOC", "main")
+            .unwrap();
         assert_eq!(action, before);
+    }
+
+    #[test]
+    fn sign_action_signs_a_relationship_against_its_source_document() {
+        // Submitted with the source as the job document in practice, but the
+        // hash must follow `input.sourceId` whatever the job says.
+        let id = test_identity();
+        let mut action = serde_json::json!({
+            "id": "a2", "type": "ADD_RELATIONSHIP", "scope": "document",
+            "timestampUtcMs": "2026-09-02T00:00:00.000Z",
+            "input": { "sourceId": "SOURCE", "targetId": "TARGET", "relationshipType": "BUILDS_ON" }
+        });
+        id.sign_action(&mut action, "switchboard-cli", "SOMEWHERE-ELSE", "main")
+            .unwrap();
+        let tuple = action["context"]["signer"]["signatures"][0]
+            .as_str()
+            .unwrap();
+        let hash = tuple.split(SIGNATURE_SEPARATOR).nth(2).unwrap();
+        assert_eq!(hash, expected_hash(&id, &action, "SOURCE"));
+        assert_ne!(hash, expected_hash(&id, &action, "SOMEWHERE-ELSE"));
+    }
+
+    #[test]
+    fn sign_action_makes_a_missing_input_explicit_and_refuses_a_missing_id() {
+        let id = test_identity();
+        // What is hashed has to be what goes on the wire: `{}` is written in.
+        let mut no_input = serde_json::json!({
+            "id": "a3", "type": "NOOP_LIKE", "scope": "global", "timestampUtcMs": "2026-09-02T00:00:00.000Z"
+        });
+        id.sign_action(&mut no_input, "switchboard-cli", "DOC", "main")
+            .unwrap();
+        assert_eq!(no_input["input"], serde_json::json!({}));
+
+        // The v2 preimage covers `id`; signing without one would sign an
+        // action the reactor then stamps with an id of its own.
+        let mut no_id = serde_json::json!({
+            "type": "SET_TITLE", "scope": "global", "timestampUtcMs": "2026-09-02T00:00:00.000Z", "input": {}
+        });
+        let err = id
+            .sign_action(&mut no_id, "switchboard-cli", "DOC", "main")
+            .unwrap_err();
+        assert!(err.to_string().contains("`id`"), "{err}");
+    }
+
+    /// The v2 hash `sign_action` should have produced for `action` in `doc`.
+    fn expected_hash(id: &Identity, action: &Value, doc: &str) -> String {
+        action_hash_v2(&ActionPreimage {
+            document_id: doc,
+            branch: "main",
+            scope: action["scope"].as_str().unwrap(),
+            action_type: action["type"].as_str().unwrap(),
+            id: action["id"].as_str().unwrap(),
+            timestamp_utc_ms: action["timestampUtcMs"].as_str().unwrap(),
+            input: &action["input"],
+            address: &id.user.address,
+            network_id: &id.user.network_id,
+            chain_id: id.user.chain_id,
+            app_key: &id.did,
+        })
     }
 
     #[test]
