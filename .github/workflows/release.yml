@@ -223,10 +223,15 @@ jobs:
           files: |
             artifacts/*
 
-      - name: Sync Cargo.toml version
+      - name: Sync Cargo.toml and Cargo.lock version
         run: |
-          sed -i 's/^version = ".*"/version = "${{ needs.version.outputs.version }}"/' Cargo.toml
+          VERSION="${{ needs.version.outputs.version }}"
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          # Cargo.lock records the crate's own version as well, and every
+          # dependency's: bump only the line after `name = "switchboard-cli"`.
+          # Without this the committed lock trails Cargo.toml by one release.
+          sed -i '/^name = "switchboard-cli"$/{n;s/^version = ".*"/version = "'"${VERSION}"'"/}' Cargo.lock
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml
+          git add Cargo.toml Cargo.lock
           git diff --cached --quiet || (git commit -m "chore: release v${{ needs.version.outputs.version }}" && git push)
