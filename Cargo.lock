@@ -2170,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "switchboard-cli"
-version = "1.0.38"
+version = "1.0.39"
 dependencies = [
  "anyhow",
  "base64",
