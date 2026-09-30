@@ -1,4 +1,6 @@
 /target
+/target-main/
+/.serena/
 *.swp
 *.swo
 *~

@@ -408,32 +408,20 @@ async fn fetch_drive_label(client: &GraphQLClient, doc_id: &str) -> Result<(Stri
 async fn fetch_operations(client: &GraphQLClient, doc_id: &str) -> Result<Vec<Value>> {
     let escaped = doc_id.replace('"', r#"\""#);
     let mut all_ops: Vec<Value> = Vec::new();
-    let mut total_count: Option<usize> = None;
+    let mut cursor: Option<String> = None;
+    let ops_query = format!(
+        r#"query($cursor: String) {{ documentOperations(filter: {{ documentId: "{escaped}" }}, paging: {{ limit: {OP_BATCH_SIZE}, cursor: $cursor }}) {{ items {{ id index action {{ id type input scope timestampUtcMs context {{ signer {{ user {{ address networkId chainId }} app {{ name key }} signatures }} }} }} timestampUtcMs hash skip error }} hasNextPage cursor }} }}"#,
+    );
     loop {
-        let offset = all_ops.len();
-        let ops_query = format!(
-            r#"{{ documentOperations(filter: {{ documentId: "{escaped}" }}, paging: {{ limit: {OP_BATCH_SIZE}, offset: {offset} }}) {{ items {{ id index action {{ id type input scope timestampUtcMs context {{ signer {{ user {{ address networkId chainId }} app {{ name key }} signatures }} }} }} timestampUtcMs hash skip error }} totalCount }} }}"#,
-        );
-        let ops_data = client.query(&ops_query, None).await?;
-        if total_count.is_none() {
-            total_count = ops_data
-                .pointer("/documentOperations/totalCount")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as usize);
-        }
-        let batch = ops_data
-            .pointer("/documentOperations/items")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let batch_len = batch.len();
-        all_ops.extend(batch);
-        if batch_len < OP_BATCH_SIZE {
-            break;
-        }
-        if let Some(total) = total_count
-            && all_ops.len() >= total
-        {
+        let variables = serde_json::json!({ "cursor": cursor });
+        let ops_data = client.query(&ops_query, Some(&variables)).await?;
+        let page = &ops_data["documentOperations"];
+        let batch = page["items"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("documentOperations returned no items"))?;
+        all_ops.extend(batch.iter().cloned());
+        cursor = helpers::next_page_cursor(page, cursor.as_deref())?;
+        if cursor.is_none() {
             break;
         }
     }

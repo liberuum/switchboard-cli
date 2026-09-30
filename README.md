@@ -191,27 +191,27 @@ history. Aborts if the destination already has a drive with the same slug.
 | Command | Description |
 |---------|-------------|
 | `switchboard drives list` | List all drives |
-| `switchboard drives get <id-or-slug>` | Get drive details and file tree |
-| `switchboard drives create` | Interactive drive creation (or pass `--name`, `--icon`, `--preferred-editor`) |
-| `switchboard drives delete <ids...>` | Delete one or more drives (use `-y` to skip confirmation) |
+| `switchboard drives get <id-or-slug> [--out <file>]` | Get drive details and file tree |
+| `switchboard drives create [--name <name>] [--icon <url>] [--preferred-editor <editor>]` | Create a new drive (interactive when `--name` is omitted) |
+| `switchboard drives delete <ids...> [-y]` | Delete one or more drives (use `-y` to skip confirmation) |
 | `switchboard drives check <id-or-slug>` | Scan a drive for ghost nodes (orphan file references) |
-| `switchboard drives fix <id-or-slug>` | Remove ghost nodes from a drive (use `-y` to skip confirmation) |
+| `switchboard drives fix <id-or-slug> [-y]` | Remove ghost nodes from a drive (use `-y` to skip confirmation) |
 
 ### Documents
 
 | Command | Description |
 |---------|-------------|
-| `switchboard docs list [--drive <slug>]` | List documents (all drives, or filtered by `--drive`; add `--type` to filter) |
+| `switchboard docs list [--drive <id-or-slug>] [--type <type>] [--out <file>]` | List documents (all drives, or filtered by `--drive`; add `--type` to filter) |
 | `switchboard docs get <id-or-name> [--drive <slug>] [--state] [--out <file>]` | Get document details (auto-detects drive; `--state` includes full state) |
 | `switchboard docs tree [<slug>]` | Hierarchical folder/file view — all drives if no argument, single drive if slug given |
-| `switchboard docs create [--parent-folder <id>]` | Interactive creation with drive picker (or pass `--type`, `--name`, `--drive`; `--parent-folder` places it inside a folder) |
-| `switchboard docs delete <ids-or-names...>` | Delete one or more documents — batch API (use `-y` to skip confirmation) |
+| `switchboard docs create [--type <type>] [--name <name>] [--drive <id-or-slug>] [--parent-folder <id>]` | Create a new document (interactive when fields are omitted; `--parent-folder` places it inside a folder) |
+| `switchboard docs delete <ids-or-names...> [-y]` | Delete one or more documents — batch API (use `-y` to skip confirmation) |
 | `switchboard docs rename <id> <name>` | Rename a document |
 | `switchboard docs parents <id>` | Show parent documents (reverse tree traversal) |
 | `switchboard docs add-to <parent> <ids...>` | Add documents as children of a parent |
 | `switchboard docs remove-from <parent> <ids...>` | Remove documents from a parent |
 | `switchboard docs move <ids...> --from <src> --to <dst>` | Move documents between parents |
-| `switchboard docs apply <id> --actions '<json>' [--file <file>] [--wait] [--allow-literal-escapes]` | Dispatch raw actions via `mutateDocument` — pass actions inline or from a file; `--wait` blocks until async completion and fails if any action was rejected. Refuses string fields containing a literal `\n`/`\t`/`\r` (a double-encoding bug that stores `\n` in note bodies) unless `--allow-literal-escapes` |
+| `switchboard docs apply <id> [--actions '<json>'] [--file <file>] [--wait] [--allow-literal-escapes]` | Apply raw actions asynchronously — provide `--actions` or `--file` (`-` for stdin); `--wait` blocks and fails if any action was rejected. With `--wait --format json`, emits one job-result object containing `jobId`, `status`, `result`, and `error`. Refuses literal `\n`/`\t`/`\r` string escapes unless overridden |
 | `switchboard docs mutate <id-or-name> [--op <op>] [--input '<json>'] [--input-file <file>] [--drive <slug>] [--allow-literal-escapes]` | Interactive field-by-field editor — omit `--op` for operation picker; pass `--input` / `--input-file` for scripting. Same literal-escape guard as `apply` |
 
 ### Folders
@@ -220,7 +220,7 @@ history. Aborts if the destination already has a drive with the same slug.
 |---------|-------------|
 | `switchboard folders create --name <name> --parent <id-or-name>` | Create a folder. `--parent` is universal: pass a drive name/slug/UUID for root placement, or a folder name/UUID to nest. |
 | `switchboard folders create --name <name> --drive <id-or-slug> [--parent <folder>]` | Equivalent for the root case; combine with `--parent` to disambiguate when the same folder name exists across drives. |
-| `switchboard folders delete <id> --drive <id-or-slug>` | Delete a folder by ID (use `-y` to skip confirmation). Children are not auto-removed — move or delete them first. |
+| `switchboard folders delete <id> --drive <id-or-slug> [-y]` | Delete a folder by ID (use `-y` to skip confirmation). Children are not auto-removed — move or delete them first. |
 
 ### Models & Operations
 
@@ -228,19 +228,19 @@ history. Aborts if the destination already has a drive with the same slug.
 |---------|-------------|
 | `switchboard models list` | List all discovered document types |
 | `switchboard models get <type>` | Show available operations for a type |
-| `switchboard ops <doc-id-or-name> [--drive <slug>] [--skip N] [--first N]` | View operation history (auto-detects drive; paginate with `--skip`/`--first`) |
+| `switchboard ops <doc-id-or-name> [--drive <slug>] [--skip N] [--first N]` | View operation history (all operations by default; `--skip`/`--first` select an exact window across scopes using cursor pagination) |
 
 ### Import / Export
 
 | Command | Description |
 |---------|-------------|
-| `switchboard export all [--out ./dir/]` | Export everything (all drives, organized by folder) |
-| `switchboard export drive <slug> --out ./dir/` | Export all documents in a drive |
-| `switchboard export doc <id> [--drive <slug>] --out file.phd` | Export a single document (`--drive` optional — resolves by ID alone) |
+| `switchboard export all [--out <dir>] [--no-ops] [--action-types <types>] [--since-revision N] [--from <datetime>] [--to <datetime>]` | Export everything (all drives, organized by folder) |
+| `switchboard export drive <id-or-slug> [--out <dir>] [--no-ops] [--action-types <types>] [--since-revision N] [--from <datetime>] [--to <datetime>]` | Export all documents in a drive |
+| `switchboard export doc <id> [--drive <slug>] [--out <file>] [--no-ops] [--action-types <types>] [--since-revision N] [--from <datetime>] [--to <datetime>]` | Export a single document (`--drive` optional — resolves by ID alone) |
 | `switchboard import <paths...> --drive <slug> [--strict] [--id-mapping <file>]` | Import `.phd` files into a drive. **Directory args are walked recursively** and their sub-path becomes folder hierarchy on the destination (existing folders are reused). File args land at drive root. **Forward references between docs are auto-deferred and resolved at the end of the import**, so bidirectional links in cross-doc graphs (knowledge bases, MOC + note structures) survive the roundtrip. `--strict` fails the run on any rejected op or state mismatch. `--id-mapping` is a JSON `{"old-uuid":"new-uuid"}` map for rewriting cross-document references across multiple invocations. |
 | `switchboard migrate <source-drive> --from <profile> --to <profile>` | Move a drive between two profiles in one shot. Preserves the drive's UUID, every contained document's UUID, and the full operation history (drive-scope and document-scope) by replaying raw actions via `mutateDocumentAsync`. Refuses to run if the destination already has a drive with the source's slug. The source drive is left untouched (copy, not move). |
 
-Exports include the full operation history by default, so every `.phd` archive is fully replayable on import. Pass `--no-ops` for a smaller, state-only export (the current state is preserved in `state.json`; `operations.json` is `{}`).
+Exports include the full operation history by default, following the API's returned cursors through every page. Pass `--no-ops` for a smaller, state-only export (the current state is preserved in `state.json`; `operations.json` is `{}`). The deprecated `--with-ops` flag is still accepted and has no effect.
 
 All export commands support operation filters: `--action-types <types>` (comma-separated action types), `--since-revision <n>` (operations from revision N onwards), `--from <datetime>` and `--to <datetime>` (ISO 8601 time range). These enable incremental and selective exports.
 
@@ -254,7 +254,7 @@ All export commands support operation filters: `--action-types <types>` (comma-s
 | `switchboard auth status` | Show authentication and signing state |
 | `switchboard auth token` | Print the current token |
 | `switchboard docs link <source> <target> -t <TYPE> [--reason "…"] [--confidence grounded\|established\|speculative]` | Add a relationship edge; `--reason` stores WHY it exists as edge metadata (signed when an identity is configured) |
-| `switchboard docs annotate <source> <target> -t <TYPE> --reason "…" [--confidence …]` | Set or replace the reason / confidence on an existing edge (`UPDATE_RELATIONSHIP`) |
+| `switchboard docs annotate <source> <target> -t <TYPE> --reason "…" [--confidence grounded\|established\|speculative]` | Set or replace the reason / confidence on an existing edge (`UPDATE_RELATIONSHIP`) |
 | `switchboard docs unlink <source> <target> -t <TYPE>` | Remove a relationship edge |
 
 ### Analytics
@@ -264,7 +264,17 @@ All export commands support operation filters: `--action-types <types>` (comma-s
 | `switchboard analytics metrics` | List available analytics metrics |
 | `switchboard analytics dimensions` | List available dimensions and their values |
 | `switchboard analytics currencies` | List available currencies |
-| `switchboard analytics series [--start <date>] [--end <date>] [--granularity <g>] [--metrics <m>] [--currency <c>]` | Query analytics time series |
+| `switchboard analytics series [--start <date>] [--end <date>] [--granularity <g>] [--metrics <m>] [--dimensions '<json>'] [--currency <c>]` | Query analytics time series |
+
+Metrics default to all available metrics. Dimensions default to all indexed dimensions at the root selection `/`, with level of detail (`lod`) 1. If no dimensions are indexed, the result is empty. Use `analytics dimensions` to discover names and paths, then supply a JSON array to select specific dimensions:
+
+```bash
+switchboard analytics series --start 2026-01-01 --end 2026-09-30 \
+  --granularity MONTHLY --metrics Actuals --currency DAI \
+  --dimensions '[{"name":"budget","select":"/","lod":1}]' --format json
+```
+
+Each selection requires a nonempty `name` and `select`, and a nonnegative integer `lod`. Granularity is case-insensitive: `hourly`, `daily`, `weekly`, `monthly`, `quarterly`, `semiAnnual`, `annual`, or `total`.
 
 ### Real-Time & Advanced
 
@@ -273,7 +283,7 @@ All export commands support operation filters: `--action-types <types>` (comma-s
 | `switchboard watch docs [--type <type>] [--drive <id>] [--doc <id>] [--exec <cmd>]` | Stream document change events via WebSocket. Enriched output includes slug, timestamps, revisions, and context. `--exec` runs a command for each event with JSON on stdin and `$SWITCHBOARD_EVENT` set |
 | `switchboard watch job <job-id>` | Stream job status updates |
 | `switchboard jobs status <job-id>` | Get current job status with visual progression bar, and what became of each action the job was given |
-| `switchboard jobs wait <job-id> [--timeout <secs>]` | Block until a job completes via WebSocket subscription (no polling). Exits non-zero, naming the action and the reason, when the job's actions did not all apply |
+| `switchboard jobs wait <job-id> [--timeout <secs>]` | Block until a job completes via WebSocket subscription. JSON output always includes `jobId`. Exits non-zero when the job's actions did not all apply |
 | `switchboard jobs watch <job-id>` | Stream job status updates via WebSocket with visual progression bar |
 | `switchboard sync touch <input>` | Create/update a sync channel |
 | `switchboard sync push <envelopes>` | Push sync envelopes |
@@ -314,6 +324,8 @@ Visual formats (`svg`, `png`, `mermaid`) are also available on `drives get`, `do
 | `--no-color` | Disable colored output (also respects `NO_COLOR` env var) |
 | `-p, --profile <name>` | Use a specific profile instead of the default |
 | `-i` | Launch interactive REPL mode |
+
+Document identifiers may be legacy UUIDs or 43-character base64url IDs. IDs beginning with `-` work as positionals, option values, and in multi-delete lists; trailing options such as `-y` still parse normally.
 
 ## Output Formatting
 
@@ -544,7 +556,9 @@ switchboard guide config          # Profiles and configuration
 switchboard guide drives          # Working with drives
 switchboard guide docs            # Documents, mutations, models
 switchboard guide import-export   # .phd file format
+switchboard guide migrate         # Copy a drive between profiles
 switchboard guide auth            # Authentication
+switchboard guide permissions     # Document permissions
 switchboard guide watch           # WebSocket subscriptions
 switchboard guide jobs            # Async job tracking
 switchboard guide sync            # Sync channels
@@ -737,7 +751,7 @@ Two GitHub Actions workflows are included in `.github/workflows/`:
 
 Runs on pull requests to `main` and `staging`. Three parallel jobs:
 
-- **Check & Test** — `cargo check` and `cargo test`
+- **Check & Test** — `cargo check` and `cargo test --bin switchboard` (unit tests; live integration tests are run locally)
 - **Format** — `cargo fmt --check` (fails if code isn't formatted)
 - **Clippy** — `cargo clippy -- -D warnings` (fails on any lint warning)
 
@@ -764,18 +778,11 @@ The workflow:
 4. Strips binaries and ad-hoc codesigns the macOS binary
 5. Generates `checksums-sha256.txt` covering all archives
 6. Creates a GitHub Release with auto-generated release notes and all artifacts attached
-7. Updates `Cargo.toml` to reflect the released version and pushes back to `main`
+7. Updates `Cargo.toml` and `Cargo.lock` to reflect the released version and pushes back to the release branch
 
 A `concurrency` group ensures only one release runs at a time. If multiple pushes arrive quickly, the queued run waits and then correctly computes the next version.
 
-For **major or minor version bumps** (e.g. `v1.0.0`), create the tag manually:
-
-```bash
-git tag v1.0.0
-git push --tags
-```
-
-The next auto-release will increment from that tag.
+Feature-branch pushes run no release workflow. Open a pull request targeting `main`; merging it triggers the stable release. No manual version bump is needed for a patch release. For a major or minor release, pre-bump the version in both `Cargo.toml` and `Cargo.lock`; the workflow honors an untagged version ahead of its automatic patch bump.
 
 Once a release is published, the `install.sh` script will automatically pick it up — it queries `/releases/latest` from the GitHub API.
 

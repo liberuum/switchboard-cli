@@ -255,9 +255,19 @@ switchboard analytics series \
   --metrics revenue,expenses \
   --currency USD \
   --format json
+
+# Select dimensions explicitly (names/paths from analytics dimensions)
+switchboard analytics series --metrics Actuals --granularity MONTHLY \
+  --dimensions '[{"name":"budget","select":"/","lod":1}]' --currency DAI --format json
 ```
 
-**Granularity options**: `HOURLY`, `DAILY`, `WEEKLY`, `MONTHLY`, `ANNUALLY`, `TOTAL`
+**Granularity options** (case-insensitive): `hourly`, `daily`, `weekly`, `monthly`, `quarterly`, `semiAnnual`, `annual`, `total`.
+
+Metrics default to all available metrics; dimensions default to all indexed
+dimensions at selection `/`, lod 1. If no dimensions are indexed, the result is
+empty. Each explicit dimension requires nonempty `name` and `select`, and a
+nonnegative integer `lod`. `docs apply --wait --format json` emits a single
+job-result object, including `jobId`.
 
 ### Visualization
 

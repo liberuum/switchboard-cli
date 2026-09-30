@@ -260,7 +260,7 @@ async fn export_all(
     // List all drives, filtering out soft-deleted ones
     let data = client
         .query(
-            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name slug state } totalCount } }"#,
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name slug state } } }"#,
             None,
         )
         .await?;
@@ -777,39 +777,20 @@ pub(crate) async fn fetch_document(
 
     // Fetch operations with pagination (no delay — reads are safe to do at full speed)
     let mut all_ops: Vec<Value> = Vec::new();
-    let mut total_count: Option<usize> = None;
+    let mut cursor: Option<String> = None;
+    let ops_query = format!(
+        r#"query($cursor: String) {{ documentOperations(filter: {{ documentId: "{escaped}"{extra_filter} }}, paging: {{ limit: {OP_BATCH_SIZE}, cursor: $cursor }}) {{ items {{ id index action {{ id type input scope timestampUtcMs context {{ signer {{ user {{ address networkId chainId }} app {{ name key }} signatures }} }} }} timestampUtcMs hash skip error }} hasNextPage cursor }} }}"#,
+    );
     loop {
-        let offset = all_ops.len();
-        let ops_query = format!(
-            r#"{{ documentOperations(filter: {{ documentId: "{escaped}"{extra_filter} }}, paging: {{ limit: {OP_BATCH_SIZE}, offset: {offset} }}) {{ items {{ id index action {{ id type input scope timestampUtcMs context {{ signer {{ user {{ address networkId chainId }} app {{ name key }} signatures }} }} }} timestampUtcMs hash skip error }} totalCount }} }}"#,
-        );
-
-        let ops_data = client.query(&ops_query, None).await?;
-
-        // Capture totalCount on first batch to avoid an extra empty-fetch round trip
-        if total_count.is_none() {
-            total_count = ops_data
-                .pointer("/documentOperations/totalCount")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as usize);
-        }
-
-        let batch = ops_data
-            .pointer("/documentOperations/items")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let batch_len = batch.len();
-        all_ops.extend(batch);
-
-        // Stop when we've collected everything or got a short page
-        if batch_len < OP_BATCH_SIZE {
-            break;
-        }
-        if let Some(total) = total_count
-            && all_ops.len() >= total
-        {
+        let variables = serde_json::json!({ "cursor": cursor });
+        let ops_data = client.query(&ops_query, Some(&variables)).await?;
+        let page = &ops_data["documentOperations"];
+        let batch = page["items"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("documentOperations returned no items"))?;
+        all_ops.extend(batch.iter().cloned());
+        cursor = helpers::next_page_cursor(page, cursor.as_deref())?;
+        if cursor.is_none() {
             break;
         }
     }
@@ -1521,12 +1502,12 @@ async fn ensure_folder_chain(
 /// imported yet (forward reference) — such ops get deferred so the second
 /// pass can rewrite them with the now-complete map.
 ///
-/// "UUID-shaped" matches `helpers::is_uuid` (8-4-4-4-12 hex). Strings that
-/// aren't UUIDs are ignored, so plain text content with uuid-like substrings
+/// "Id-shaped" matches `helpers::is_document_id` (a UUID or a v2 signed id).
+/// Other strings are ignored, so plain text content with uuid-like substrings
 /// won't trigger deferral.
 fn has_forward_ref(value: &Value, id_map: &std::collections::HashMap<String, String>) -> bool {
     match value {
-        Value::String(s) => helpers::is_uuid(s) && !id_map.contains_key(s.as_str()),
+        Value::String(s) => helpers::is_document_id(s) && !id_map.contains_key(s.as_str()),
         Value::Array(arr) => arr.iter().any(|v| has_forward_ref(v, id_map)),
         Value::Object(map) => map.values().any(|v| has_forward_ref(v, id_map)),
         _ => false,

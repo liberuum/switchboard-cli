@@ -1531,7 +1531,7 @@ async fn parents(id: &str, format: OutputFormat, profile_name: Option<&str>) -> 
     // relationship survives).
     let escaped = uuid.replace('"', r#"\""#);
     let query = format!(
-        r#"{{ documentIncomingRelationships(targetIdentifier: "{escaped}", relationshipType: "child") {{ items {{ id name slug documentType }} totalCount }} }}"#
+        r#"{{ documentIncomingRelationships(targetIdentifier: "{escaped}", relationshipType: "child") {{ items {{ id name slug documentType }} }} }}"#
     );
     if let Ok(data) = client.query(&query, None).await
         && let Some(rel_items) = data
@@ -1888,12 +1888,14 @@ async fn apply(
         }
     };
 
-    match format {
-        OutputFormat::Json | OutputFormat::Raw => {
-            print_json(&serde_json::json!({ "jobId": job_id }));
-        }
-        _ => {
-            println!("Job: {job_id}");
+    if !wait || !matches!(format, OutputFormat::Json | OutputFormat::Raw) {
+        match format {
+            OutputFormat::Json | OutputFormat::Raw => {
+                print_json(&serde_json::json!({ "jobId": job_id }));
+            }
+            _ => {
+                println!("Job: {job_id}");
+            }
         }
     }
 

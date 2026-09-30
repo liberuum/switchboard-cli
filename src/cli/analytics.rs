@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use serde_json::Value;
 
 use crate::cli::helpers;
@@ -14,23 +14,29 @@ pub enum AnalyticsCommand {
     /// List available currencies
     Currencies,
     /// Query analytics time series
-    Series {
-        /// Start date (e.g. 2026-01-01)
-        #[arg(long)]
-        start: Option<String>,
-        /// End date (e.g. 2026-12-31)
-        #[arg(long)]
-        end: Option<String>,
-        /// Granularity: hourly, daily, weekly, monthly, quarterly, semiAnnual, annual, total (case-insensitive, so MONTHLY etc. also work)
-        #[arg(long)]
-        granularity: Option<String>,
-        /// Metrics to include (comma-separated)
-        #[arg(long)]
-        metrics: Option<String>,
-        /// Currency code
-        #[arg(long)]
-        currency: Option<String>,
-    },
+    Series(SeriesArgs),
+}
+
+#[derive(Args)]
+pub struct SeriesArgs {
+    /// Start date (e.g. 2026-01-01)
+    #[arg(long)]
+    start: Option<String>,
+    /// End date (e.g. 2026-12-31)
+    #[arg(long)]
+    end: Option<String>,
+    /// Granularity: hourly, daily, weekly, monthly, quarterly, semiAnnual, annual, total (case-insensitive, so MONTHLY etc. also work)
+    #[arg(long)]
+    granularity: Option<String>,
+    /// Metrics to include (comma-separated; defaults to all available metrics)
+    #[arg(long)]
+    metrics: Option<String>,
+    /// Dimension selections as JSON [{"name":"budget","select":"/","lod":1}] (defaults to all available dimensions at root, lod 1)
+    #[arg(long, value_name = "JSON", value_parser = parse_dimensions)]
+    dimensions: Option<Value>,
+    /// Currency code
+    #[arg(long)]
+    currency: Option<String>,
 }
 
 pub async fn run(
@@ -42,24 +48,7 @@ pub async fn run(
         AnalyticsCommand::Metrics => metrics(format, profile_name).await,
         AnalyticsCommand::Dimensions => dimensions(format, profile_name).await,
         AnalyticsCommand::Currencies => currencies(format, profile_name).await,
-        AnalyticsCommand::Series {
-            start,
-            end,
-            granularity,
-            metrics,
-            currency,
-        } => {
-            series(
-                start,
-                end,
-                granularity,
-                metrics,
-                currency,
-                format,
-                profile_name,
-            )
-            .await
-        }
+        AnalyticsCommand::Series(args) => series(args, format, profile_name).await,
     }
 }
 
@@ -188,53 +177,82 @@ fn normalize_granularity(input: &str) -> String {
     .to_string()
 }
 
-async fn series(
-    start: Option<String>,
-    end: Option<String>,
-    granularity: Option<String>,
-    metrics: Option<String>,
-    currency: Option<String>,
-    format: OutputFormat,
-    profile_name: Option<&str>,
-) -> Result<()> {
+fn parse_dimensions(input: &str) -> std::result::Result<Value, String> {
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct Dimension {
+        name: String,
+        select: String,
+        lod: i32,
+    }
+    let dimensions: Vec<Dimension> = serde_json::from_str(input)
+        .map_err(|e| format!("expected JSON array of {{name, select, lod}} objects: {e}"))?;
+    if dimensions.is_empty()
+        || dimensions
+            .iter()
+            .any(|d| d.name.trim().is_empty() || d.select.trim().is_empty() || d.lod < 0)
+    {
+        return Err(
+            "provide at least one dimension with nonempty name/select and nonnegative lod".into(),
+        );
+    }
+    serde_json::to_value(dimensions).map_err(|e| e.to_string())
+}
+
+async fn series(args: SeriesArgs, format: OutputFormat, profile_name: Option<&str>) -> Result<()> {
     let (_name, _profile, client) = helpers::setup(profile_name)?;
 
-    // Build filter arguments
-    let mut filter_parts = Vec::new();
-    if let Some(ref s) = start {
-        filter_parts.push(format!("start: \"{}\"", s.replace('"', r#"\""#)));
-    }
-    if let Some(ref e) = end {
-        filter_parts.push(format!("end: \"{}\"", e.replace('"', r#"\""#)));
-    }
-    if let Some(ref g) = granularity {
-        // Granularity is an enum — send unquoted, normalized to the server's
-        // casing (the AnalyticsGranularity enum values are lowercase/camelCase).
-        filter_parts.push(format!("granularity: {}", normalize_granularity(g)));
-    }
-    if let Some(ref m) = metrics {
-        let list: String = m
-            .split(',')
-            .map(|s| format!("\"{}\"", s.trim()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        filter_parts.push(format!("metrics: [{list}]"));
-    }
-    if let Some(ref c) = currency {
-        filter_parts.push(format!("currency: \"{}\"", c.replace('"', r#"\""#)));
-    }
-
-    let filter_arg = if filter_parts.is_empty() {
-        String::new()
+    let metadata = if args.dimensions.is_none() || args.metrics.is_none() {
+        client
+            .query("{ analytics { metrics dimensions { name } } }", None)
+            .await?
     } else {
-        format!("(filter: {{ {} }})", filter_parts.join(", "))
+        Value::Null
     };
-
-    let query = format!(
-        r#"{{ analytics {{ series{filter_arg} {{ period start end rows {{ metric value unit sum }} }} }} }}"#
-    );
-
-    let data = client.query(&query, None).await?;
+    let dimensions = args.dimensions.unwrap_or_else(|| {
+        let selections: Vec<Value> = metadata
+            .pointer("/analytics/dimensions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|dimension| dimension["name"].as_str())
+            .map(|name| serde_json::json!({"name": name, "select": "/", "lod": 1}))
+            .collect();
+        Value::Array(selections)
+    });
+    // The reactor requires a dimension even though its schema makes it optional.
+    // With no indexed dimensions there is no series data to query.
+    if dimensions.as_array().is_some_and(Vec::is_empty) {
+        match format {
+            OutputFormat::Json | OutputFormat::Raw => print_json(&serde_json::json!([])),
+            _ => println!("No analytics data found."),
+        }
+        return Ok(());
+    }
+    let metrics = match args.metrics {
+        Some(metrics) => serde_json::json!(metrics.split(',').map(str::trim).collect::<Vec<_>>()),
+        None => metadata
+            .pointer("/analytics/metrics")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    };
+    let mut filter = serde_json::json!({"dimensions": dimensions, "metrics": metrics});
+    for (key, value) in [
+        ("start", args.start),
+        ("end", args.end),
+        (
+            "granularity",
+            args.granularity.map(|g| normalize_granularity(&g)),
+        ),
+        ("currency", args.currency),
+    ] {
+        if let Some(value) = value {
+            filter[key] = Value::String(value);
+        }
+    }
+    let variables = serde_json::json!({"filter": filter});
+    let query = "query($filter: AnalyticsFilter!) { analytics { series(filter: $filter) { period start end rows { metric value unit sum } } } }";
+    let data = client.query(query, Some(&variables)).await?;
 
     let series = data
         .pointer("/analytics/series")
@@ -274,4 +292,30 @@ async fn series(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_granularity, parse_dimensions};
+
+    #[test]
+    fn dimension_selections_are_validated_before_dispatch() {
+        assert!(parse_dimensions(r#"[{"name":"budget","select":"/","lod":1}]"#).is_ok());
+        for input in [
+            "[]",
+            "{}",
+            r#"[{"name":"budget","select":"/"}]"#,
+            r#"[{"name":"","select":"/","lod":1}]"#,
+            r#"[{"name":"budget","select":"/","lod":-1}]"#,
+        ] {
+            assert!(parse_dimensions(input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn granularity_matches_the_server_enum() {
+        assert_eq!(normalize_granularity("MONTHLY"), "monthly");
+        assert_eq!(normalize_granularity("SEMI_ANNUAL"), "semiAnnual");
+        assert_eq!(normalize_granularity("ANNUALLY"), "annual");
+    }
 }

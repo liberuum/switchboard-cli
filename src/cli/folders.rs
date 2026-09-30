@@ -165,7 +165,7 @@ async fn resolve_parent(
         (Some(p), Some(d)) => {
             let drive_id = helpers::resolve_doc(client, d).await?;
             // If --parent matches the drive itself, treat as root.
-            if helpers::is_uuid(p) && p == drive_id {
+            if helpers::is_document_id(p) && p == drive_id {
                 return Ok(ParentTarget {
                     drive_id,
                     parent_folder_id: None,
@@ -196,7 +196,7 @@ async fn resolve_folder_id_in_drive(
         .and_then(|v| v.as_array())
         .ok_or_else(|| anyhow::anyhow!("Drive '{drive_id}' has no nodes to search"))?;
 
-    if helpers::is_uuid(identifier) {
+    if helpers::is_document_id(identifier) {
         let exists = nodes
             .iter()
             .any(|n| n["kind"].as_str() == Some("folder") && n["id"].as_str() == Some(identifier));

@@ -31,7 +31,7 @@ pub async fn run_non_interactive(
         .filter(|t| !t.is_empty());
 
     let client = GraphQLClient::new(url.clone(), token.clone());
-    let test_query = r#"{ findDocuments(search: { type: "powerhouse/document-drive" }, paging: { limit: 1 }) { totalCount } }"#;
+    let test_query = r#"{ findDocuments(search: { type: "powerhouse/document-drive" }, paging: { limit: 1 }) { items { id } } }"#;
     let connected = match client.query(test_query, None).await {
         Ok(_) => true,
         Err(e) => {
@@ -132,16 +132,15 @@ pub async fn run() -> Result<()> {
     println!("Connecting to {url}...");
     let mut token = token;
     let mut client = GraphQLClient::new(url.clone(), token.clone());
-    let test_query = r#"{ findDocuments(search: { type: "powerhouse/document-drive" }, paging: { limit: 1 }) { totalCount } }"#;
+    let test_query = r#"{ findDocuments(search: { type: "powerhouse/document-drive" }, paging: { limit: 1 }) { items { id } } }"#;
     let data = client.query(test_query, None).await;
 
     match data {
-        Ok(d) => {
-            let count = d
-                .pointer("/findDocuments/totalCount")
-                .and_then(|v| v.as_u64())
+        Ok(_) => {
+            let count = super::helpers::count_documents(&client, "powerhouse/document-drive")
+                .await
                 .unwrap_or(0);
-            println!("{} Connected. {count} documents found.", "✓".green());
+            println!("{} Connected. {count} drives found.", "✓".green());
         }
         Err(e) => {
             let err_str = format!("{e:#}");
@@ -157,12 +156,14 @@ pub async fn run() -> Result<()> {
                     token = Some(retry_token);
                     client = GraphQLClient::new(url.clone(), token.clone());
                     match client.query(test_query, None).await {
-                        Ok(d) => {
-                            let count = d
-                                .pointer("/findDocuments/totalCount")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            println!("{} Connected. {count} documents found.", "✓".green());
+                        Ok(_) => {
+                            let count = super::helpers::count_documents(
+                                &client,
+                                "powerhouse/document-drive",
+                            )
+                            .await
+                            .unwrap_or(0);
+                            println!("{} Connected. {count} drives found.", "✓".green());
                         }
                         Err(e2) => {
                             eprintln!("{} Connection still failed: {e2}", "✗".red());

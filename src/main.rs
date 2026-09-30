@@ -8,7 +8,6 @@ mod phd;
 use std::io::IsTerminal;
 
 use anyhow::Result;
-use clap::Parser;
 use colored::Colorize;
 
 use cli::Cli;
@@ -30,7 +29,7 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::try_parse_ids_from(std::env::args_os()).unwrap_or_else(|e| e.exit());
 
     // Handle --no-color and NO_COLOR env var
     if cli.no_color || std::env::var("NO_COLOR").is_ok() {

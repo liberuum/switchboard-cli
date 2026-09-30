@@ -31,35 +31,46 @@ pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>
         None => helpers::resolve_doc(&client, &args.doc_id).await?,
     };
 
-    let limit = args.first.unwrap_or(1000);
     let offset = args.skip;
-
-    let query = format!(
-        r#"{{ documentOperations(filter: {{ documentId: "{doc_id}" }}, paging: {{ limit: {limit}, offset: {offset} }}) {{ items {{ id index action {{ type input scope }} timestampUtcMs hash skip error }} totalCount }} }}"#,
-        doc_id = doc_id.replace('"', r#"\""#),
-    );
-    let data = client.query(&query, None).await?;
-    let items = data
-        .pointer("/documentOperations/items")
-        .and_then(|v| v.as_array());
-    let total = data
-        .pointer("/documentOperations/totalCount")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
-
-    let all_ops =
-        items.ok_or_else(|| anyhow::anyhow!("No operations found for document {}", doc_id))?;
-
-    if all_ops.is_empty() {
-        println!("No operations found.");
-        return Ok(());
+    let wanted = args
+        .first
+        .map(|first| offset.saturating_add(first).saturating_add(1));
+    let query = "query($id: String!, $cursor: String) { documentOperations(filter: { documentId: $id }, paging: { limit: 500, cursor: $cursor }) { items { id index action { type input scope } timestampUtcMs hash skip error } hasNextPage cursor } }";
+    let mut cursor: Option<String> = None;
+    let mut operations = Vec::new();
+    loop {
+        let variables = serde_json::json!({ "id": doc_id, "cursor": cursor });
+        let data = client.query(query, Some(&variables)).await?;
+        let page = &data["documentOperations"];
+        let batch = page["items"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("No operations found for document {doc_id}"))?;
+        operations.extend(batch.iter().cloned());
+        cursor = helpers::next_page_cursor(page, cursor.as_deref())?;
+        if cursor.is_none() || wanted.is_some_and(|count| operations.len() >= count) {
+            break;
+        }
     }
+    // The reactor limits each scope separately. Apply the user's window to
+    // the combined operations, rather than treating its page size as a count.
+    let remaining = operations.len().saturating_sub(offset);
+    let displayed = args.first.unwrap_or(remaining).min(remaining);
+    let has_more = remaining > displayed;
+    let all_ops: Vec<Value> = operations
+        .into_iter()
+        .skip(offset)
+        .take(displayed)
+        .collect();
 
     match format {
         OutputFormat::Json | OutputFormat::Raw => {
-            print_json(&serde_json::to_value(all_ops)?);
+            print_json(&serde_json::to_value(&all_ops)?);
         }
         _ => {
+            if all_ops.is_empty() {
+                println!("No operations found.");
+                return Ok(());
+            }
             let rows: Vec<Vec<String>> = all_ops
                 .iter()
                 .map(|op| {
@@ -90,10 +101,13 @@ pub async fn run(args: OpsArgs, format: OutputFormat, profile_name: Option<&str>
             print_table(&["Index", "Type", "Scope", "Timestamp", "Input"], &rows);
 
             let displayed = all_ops.len();
-            if displayed < total {
-                println!("Showing {displayed} of {total} operations");
+            if has_more {
+                println!(
+                    "Showing {displayed} operations (more available — use --skip {} to see the next page)",
+                    offset + displayed
+                );
             } else {
-                println!("{total} operations");
+                println!("{displayed} operations");
             }
         }
     }

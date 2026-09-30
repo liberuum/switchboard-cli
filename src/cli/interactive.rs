@@ -1,7 +1,6 @@
 use std::io::Write;
 
 use anyhow::Result;
-use clap::Parser;
 use colored::Colorize;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -973,7 +972,7 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                 let tokens = shell_split(line);
                 let args = std::iter::once("switchboard".to_string()).chain(tokens);
 
-                match Cli::try_parse_from(args) {
+                match Cli::try_parse_ids_from(args) {
                     Ok(parsed) => {
                         // Block recursive entry into interactive mode
                         if matches!(parsed.command, Some(Commands::Interactive)) {
@@ -1103,7 +1102,7 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                         let guide_args = std::iter::once("switchboard".to_string())
                             .chain(std::iter::once("guide".to_string()))
                             .chain(shell_split(line));
-                        if let Ok(parsed) = Cli::try_parse_from(guide_args)
+                        if let Ok(parsed) = Cli::try_parse_ids_from(guide_args)
                             && let Some(command) = parsed.command
                         {
                             if let Err(ge) = crate::cli::dispatch(

@@ -244,6 +244,8 @@ RAW ACTION DISPATCH
   Dispatch raw actions directly via mutateDocument. Actions are provided
   as a JSON array, either inline with --actions or from a file with --file.
   Use --wait to block until the async mutation completes (uses WebSocket).
+  With --wait --format json, stdout contains one job-result object with
+  jobId, status, result, and error. Without --wait it contains only jobId.
 
   The CLI automatically injects timestampUtcMs (ISO-8601 format) into each
   action if missing. This is required by the reactor's operation store but not
@@ -275,6 +277,10 @@ OPERATIONS HISTORY
 
   switchboard ops <doc-id> --drive <slug> [--skip N] [--first N]
 
+  Reads all operations by default. --skip and --first select an exact window
+  across scopes; the CLI follows returned cursors rather than API offsets.
+  An empty JSON result is [].
+
 MODELS
 
   switchboard models list              List all document types
@@ -285,8 +291,15 @@ ANALYTICS
   switchboard analytics metrics        List available metrics
   switchboard analytics dimensions     List available dimensions
   switchboard analytics currencies     List available currencies
-  switchboard analytics series [--start <date>] [--end <date>] [--granularity <g>] [--metrics <m>]
-                                       Query analytics time series
+  switchboard analytics series [--start <date>] [--end <date>] [--granularity <g>]
+                              [--metrics <m>] [--dimensions '<json>'] [--currency <c>]
+                                        Query analytics time series
+
+  Metrics default to all available metrics. Dimensions default to all indexed
+  dimensions at select "/", lod 1. No indexed dimensions means an empty result.
+  --dimensions accepts an array of {{"name":"budget","select":"/","lod":1}}.
+  name/select must be nonempty and lod must be a nonnegative integer.
+  Use analytics dimensions to discover names and paths.
 
 EXAMPLES
 
@@ -321,6 +334,8 @@ EXPORT
                                        to scope the lookup to one drive)
 
   Operation history is included by default so archives are fully replayable.
+  Export follows every returned operation cursor, including histories beyond
+  500 operations. Migration and drive counting use cursors too.
   Pass --no-ops for a smaller, state-only export (operations.json = {{}}) —
   the current state is still preserved, but the history is not.
 
@@ -791,7 +806,7 @@ API ENDPOINTS
 QUERY PATTERNS
 
   # Find documents (with optional type filter)
-  {{ findDocuments(search: {{ type: "powerhouse/document-drive" }}) {{ items {{ id name slug }} totalCount }} }}
+  {{ findDocuments(search: {{ type: "powerhouse/document-drive" }}) {{ items {{ id name slug }} hasNextPage }} }}
 
   # Get a document by ID or slug
   {{ document(identifier: "my-doc") {{ document {{ id name slug documentType state }} }} }}
@@ -803,7 +818,7 @@ QUERY PATTERNS
   {{ documentIncomingRelationships(targetIdentifier: "my-doc", relationshipType: "child") {{ items {{ id name slug documentType }} }} }}
 
   # Get document operations
-  {{ documentOperations(filter: {{ documentId: "uuid" }}) {{ items {{ id index action {{ type input scope }} }} totalCount }} }}
+  {{ documentOperations(filter: {{ documentId: "uuid" }}) {{ items {{ id index action {{ type input scope }} }} hasNextPage }} }}
 
 MUTATION PATTERNS
 
@@ -937,7 +952,15 @@ FOLDERS
 MODELS & OPERATIONS
   models list                   List document types
   models get <type>             Show operations for a type
-  ops <doc-id> --drive <id>     View operation history
+  ops <doc-id> [--drive <id>] [--skip N] [--first N]  View operation history
+
+ANALYTICS
+  analytics metrics             List available metrics
+  analytics dimensions          List dimensions and their values
+  analytics currencies          List available currencies
+  analytics series [--start <date>] [--end <date>] [--granularity <g>]
+                   [--metrics <m>] [--dimensions '<json>'] [--currency <c>]
+                                 Query analytics time series
 
 IMPORT / EXPORT
   export all [--out <dir>]      Export everything (all drives)
@@ -954,6 +977,7 @@ AUTH
   docs link <src> <tgt> -t TYPE [--reason "…"] [--confidence LEVEL]
                                 Add a relationship edge; --reason is why it exists
   docs annotate <src> <tgt> -t TYPE --reason "…"  Replace an edge's reason / confidence
+  docs unlink <src> <tgt> -t TYPE  Remove a relationship edge
   auth logout                   Remove token
   auth status                   Show auth state
   auth token                    Print current token

@@ -26,7 +26,7 @@ pub async fn run(
     // Step 1: Fetch all drives
     let drives_data = client
         .query(
-            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name slug documentType state } totalCount } }"#,
+            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name slug documentType state } } }"#,
             None,
         )
         .await?;

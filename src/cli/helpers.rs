@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
+use serde_json::Value;
 
 use crate::config::{Config, Profile, load_config};
 use crate::graphql::introspection::load_cache;
@@ -124,7 +125,7 @@ pub async fn resolve_doc(client: &GraphQLClient, id_or_name: &str) -> Result<Str
 
         // Try to find doc within the drive's children
         let drive_id = resolve_single_doc(client, drive_part).await?;
-        let is_uuid = is_uuid(doc_part);
+        let is_uuid = is_document_id(doc_part);
 
         // Fast path: documentOutgoingRelationships is the proper relationship index.
         let children_query = format!(
@@ -347,6 +348,47 @@ pub async fn select_drive(client: &GraphQLClient) -> Result<(String, String, Str
     Ok(drives[selection].clone())
 }
 
+/// Count documents of a type by walking `findDocuments` pages until
+/// `hasNextPage` is false. Result pages no longer carry `totalCount` on
+/// reactor >= 6.2.3 (only `items`, `hasNextPage`, `hasPreviousPage`,
+/// `cursor`); `hasNextPage` exists on older servers too.
+pub async fn count_documents(client: &GraphQLClient, document_type: &str) -> Result<u64> {
+    let query = "query($type: String!, $cursor: String) { findDocuments(search: { type: $type }, paging: { limit: 500, cursor: $cursor }) { items { id } hasNextPage cursor } }";
+    let mut cursor: Option<String> = None;
+    let mut count = 0;
+    loop {
+        let variables = serde_json::json!({ "type": document_type, "cursor": cursor });
+        let data = client.query(query, Some(&variables)).await?;
+        let page = &data["findDocuments"];
+        count += page["items"]
+            .as_array()
+            .map(|a| a.len() as u64)
+            .ok_or_else(|| anyhow::anyhow!("findDocuments returned no items"))?;
+        cursor = next_page_cursor(page, cursor.as_deref())?;
+        if cursor.is_none() {
+            return Ok(count);
+        }
+    }
+}
+
+/// A result page must advance its cursor when it claims another page exists.
+/// Refuse a broken cursor rather than repeatedly fetching the same history.
+pub fn next_page_cursor(page: &Value, previous: Option<&str>) -> Result<Option<String>> {
+    if page["hasNextPage"].as_bool() != Some(true) {
+        return Ok(None);
+    }
+    let cursor = page["cursor"]
+        .as_str()
+        .filter(|cursor| !cursor.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("Result page hasNextPage is true but no cursor was returned")
+        })?;
+    if Some(cursor) == previous {
+        bail!("Result page cursor did not advance; refusing to repeat the same page");
+    }
+    Ok(Some(cursor.to_string()))
+}
+
 /// Derive the base URL from a GraphQL endpoint URL.
 /// e.g. "http://localhost:4001/graphql" → "http://localhost:4001"
 pub fn base_url_from(graphql_url: &str) -> String {
@@ -354,6 +396,24 @@ pub fn base_url_from(graphql_url: &str) -> String {
         .trim_end_matches('/')
         .trim_end_matches("/graphql")
         .to_string()
+}
+
+/// True for a document id in either format the reactor has issued: a legacy
+/// UUID, or a v2 signed id (`deriveDocumentId` in @powerhousedao/shared: the
+/// base64url SHA-256 of the header params, 43 chars, matching
+/// `/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/`).
+pub fn is_document_id(s: &str) -> bool {
+    is_uuid(s) || is_derived_id(s)
+}
+
+/// True for a v2 signed document id (see `is_document_id`).
+pub fn is_derived_id(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() == 43
+        && bytes[..42]
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-')
+        && b"AEIMQUYcgkosw048".contains(&bytes[42])
 }
 
 pub fn is_uuid(s: &str) -> bool {
@@ -399,7 +459,7 @@ pub async fn resolve_drive_and_parent(
         .cloned()
         .unwrap_or_default();
 
-    let parent_is_uuid = is_uuid(parent);
+    let parent_is_uuid = is_document_id(parent);
 
     // Pass 1: is `parent` a drive itself? Match by id, slug, or name.
     for d in &drives {
@@ -550,5 +610,129 @@ mod literal_escape_tests {
     fn nested_objects_and_tabs_are_found() {
         let v = json!({ "a": { "b": ["ok", "bad\\tcell"] }, "c": "fine" });
         assert_eq!(find_literal_escapes(&v), vec!["a.b[1]".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod document_id_tests {
+    use super::{is_derived_id, is_document_id, is_uuid};
+
+    #[test]
+    fn accepts_legacy_uuids() {
+        assert!(is_uuid("933f946f-5fab-4dea-85ea-aeb85f1f2fd1"));
+        assert!(is_document_id("933f946f-5fab-4dea-85ea-aeb85f1f2fd1"));
+    }
+
+    #[test]
+    fn accepts_v2_signed_ids() {
+        // Real ids issued by a 6.2.3-dev.33 reactor.
+        for id in [
+            "Ruclz6NoJa9zlh_FjSNw3dwaJusTga4z-fF9395C2p8",
+            "9AHWfBe09_kSKpUBoEb-6woXzbr7ItHTah60oJlGu_8",
+            "w8GIfj12R0GObjcdypFycxhYejIDZVyf9SINhexaY5o",
+        ] {
+            assert!(is_derived_id(id), "{id}");
+            assert!(is_document_id(id), "{id}");
+            assert!(!is_uuid(id), "{id}");
+        }
+    }
+
+    #[test]
+    fn rejects_names_and_slugs() {
+        for s in ["builders", "powerhouse-network-admin", "zz-idcheck", ""] {
+            assert!(!is_document_id(s), "{s}");
+        }
+        // 43 chars but a last character a SHA-256 base64url can't end with.
+        assert!(!is_derived_id(
+            "Ruclz6NoJa9zlh_FjSNw3dwaJusTga4z-fF9395C2p9"
+        ));
+        // Right length, disallowed character.
+        assert!(!is_derived_id(
+            "Ruclz6NoJa9zlh_FjSNw3dwaJusTga4z-fF9395C2+8"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod pagination_tests {
+    use super::{count_documents, next_page_cursor};
+    use crate::graphql::GraphQLClient;
+    use serde_json::json;
+
+    #[test]
+    fn final_page_needs_no_cursor() {
+        assert_eq!(
+            next_page_cursor(&json!({"hasNextPage": false}), Some("old")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn continuing_page_must_advance() {
+        assert_eq!(
+            next_page_cursor(&json!({"hasNextPage": true, "cursor": "new"}), Some("old")).unwrap(),
+            Some("new".into())
+        );
+        for cursor in [json!(null), json!(""), json!("old")] {
+            assert!(
+                next_page_cursor(&json!({"hasNextPage": true, "cursor": cursor}), Some("old"))
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn drive_count_follows_the_returned_cursor_past_500() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/graphql", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for page in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request["variables"]["type"], "powerhouse/document-drive");
+                assert_eq!(
+                    request["variables"]["cursor"],
+                    if page == 0 {
+                        json!(null)
+                    } else {
+                        json!("next")
+                    }
+                );
+                assert!(!request["query"].as_str().unwrap().contains("offset"));
+                let items: Vec<_> = (0..if page == 0 { 500 } else { 1 })
+                    .map(|id| json!({"id": format!("{page}-{id}")}))
+                    .collect();
+                let response = json!({"data": {"findDocuments": {"items": items, "hasNextPage": page == 0, "cursor": "next"}}}).to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            }
+        });
+        let client = GraphQLClient::new(url, None);
+        assert_eq!(
+            count_documents(&client, "powerhouse/document-drive")
+                .await
+                .unwrap(),
+            501
+        );
+        server.join().unwrap();
     }
 }

@@ -309,6 +309,11 @@ switchboard docs move <ids...> --from <src> --to <dst>
 
 **Name resolution**: Most document commands accept UUIDs, names, or slugs. The CLI resolves names by searching across drives. Use `--drive` to narrow ambiguous name lookups.
 
+Document IDs may also be 43-character base64url IDs issued by newer reactors.
+Hyphen-leading IDs are accepted as single positionals, option values, and
+members of document/drive ID lists without consuming trailing options such
+as `-y` or `--format json`.
+
 **`docs list` shows the drive's file tree:**
 
 ```
@@ -511,6 +516,12 @@ switchboard docs apply <id-or-name> --file <path> --wait     # Wait for async co
 Dispatches raw actions to a document via `mutateDocumentAsync`. Returns a job ID.
 With `--wait`, blocks until the job completes.
 
+With `--wait --format json` (or `raw`), stdout contains exactly one job-result
+object with `jobId`, `status`, `result`, and `error`. Without `--wait`, stdout
+contains `{ "jobId": "..." }`. Progress messages go to stderr. `jobs wait`
+also includes `jobId` regardless of whether completion was read over HTTP or
+received over WebSocket.
+
 The CLI automatically injects `timestampUtcMs` (ISO-8601 format, e.g. `"2026-03-22T22:06:53.528Z"`) into each action if missing. This is required by the reactor's operation store (which does `new Date(timestampUtcMs)`) but not populated by the generic `mutateDocument` resolver — without it, drive operations (ADD_FOLDER, MOVE_NODE, etc.) fail with "Invalid time value".
 
 ```
@@ -540,6 +551,12 @@ importing and exporting documents in this format, compatible with the Powerhouse
 ecosystem's drag-and-drop workflow.
 
 #### Export
+
+Operation histories follow `documentOperations` cursors until `hasNextPage`
+is false. A short page does not imply completion because scopes are paged
+separately. Migration uses the same cursor semantics; drive counting follows
+`findDocuments` cursors. A continuing page without a new cursor is an error,
+preventing repeated-page loops. No command queries the removed `totalCount`.
 
 ```
 switchboard export all [-o ./dir/]                           # Export everything
@@ -623,10 +640,10 @@ the source's old UUID and silently breaks on the destination.
 
 The CLI handles this with a deferral queue:
 
-1. For each op, scan inputs recursively for UUID-shaped strings.
-2. If every UUID is either in the id_map or not a UUID → rewrite + dispatch
+1. For each op, scan inputs recursively for document-ID-shaped strings (legacy UUIDs or 43-character base64url IDs).
+2. If every document ID is in the id_map → rewrite + dispatch
    immediately (the common case).
-3. If any UUID is unknown → enqueue the op as a `DeferredOp { doc_id, doc_type, op }`.
+3. If any document ID is unknown → enqueue the op as a `DeferredOp { doc_id, doc_type, op }`.
 4. After every input has been processed (every doc created), drain the queue:
    re-rewrite each input with the now-complete map and dispatch.
 
@@ -745,11 +762,13 @@ $ switchboard ops 3ac3588f-... --first 5
 │ 3     │ ADD_SCOPE       │ 2026-02-06T12:14:02.789Z │ scope: Protocol          │
 │ 4     │ SET_DESCRIPTION │ 2026-02-06T12:14:30.012Z │ description: A team...   │
 └───────┴─────────────────┴──────────────────────────┴──────────────────────────┘
-Showing 5 of 14 operations
+Showing 5 operations (more available — use --skip 5 to see the next page)
 ```
 
 Supports drive documents (type `powerhouse/document-drive`) as well as file nodes.
-When the document is a drive itself, falls back to the drive-scoped endpoint:
+All histories are read from the main endpoint using cursor pagination. `--skip`
+and `--first` select an exact window over the combined scopes; omitting `--first`
+reads the entire remaining history. Empty JSON results are `[]`.
 
 ```bash
 switchboard ops jazzman/               # Operations on the jazzman drive itself
@@ -758,14 +777,14 @@ switchboard ops my-doc                 # Auto-detect drive (existing behavior)
 switchboard ops my-doc --drive jazzman # Explicit drive
 ```
 
-Maps to GraphQL (via model-specific namespace, with drive-scoped fallback):
+Maps to GraphQL (the returned cursor becomes the next request's `$cursor`):
 
 ```graphql
-{
-  Invoice {
-    getDocument(docId: "...") {
-      operations { id type index timestampUtcMs hash skip inputText error }
-    }
+query($id: String!, $cursor: String) {
+  documentOperations(filter: { documentId: $id }, paging: { limit: 500, cursor: $cursor }) {
+    items { id index action { type input scope } timestampUtcMs hash skip error }
+    hasNextPage
+    cursor
   }
 }
 ```
@@ -829,10 +848,22 @@ token = "eyJhbGciOiJFUzI1NiIs..."  # required for this instance
 switchboard analytics metrics                                # List available metrics
 switchboard analytics dimensions                             # List dimensions and their values
 switchboard analytics currencies                             # List available currencies
-switchboard analytics series [--start <date>] [--end <date>] [--granularity <g>] [--metrics <m>] [--currency <c>]
+switchboard analytics series [--start <date>] [--end <date>] [--granularity <g>] [--metrics <m>] [--dimensions '<json>'] [--currency <c>]
 ```
 
-**Granularity options**: `HOURLY`, `DAILY`, `WEEKLY`, `MONTHLY`, `ANNUALLY`, `TOTAL`
+**Granularity options** (case-insensitive): `hourly`, `daily`, `weekly`, `monthly`, `quarterly`, `semiAnnual`, `annual`, `total`. `ANNUALLY` remains an alias for `annual`.
+
+`--dimensions` is a JSON array of `{ "name": "budget", "select": "/", "lod": 1 }`
+objects. Each entry requires nonempty `name`/`select` and a nonnegative integer
+`lod`. When omitted, use every indexed dimension with `select: "/"`, `lod: 1`;
+when no dimensions are indexed, return an empty result. Omitted `--metrics`
+uses the instance's available metrics. The filter is sent as a GraphQL variable,
+including dimensions, to satisfy the reactor's dimension requirement.
+
+```bash
+switchboard analytics series --granularity MONTHLY --metrics Actuals \
+  --dimensions '[{"name":"budget","select":"/","lod":1}]' --currency DAI --format json
+```
 
 Maps to GraphQL:
 

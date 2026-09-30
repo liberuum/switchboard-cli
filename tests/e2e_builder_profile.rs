@@ -18,6 +18,13 @@
 use serde_json::Value;
 use std::process::Command;
 
+/// Profile every test runs against. Pinned explicitly so the suite can never
+/// fall through to whatever profile happens to be the user's default (which
+/// may be a remote, shared Switchboard). Override with SWITCHBOARD_TEST_PROFILE.
+fn test_profile() -> String {
+    std::env::var("SWITCHBOARD_TEST_PROFILE").unwrap_or_else(|_| "local".to_string())
+}
+
 /// Unique suffix for this test run to avoid slug collisions.
 fn pid() -> u32 {
     std::process::id()
@@ -27,6 +34,7 @@ fn pid() -> u32 {
 fn run(args: &[&str]) -> (String, String, bool) {
     let bin = env!("CARGO_BIN_EXE_switchboard");
     let output = Command::new(bin)
+        .args(["--profile", test_profile().as_str()])
         .args(args)
         .output()
         .expect("failed to execute switchboard binary");
@@ -611,6 +619,7 @@ fn t50_watch_docs_connects() {
     // Start watch in a child process, kill after 2 seconds
     let bin = env!("CARGO_BIN_EXE_switchboard");
     let child = Command::new(bin)
+        .args(["--profile", test_profile().as_str()])
         .args(["watch", "docs", "--format", "json"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -642,13 +651,13 @@ fn t50_watch_docs_connects() {
 fn t60_raw_query() {
     let data = run_json(&[
         "query",
-        "{ findDocuments(search: { type: \"powerhouse/document-drive\" }) { totalCount } }",
+        "{ findDocuments(search: { type: \"powerhouse/document-drive\" }) { items { id } hasNextPage } }",
         "--format",
         "json",
     ]);
     assert!(
-        data.pointer("/findDocuments/totalCount").is_some(),
-        "raw query should return totalCount"
+        data.pointer("/findDocuments/hasNextPage").is_some(),
+        "raw query should return hasNextPage"
     );
 }
 

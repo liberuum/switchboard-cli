@@ -360,7 +360,11 @@ fn print_job_result(
     let summary = parse_job_result(job);
 
     match format {
-        OutputFormat::Json | OutputFormat::Raw => print_json(job),
+        OutputFormat::Json | OutputFormat::Raw => {
+            let mut output = job.clone();
+            output["jobId"] = serde_json::json!(job_id);
+            print_json(&output);
+        }
         _ => {
             match &summary {
                 Some(s) => println!("Job {job_id} finished: {status_str} ({})", s.tally()),

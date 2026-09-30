@@ -1,16 +1,25 @@
 //! Integration tests that run the CLI binary against a live Switchboard instance.
 //!
 //! These tests require a running GraphQL API and a configured "local" profile.
-//! Set `SWITCHBOARD_TEST_URL` to override the default (http://localhost:4001/graphql).
+//! Every invocation passes `--profile local`; set `SWITCHBOARD_TEST_PROFILE` to
+//! target another profile. The suite never uses your default profile.
 //!
 //! Run with:  cargo test --test cli_integration
 
 use std::process::Command;
 
+/// Profile every test runs against. Pinned explicitly so the suite can never
+/// fall through to whatever profile happens to be the user's default (which
+/// may be a remote, shared Switchboard). Override with SWITCHBOARD_TEST_PROFILE.
+fn test_profile() -> String {
+    std::env::var("SWITCHBOARD_TEST_PROFILE").unwrap_or_else(|_| "local".to_string())
+}
+
 /// Helper: run `switchboard <args>` and return (stdout, stderr, success).
 fn run(args: &[&str]) -> (String, String, bool) {
     let bin = env!("CARGO_BIN_EXE_switchboard");
     let output = Command::new(bin)
+        .args(["--profile", test_profile().as_str()])
         .args(args)
         .output()
         .expect("failed to execute switchboard binary");
@@ -172,6 +181,7 @@ fn info_json() {
 fn interactive_drives_list() {
     let bin = env!("CARGO_BIN_EXE_switchboard");
     let output = Command::new(bin)
+        .args(["--profile", test_profile().as_str()])
         .args(["--format", "json", "-i", "--quiet"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -200,6 +210,7 @@ fn interactive_drives_list() {
 fn interactive_raw_query() {
     let bin = env!("CARGO_BIN_EXE_switchboard");
     let output = Command::new(bin)
+        .args(["--profile", test_profile().as_str()])
         .args(["-i", "--quiet"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -208,7 +219,7 @@ fn interactive_raw_query() {
         .and_then(|mut child| {
             use std::io::Write;
             if let Some(ref mut stdin) = child.stdin {
-                writeln!(stdin, "query {{ findDocuments(search: {{ type: \"powerhouse/document-drive\" }}) {{ totalCount }} }}")?;
+                writeln!(stdin, "query {{ findDocuments(search: {{ type: \"powerhouse/document-drive\" }}) {{ items {{ id }} hasNextPage }} }}")?;
                 writeln!(stdin, "exit")?;
             }
             child.wait_with_output()
@@ -218,7 +229,7 @@ fn interactive_raw_query() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
     assert!(
-        stdout.contains("findDocuments") || stdout.contains("totalCount"),
+        stdout.contains("findDocuments") || stdout.contains("hasNextPage"),
         "expected raw query output, got: {stdout}"
     );
 }
@@ -227,6 +238,7 @@ fn interactive_raw_query() {
 fn interactive_blocks_nested_interactive() {
     let bin = env!("CARGO_BIN_EXE_switchboard");
     let output = Command::new(bin)
+        .args(["--profile", test_profile().as_str()])
         .args(["-i", "--quiet"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -282,15 +294,15 @@ fn docs_delete_help() {
 fn raw_query_find_documents() {
     let (stdout, _, ok) = run(&[
         "query",
-        r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { totalCount } }"#,
+        r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id } hasNextPage } }"#,
         "--format",
         "json",
     ]);
     assert!(ok, "raw query failed");
     let data: serde_json::Value = serde_json::from_str(&stdout).expect("invalid JSON");
     assert!(
-        data.pointer("/findDocuments/totalCount").is_some(),
-        "expected findDocuments.totalCount in response"
+        data.pointer("/findDocuments/hasNextPage").is_some(),
+        "expected findDocuments.hasNextPage in response"
     );
 }
 
@@ -859,4 +871,152 @@ fn complete_subgraph_lifecycle() {
     // 10. Cleanup
     let (_, _, ok) = run(&["drives", "delete", drive_id, "-y"]);
     assert!(ok, "cleanup drive delete failed");
+}
+
+/// A history larger than the export page size must finish without repeating
+/// pages. --first/--skip count returned operations across all scopes, and
+/// --wait must still emit a single JSON value.
+#[test]
+fn cursor_pagination_and_apply_wait_json() {
+    struct Cleanup(String, std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            run(&["drives", "delete", &self.0, "-y"]);
+            let _ = std::fs::remove_dir_all(&self.1);
+        }
+    }
+
+    let suffix = std::process::id();
+    let (out, err, ok) = run(&[
+        "drives",
+        "create",
+        "--name",
+        &format!("test-pages-{suffix}"),
+        "--format",
+        "json",
+    ]);
+    assert!(ok, "create drive: {err}");
+    let drive: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let drive_id = drive["id"].as_str().unwrap();
+    let temp = std::env::temp_dir().join(format!("switchboard-pages-{suffix}"));
+    let _cleanup = Cleanup(drive_id.to_string(), temp.clone());
+    std::fs::create_dir_all(&temp).unwrap();
+
+    let (out, err, ok) = run(&[
+        "docs",
+        "create",
+        "--type",
+        "powerhouse/subgraph",
+        "--name",
+        "PaginationFixture",
+        "--drive",
+        drive_id,
+        "--format",
+        "json",
+    ]);
+    assert!(ok, "create document: {err}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let id = doc["id"].as_str().unwrap();
+    let actions: Vec<_> = (0..505).map(|i| serde_json::json!({
+        "type": "SET_SUBGRAPH_NAME", "scope": "global", "input": {"name": format!("page-{i}")}
+    })).collect();
+    let actions_path = temp.join("actions.json");
+    std::fs::write(&actions_path, serde_json::to_vec(&actions).unwrap()).unwrap();
+    let (out, err, ok) = run(&[
+        "docs",
+        "apply",
+        id,
+        "--file",
+        actions_path.to_str().unwrap(),
+        "--wait",
+        "--format",
+        "json",
+    ]);
+    assert!(ok, "apply actions: {err}");
+    let job: serde_json::Value =
+        serde_json::from_str(&out).expect("--wait must emit one JSON value");
+    assert!(
+        job["jobId"].is_string(),
+        "wait result must identify its job"
+    );
+    let (out, err, ok) = run(&["ops", id, "--format", "json"]);
+    assert!(ok, "ops: {err}");
+    let ops: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+    assert!(ops.len() >= 505);
+    let op_ids: std::collections::HashSet<_> = ops.iter().map(|op| &op["id"]).collect();
+    assert_eq!(op_ids.len(), ops.len(), "operation pages must not repeat");
+    let (out, err, ok) = run(&[
+        "ops", id, "--skip", "500", "--first", "3", "--format", "json",
+    ]);
+    assert!(ok, "ops slice: {err}");
+    let slice: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+    assert_eq!(slice, ops[500..503]);
+    let (out, err, ok) = run(&["ops", id, "--skip", "10000", "--format", "json"]);
+    assert!(ok, "empty ops slice: {err}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+        serde_json::json!([])
+    );
+
+    let archive_path = temp.join("history.phd");
+    let (_, err, ok) = run(&["export", "doc", id, "--out", archive_path.to_str().unwrap()]);
+    assert!(ok, "export: {err}");
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&archive_path).unwrap()).unwrap();
+    let history: serde_json::Value =
+        serde_json::from_reader(archive.by_name("operations.json").unwrap()).unwrap();
+    let exported_count: usize = history
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|v| v.as_array().unwrap().len())
+        .sum();
+    assert_eq!(
+        exported_count,
+        ops.len(),
+        "export must contain every operation exactly once"
+    );
+}
+
+#[test]
+fn analytics_series_with_filters() {
+    let (out, err, ok) = run(&[
+        "analytics",
+        "series",
+        "--start",
+        "2026-01-01",
+        "--end",
+        "2026-09-30",
+        "--granularity",
+        "MONTHLY",
+        "--metrics",
+        "Actuals",
+        "--currency",
+        "DAI",
+        "--format",
+        "json",
+    ]);
+    assert!(ok, "analytics series: {err}");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&out)
+            .unwrap()
+            .is_array()
+    );
+    let (out, err, ok) = run(&[
+        "analytics",
+        "series",
+        "--metrics",
+        "Actuals",
+        "--granularity",
+        "MONTHLY",
+        "--dimensions",
+        r#"[{"name":"budget","select":"/","lod":1}]"#,
+        "--format",
+        "json",
+    ]);
+    assert!(ok, "explicit analytics dimensions: {err}");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&out)
+            .unwrap()
+            .is_array()
+    );
 }
