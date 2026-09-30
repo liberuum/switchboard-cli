@@ -643,9 +643,14 @@ The CLI handles this with a deferral queue:
 1. For each op, scan inputs recursively for document-ID-shaped strings (legacy UUIDs or 43-character base64url IDs).
 2. If every document ID is in the id_map → rewrite + dispatch
    immediately (the common case).
-3. If any document ID is unknown → enqueue the op as a `DeferredOp { doc_id, doc_type, op }`.
+3. If any document ID is unknown → enqueue the op and every later operation on that document, preserving their original order.
 4. After every input has been processed (every doc created), drain the queue:
    re-rewrite each input with the now-complete map and dispatch.
+5. Verify every imported document only after draining the queue. Rewrite document
+   references in its expected global state using the final ID map before comparing.
+   Strict mode rejects actual state mismatches and verification failures, not ID
+   changes introduced by the import. Deferred failures are attributed to their
+   destination document, and deferred operations are counted once in the summary.
 
 Any UUID still missing at drain time is an external reference (pointing at a
 doc outside this import) and is dispatched as-is, identical to the

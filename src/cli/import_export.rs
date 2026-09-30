@@ -1007,6 +1007,7 @@ pub async fn run_import(
     // Ops with forward UUID references queue here during the per-doc loop
     // and drain after every doc has been created (so the id_map is final).
     let mut deferred_ops: Vec<DeferredOp> = Vec::new();
+    let mut verification_queue = Vec::new();
 
     for entry in &entries {
         let path = entry.path.as_path();
@@ -1207,14 +1208,55 @@ pub async fn run_import(
             }
         }
 
-        // Step 3: Verify state matches the .phd current-state.
+        // Verify only after all IDs are mapped and deferred operations land.
+        // Even a backward reference changes identity during this import.
+        verification_queue.push((
+            new_doc_id,
+            doc_name.to_string(),
+            contents.current_state.global,
+            stats,
+        ));
+    }
+
+    // ── Drain deferred forward-ref ops ───────────────────────────────────
+    let deferred_failures = if !deferred_ops.is_empty() {
+        if !quiet {
+            println!(
+                "\n  ── Drain: {} deferred forward-ref op(s) ──",
+                deferred_ops.len()
+            );
+        }
+        let failures = drain_deferred_ops(&client, &deferred_ops, &cache, &id_map, quiet).await;
+        let failed: usize = failures.values().sum();
+        total_ops_failed += failed;
+        if !quiet {
+            let icon = if failed == 0 {
+                "✓".green()
+            } else {
+                "⚠".yellow()
+            };
+            let succeeded = deferred_ops.len() - failed;
+            println!("  {icon} Drained: {succeeded} resolved, {failed} failed");
+        }
+        failures
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    for (doc_id, doc_name, mut expected_global, mut stats) in verification_queue {
+        stats.failed += deferred_failures.get(&doc_id).copied().unwrap_or(0);
+        rewrite_ids_in_value(&mut expected_global, &id_map);
+        if !quiet {
+            println!("\n  ── Verify: {doc_name} ──");
+        }
+        // Verify state matches the .phd current-state with remapped IDs.
         //
         // The verdict is qualified by whether ops actually applied: if any
         // op was rejected, we never claim "EXACT MATCH" even if the JSON
         // happens to match (it might match because both sides are empty —
         // which is the silent-corruption mode the bug report calls out).
         tokio::time::sleep(std::time::Duration::from_millis(WRITE_DELAY_MS)).await;
-        let state_match = verify_state(&client, &new_doc_id, &contents.current_state.global).await;
+        let state_match = verify_state(&client, &doc_id, &expected_global).await;
         if !quiet {
             match (&state_match, stats.failed) {
                 (Ok(true), 0) => println!("  State:  {} EXACT MATCH", "✓".green()),
@@ -1237,7 +1279,8 @@ pub async fn run_import(
         // but normal mode treats the doc as successfully imported.
         let ops_failed = stats.failed > 0;
         let state_mismatched = matches!(state_match, Ok(false));
-        let doc_failed = ops_failed || (strict && state_mismatched);
+        let verification_failed = state_match.is_err();
+        let doc_failed = ops_failed || (strict && (state_mismatched || verification_failed));
         if !quiet {
             if doc_failed {
                 println!("  {} Imported with errors", "⚠".yellow());
@@ -1257,6 +1300,8 @@ pub async fn run_import(
                 stats.failed,
                 if state_mismatched {
                     " and a state mismatch"
+                } else if verification_failed {
+                    " and state could not be verified"
                 } else {
                     ""
                 }
@@ -1266,35 +1311,6 @@ pub async fn run_import(
             success += 1;
         }
     }
-
-    // ── Drain deferred forward-ref ops ───────────────────────────────────
-    //
-    // Ops queued during the per-doc loop because their inputs referenced
-    // a UUID we hadn't yet seen the new ID for. Now that every doc is
-    // created and id_map is complete, rewrite their inputs and dispatch.
-    let (deferred_succeeded, deferred_failed) = if !deferred_ops.is_empty() {
-        if !quiet {
-            println!(
-                "\n  ── Drain: {} deferred forward-ref op(s) ──",
-                deferred_ops.len()
-            );
-        }
-        let (s, f) = drain_deferred_ops(&client, &deferred_ops, &cache, &id_map, quiet).await;
-        total_ops_attempted += deferred_ops.len();
-        total_ops_failed += f;
-        if !quiet {
-            let icon = if f == 0 {
-                "✓".green().to_string()
-            } else {
-                "⚠".yellow().to_string()
-            };
-            println!("  {icon} Drained: {s} resolved, {f} failed");
-        }
-        (s, f)
-    } else {
-        (0, 0)
-    };
-    let _ = deferred_succeeded; // recorded for future use; not surfaced in the final line
 
     if !quiet {
         let icon = if total_ops_failed == 0 {
@@ -1313,7 +1329,7 @@ pub async fn run_import(
             total_ops_failed
         );
     }
-    if success < total_inputs || deferred_failed > 0 && strict {
+    if success < total_inputs {
         bail!(
             "import finished with errors: only {success}/{total_inputs} documents fully imported",
         );
@@ -1327,16 +1343,13 @@ struct OpStats {
     attempted: usize,
     succeeded: usize,
     failed: usize,
-    /// Ops whose input references a UUID we haven't seen the new ID for yet
-    /// (forward refs to a doc later in the import). These are queued and
-    /// drained after every doc has been created so the now-complete id_map
-    /// can rewrite cross-document references correctly.
+    /// Operations waiting for the final ID map: the first forward reference
+    /// and all its successors on this document, preserving replay order.
     deferred: usize,
 }
 
-/// An op that was queued during the per-doc pass because at least one
-/// UUID-shaped string in its input wasn't yet in the id_map. Drained at the
-/// end of `run_import` once the map is final.
+/// An operation waiting for a forward reference (or following an operation
+/// that is). Drained at the end of `run_import` once the ID map is final.
 struct DeferredOp {
     /// New (local) doc UUID this op will apply to.
     doc_id: String,
@@ -1497,7 +1510,7 @@ async fn ensure_folder_chain(
     Ok(current_parent)
 }
 
-/// Returns true if `value` contains any UUID-shaped string that is not in
+/// Returns true if `value` contains any document-ID-shaped string not in
 /// the id_map. Used to decide whether an op references a doc we haven't
 /// imported yet (forward reference) — such ops get deferred so the second
 /// pass can rewrite them with the now-complete map.
@@ -1574,6 +1587,7 @@ async fn push_operations_via_mutate(
     // CLI-side delay or visibility probe (both of which would generate
     // "Document not found" log noise on the reactor).
     let mut actions: Vec<Value> = Vec::new();
+    let mut defer_remaining = false;
 
     for op in operations.domain_ops() {
         let (op_type, mut input, scope) = if let Some(action) = op.get("action") {
@@ -1601,7 +1615,10 @@ async fn push_operations_via_mutate(
         // Forward references to docs not yet imported go to the drain phase
         // with the same logic as before — when the drain runs, id_map is
         // complete and we can rewrite + dispatch them then.
-        if has_forward_ref(&input, id_map) {
+        // Once one operation must wait, its successors must wait too so the
+        // drain cannot replay an earlier action after a later one.
+        if defer_remaining || has_forward_ref(&input, id_map) {
+            defer_remaining = true;
             stats.deferred += 1;
             deferred_ops.push(DeferredOp {
                 doc_id: doc_id.to_string(),
@@ -1665,20 +1682,20 @@ async fn push_operations_via_mutate(
 
 /// Re-attempt deferred ops after every doc has been created and id_map is
 /// final. Each op's input is re-rewritten with the now-complete map, then
-/// dispatched. Returns (succeeded, failed) counts.
+/// dispatched. Returns failed operation counts per destination document.
 async fn drain_deferred_ops(
     client: &GraphQLClient,
     deferred: &[DeferredOp],
     _cache: &crate::graphql::IntrospectionCache,
     id_map: &std::collections::HashMap<String, String>,
     quiet: bool,
-) -> (usize, usize) {
+) -> std::collections::HashMap<String, usize> {
     // Group ops by destination doc, then send each group as a single
     // mutateDocumentAsync + wait — same race-free pattern as
     // push_operations_via_mutate.
     use std::collections::HashMap;
     let mut grouped: HashMap<String, (String, Vec<Value>)> = HashMap::new(); // doc_id -> (doc_name, actions)
-    let mut failed = 0;
+    let mut failures = HashMap::new();
 
     for d in deferred {
         let (op_type, mut input, scope) = if let Some(action) = d.op.get("action") {
@@ -1736,7 +1753,6 @@ async fn drain_deferred_ops(
     }
 
     let mutation = "mutation($di: String!, $acts: [JSONObject!]!) { mutateDocumentAsync(documentIdentifier: $di, actions: $acts) }";
-    let mut succeeded = 0;
     for (doc_id, (doc_name, actions)) in grouped {
         let count = actions.len();
         let vars = serde_json::json!({ "di": doc_id, "acts": actions });
@@ -1746,7 +1762,7 @@ async fn drain_deferred_ops(
                 if !quiet {
                     println!("    {} {doc_name}: drain submit failed: {e}", "✗".red());
                 }
-                failed += count;
+                failures.insert(doc_id, count);
                 continue;
             }
         };
@@ -1756,21 +1772,18 @@ async fn drain_deferred_ops(
                 if !quiet {
                     println!("    {} {doc_name}: no job id from drain", "✗".red());
                 }
-                failed += count;
+                failures.insert(doc_id, count);
                 continue;
             }
         };
-        match wait_for_job(client, job_id, 30_000).await {
-            Ok(()) => succeeded += count,
-            Err(e) => {
-                if !quiet {
-                    println!("    {} {doc_name}: drain job failed: {e}", "✗".red());
-                }
-                failed += count;
+        if let Err(e) = wait_for_job(client, job_id, 30_000).await {
+            if !quiet {
+                println!("    {} {doc_name}: drain job failed: {e}", "✗".red());
             }
+            failures.insert(doc_id, count);
         }
     }
-    (succeeded, failed)
+    failures
 }
 
 /// Verify the imported document's state matches the expected state from the .phd

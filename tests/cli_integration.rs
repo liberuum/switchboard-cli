@@ -1020,3 +1020,149 @@ fn analytics_series_with_filters() {
             .is_array()
     );
 }
+
+#[test]
+fn strict_import_preserves_derived_id_forward_references_and_action_order() {
+    struct Cleanup(Vec<String>, std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for id in &self.0 {
+                run(&["drives", "delete", id, "-y"]);
+            }
+            let _ = std::fs::remove_dir_all(&self.1);
+        }
+    }
+    fn json(args: &[&str]) -> serde_json::Value {
+        let (out, err, ok) = run(args);
+        assert!(ok, "{args:?}: {err}\n{out}");
+        serde_json::from_str(&out).unwrap()
+    }
+
+    let suffix = std::process::id();
+    let temp = std::env::temp_dir().join(format!("switchboard-references-{suffix}"));
+    std::fs::create_dir_all(&temp).unwrap();
+    let mut cleanup = Cleanup(Vec::new(), temp.clone());
+    for kind in ["source", "destination"] {
+        let drive = json(&[
+            "drives",
+            "create",
+            "--name",
+            &format!("test-refs-{kind}-{suffix}"),
+            "--format",
+            "json",
+        ]);
+        cleanup.0.push(drive["id"].as_str().unwrap().to_string());
+    }
+    let source = &cleanup.0[0];
+    let destination = &cleanup.0[1];
+    let mut ids = Vec::new();
+    for name in ["ReferenceA", "ReferenceB"] {
+        let doc = json(&[
+            "docs",
+            "create",
+            "--type",
+            "powerhouse/builder-profile",
+            "--name",
+            name,
+            "--drive",
+            source,
+            "--format",
+            "json",
+        ]);
+        ids.push(doc["id"].as_str().unwrap().to_string());
+    }
+    assert!(ids.iter().all(|id| id.len() == 43), "requires derived IDs");
+    for (index, target) in [(0, &ids[1]), (1, &ids[0])] {
+        let actions = serde_json::json!([
+            {"type":"SET_OP_HUB_MEMBER", "scope":"global", "input":{"name":"Peer", "phid":target}},
+            {"type":"UPDATE_PROFILE", "scope":"global", "input":{"description":"Applied after the reference"}}
+        ]);
+        json(&[
+            "docs",
+            "apply",
+            &ids[index],
+            "--actions",
+            &actions.to_string(),
+            "--wait",
+            "--format",
+            "json",
+        ]);
+    }
+    let files = [temp.join("a.phd"), temp.join("b.phd")];
+    for (id, file) in ids.iter().zip(&files) {
+        let (_, err, ok) = run(&["export", "doc", id, "--out", file.to_str().unwrap()]);
+        assert!(ok, "export: {err}");
+    }
+    let (out, err, ok) = run(&[
+        "import",
+        files[0].to_str().unwrap(),
+        files[1].to_str().unwrap(),
+        "--drive",
+        destination,
+        "--strict",
+    ]);
+    assert!(ok, "strict import: {err}\n{out}");
+    assert!(out.contains("2/2 documents imported"), "{out}");
+    assert!(
+        out.contains("4 ops attempted"),
+        "deferred ops must not be counted twice: {out}"
+    );
+    let imported = json(&["docs", "list", "--drive", destination, "--format", "json"]);
+    let docs = imported.as_array().unwrap();
+    let a = docs.iter().find(|d| d["name"] == "ReferenceA").unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let b = docs.iter().find(|d| d["name"] == "ReferenceB").unwrap()["id"]
+        .as_str()
+        .unwrap();
+    for (id, target) in [(a, b), (b, a)] {
+        let doc = json(&["docs", "get", id, "--state", "--format", "json"]);
+        assert_eq!(
+            doc["state"]["global"]["operationalHubMember"]["phid"],
+            target
+        );
+        assert_eq!(
+            doc["state"]["global"]["description"],
+            "Applied after the reference"
+        );
+        let ops = json(&["ops", id, "--format", "json"]);
+        let domain_types: Vec<_> = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|op| op["action"]["scope"] == "global")
+            .filter_map(|op| op["action"]["type"].as_str())
+            .collect();
+        assert_eq!(domain_types, ["SET_OP_HUB_MEMBER", "UPDATE_PROFILE"]);
+    }
+
+    // Strict mode must still reject genuine state corruption after the drain.
+    use std::io::{Read, Write};
+    let bad_file = temp.join("mismatched.phd");
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&files[0]).unwrap()).unwrap();
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&bad_file).unwrap());
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).unwrap();
+        let mut contents = Vec::new();
+        entry.read_to_end(&mut contents).unwrap();
+        if entry.name() == "current-state.json" {
+            let mut state: serde_json::Value = serde_json::from_slice(&contents).unwrap();
+            state["global"]["description"] = serde_json::json!("Content that was never applied");
+            contents = serde_json::to_vec(&state).unwrap();
+        }
+        writer
+            .start_file(entry.name(), zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(&contents).unwrap();
+    }
+    writer.finish().unwrap();
+    let (_, err, ok) = run(&[
+        "import",
+        bad_file.to_str().unwrap(),
+        "--drive",
+        destination,
+        "--strict",
+    ]);
+    assert!(!ok, "strict import must reject a real state mismatch");
+    assert!(err.contains("state mismatch"), "{err}");
+}

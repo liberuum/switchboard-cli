@@ -197,7 +197,13 @@ switchboard export all --from 2026-01-01T00:00:00Z --to 2026-03-01T00:00:00Z --f
 ```bash
 switchboard import <file.phd> --drive <slug>                # Import one .phd file
 switchboard import a.phd b.phd c.phd --drive <slug>         # Import multiple .phd files
+switchboard import a.phd b.phd --drive <slug> --strict     # Verify after resolving forward references
 ```
+
+Forward references defer the operation and its successors on that document,
+preserving replay order. State verification runs after the deferred queue drains,
+with expected references remapped to imported IDs. `--strict` rejects genuine
+state mismatches and verification failures.
 
 ### Real-Time Subscriptions (WebSocket)
 

@@ -366,8 +366,14 @@ IMPORT
   Import flow:
   1. Reads header.json to determine document type and name
   2. Creates document via model-specific _createDocument mutation
-  3. Replays all operations via mutateDocument
-  4. Verifies final state matches expected state
+  3. Replays operations in order. A forward reference defers that operation
+     and every later operation on the same document until all IDs are mapped.
+  4. Drains deferred operations, then verifies final state against the archive
+     state with its document references remapped to the new IDs.
+
+  Use --strict to fail on rejected operations, actual state mismatches, or
+  verification failures. Forward and bidirectional references are checked only
+  after their deferred operations complete. Each operation is counted once.
 
 EXAMPLES
 

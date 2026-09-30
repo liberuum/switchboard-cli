@@ -244,6 +244,8 @@ Exports include the full operation history by default, following the API's retur
 
 All export commands support operation filters: `--action-types <types>` (comma-separated action types), `--since-revision <n>` (operations from revision N onwards), `--from <datetime>` and `--to <datetime>` (ISO 8601 time range). These enable incremental and selective exports.
 
+Import preserves each document's action order: when an operation references a document not yet imported, it and all following operations on that document wait until the ID map is complete. Final state verification runs after these deferred operations, comparing against the archive state with document IDs remapped. This lets `--strict` validate forward and bidirectional references without reporting expected ID changes as corruption. Each operation is counted once in the import summary.
+
 ### Authentication & Permissions
 
 | Command | Description |
