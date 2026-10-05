@@ -44,7 +44,12 @@ where
     // Step 1: Send connection_init with optional auth payload
     let init_payload = match token {
         Some(t) => {
-            json!({ "type": "connection_init", "payload": { "Authorization": format!("Bearer {t}") } })
+            // reactor-api reads `connectionParams.authorization` (lowercase):
+            // under the capitalised key alone the connection is anonymous,
+            // and a Switchboard with REQUIRE_AUTHENTICATED_CALLER closes it
+            // before connection_ack. Send both for servers that read either.
+            let bearer = format!("Bearer {t}");
+            json!({ "type": "connection_init", "payload": { "authorization": bearer, "Authorization": bearer } })
         }
         None => json!({ "type": "connection_init" }),
     };
@@ -57,6 +62,13 @@ where
     let mut acked = false;
     while let Some(msg) = read.next().await {
         let msg = msg.context("WebSocket read error")?;
+        if let Message::Close(Some(frame)) = &msg {
+            bail!(
+                "WebSocket closed before connection_ack: {} {}",
+                u16::from(frame.code),
+                frame.reason
+            );
+        }
         if let Message::Text(text) = &msg {
             let val: Value = serde_json::from_str(text.as_ref()).unwrap_or_default();
             match val["type"].as_str() {
