@@ -1,4 +1,6 @@
 use std::io::Write;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use colored::Colorize;
@@ -18,24 +20,39 @@ use crate::output::{OutputFormat, print_json};
 struct ReplHelper {
     /// Static command prefixes for first-level completion
     commands: Vec<String>,
-    /// Drive slugs fetched at startup
-    drive_slugs: Vec<String>,
-    /// Folder names across all drives, fetched at startup
-    folder_names: Vec<String>,
-    /// Drive slug each folder lives in (parallel to folder_names)
-    folder_drive_slugs: Vec<String>,
     /// Document model types from introspection cache
     model_types: Vec<String>,
     /// Guide topic names
     guide_topics: Vec<String>,
     /// Profile names from config
     profile_names: Vec<String>,
+    /// Drives, folders and documents from the server. Loaded in the background
+    /// and swapped in under the lock, so the prompt never waits for them.
+    dynamic: Arc<RwLock<DynamicCompletions>>,
+}
+
+/// The completion data that comes from the server.
+#[derive(Default)]
+struct DynamicCompletions {
+    /// Drive slugs (and names) for `--drive` and drive positionals
+    drive_slugs: Vec<String>,
+    /// Folder names across all drives
+    folder_names: Vec<String>,
+    /// Drive slug each folder lives in (parallel to folder_names)
+    folder_drive_slugs: Vec<String>,
     /// Document IDs for completion (the raw UUID)
     doc_ids: Vec<String>,
     /// Document display labels for completion ("uuid  name  (type)")
     doc_labels: Vec<String>,
     /// Drive slug for each doc entry (parallel to doc_ids/doc_labels)
     doc_drive_slugs: Vec<String>,
+}
+
+/// One load of the server's completion data.
+struct CompletionData {
+    drive_slugs: Vec<String>,
+    docs: Vec<DocEntry>,
+    folders: Vec<FolderEntry>,
 }
 
 /// A folder entry for tab-completion.
@@ -54,15 +71,10 @@ struct DocEntry {
 
 impl ReplHelper {
     fn new(
-        drive_slugs: Vec<String>,
         model_types: Vec<String>,
         profile_names: Vec<String>,
-        docs: Vec<DocEntry>,
-        folders: Vec<FolderEntry>,
+        dynamic: Arc<RwLock<DynamicCompletions>>,
     ) -> Self {
-        let (doc_ids, doc_labels, doc_drive_slugs) = Self::build_doc_completions(&docs);
-        let (folder_names, folder_drive_slugs) = Self::build_folder_completions(&folders);
-
         let commands = vec![
             // Drives
             "drives list".into(),
@@ -176,16 +188,26 @@ impl ReplHelper {
 
         Self {
             commands,
-            drive_slugs,
-            folder_names,
-            folder_drive_slugs,
             model_types,
             guide_topics,
             profile_names,
-            doc_ids,
-            doc_labels,
-            doc_drive_slugs,
+            dynamic,
         }
+    }
+}
+
+impl DynamicCompletions {
+    /// Replace everything with a fresh load (a failed load never gets here,
+    /// so the previous data survives a transient error).
+    fn apply(&mut self, data: CompletionData) {
+        self.drive_slugs = data.drive_slugs;
+        let (names, drives) = Self::build_folder_completions(&data.folders);
+        self.folder_names = names;
+        self.folder_drive_slugs = drives;
+        let (ids, labels, drive_slugs) = Self::build_doc_completions(&data.docs);
+        self.doc_ids = ids;
+        self.doc_labels = labels;
+        self.doc_drive_slugs = drive_slugs;
     }
 
     fn build_folder_completions(folders: &[FolderEntry]) -> (Vec<String>, Vec<String>) {
@@ -201,12 +223,6 @@ impl ReplHelper {
             .collect();
         let drives = folders.iter().map(|f| f.drive_slug.clone()).collect();
         (names, drives)
-    }
-
-    fn update_folders(&mut self, folders: Vec<FolderEntry>) {
-        let (names, drives) = Self::build_folder_completions(&folders);
-        self.folder_names = names;
-        self.folder_drive_slugs = drives;
     }
 
     fn build_doc_completions(docs: &[DocEntry]) -> (Vec<String>, Vec<String>, Vec<String>) {
@@ -231,13 +247,6 @@ impl ReplHelper {
         // drive slugs: which drive each doc belongs to
         let drive_slugs: Vec<String> = docs.iter().map(|d| d.drive_slug.clone()).collect();
         (replacements, labels, drive_slugs)
-    }
-
-    fn update_docs(&mut self, docs: Vec<DocEntry>) {
-        let (replacements, labels, drive_slugs) = Self::build_doc_completions(&docs);
-        self.doc_ids = replacements;
-        self.doc_labels = labels;
-        self.doc_drive_slugs = drive_slugs;
     }
 }
 
@@ -357,6 +366,9 @@ impl Completer for ReplHelper {
         let partial = &input[word_start..];
         let words_before: Vec<&str> = input[..word_start].split_whitespace().collect();
         let prev_word = words_before.last().copied();
+        // A poisoned lock only means a loader panicked mid-write; the data is
+        // still the last good load.
+        let dynamic = self.dynamic.read().unwrap_or_else(|e| e.into_inner());
 
         // ── Drive slug completion ────────────────────────────
         if prev_word == Some("--drive")
@@ -365,7 +377,7 @@ impl Completer for ReplHelper {
             || input.starts_with("export drive ")
             || input.starts_with("docs tree ")
         {
-            let matches = filter_pairs(&self.drive_slugs, partial);
+            let matches = filter_pairs(&dynamic.drive_slugs, partial);
             if !matches.is_empty() {
                 return Ok((word_start, matches));
             }
@@ -376,7 +388,7 @@ impl Completer for ReplHelper {
         // folder (nested placement). Surface both, with display labels so the
         // user can tell them apart.
         if prev_word == Some("--parent") {
-            let mut matches: Vec<Pair> = self
+            let mut matches: Vec<Pair> = dynamic
                 .drive_slugs
                 .iter()
                 .filter(|s| s.to_lowercase().starts_with(&partial.to_lowercase()))
@@ -386,9 +398,10 @@ impl Completer for ReplHelper {
                 })
                 .collect();
             matches.extend(
-                self.folder_names
+                dynamic
+                    .folder_names
                     .iter()
-                    .zip(self.folder_drive_slugs.iter())
+                    .zip(dynamic.folder_drive_slugs.iter())
                     .filter(|(name, _)| {
                         let trim = name.trim_matches('"');
                         trim.to_lowercase().starts_with(&partial.to_lowercase())
@@ -406,10 +419,10 @@ impl Completer for ReplHelper {
         // ── Folder-only completion ───────────────────────────
         // `--folder` is the strict-folder spelling; show only folders.
         if prev_word == Some("--folder") {
-            let matches: Vec<Pair> = self
+            let matches: Vec<Pair> = dynamic
                 .folder_names
                 .iter()
-                .zip(self.folder_drive_slugs.iter())
+                .zip(dynamic.folder_drive_slugs.iter())
                 .filter(|(name, _)| {
                     let trim = name.trim_matches('"');
                     trim.to_lowercase().starts_with(&partial.to_lowercase())
@@ -442,11 +455,11 @@ impl Completer for ReplHelper {
             if !doc_selected {
                 // Still need a doc — offer completions
                 if let Some(slug) = drive_filter {
-                    let matches: Vec<Pair> = self
+                    let matches: Vec<Pair> = dynamic
                         .doc_ids
                         .iter()
-                        .zip(self.doc_labels.iter())
-                        .zip(self.doc_drive_slugs.iter())
+                        .zip(dynamic.doc_labels.iter())
+                        .zip(dynamic.doc_drive_slugs.iter())
                         .filter(|((_id, label), ds)| {
                             ds.eq_ignore_ascii_case(slug)
                                 && (partial.is_empty()
@@ -462,10 +475,10 @@ impl Completer for ReplHelper {
                     }
                 } else {
                     let matches = hierarchical_doc_pairs(
-                        &self.drive_slugs,
-                        &self.doc_ids,
-                        &self.doc_labels,
-                        &self.doc_drive_slugs,
+                        &dynamic.drive_slugs,
+                        &dynamic.doc_ids,
+                        &dynamic.doc_labels,
+                        &dynamic.doc_drive_slugs,
                         partial,
                     );
                     if !matches.is_empty() {
@@ -503,10 +516,10 @@ impl Completer for ReplHelper {
         // ops takes doc ID as first arg — supports hierarchical drive/doc completion
         if input.starts_with("ops ") && words_before.len() <= 1 {
             let matches = hierarchical_doc_pairs(
-                &self.drive_slugs,
-                &self.doc_ids,
-                &self.doc_labels,
-                &self.doc_drive_slugs,
+                &dynamic.drive_slugs,
+                &dynamic.doc_ids,
+                &dynamic.doc_labels,
+                &dynamic.doc_drive_slugs,
                 partial,
             );
             if !matches.is_empty() {
@@ -515,7 +528,7 @@ impl Completer for ReplHelper {
         }
         // after --doc flag
         if prev_word == Some("--doc") {
-            let matches = filter_doc_pairs(&self.doc_ids, &self.doc_labels, partial);
+            let matches = filter_doc_pairs(&dynamic.doc_ids, &dynamic.doc_labels, partial);
             if !matches.is_empty() {
                 return Ok((word_start, matches));
             }
@@ -582,31 +595,54 @@ fn show_cursor() {
     eprint!("\x1b[?25h");
 }
 
-/// Spawn a background task that shows an animated spinner on stderr.
-/// The first frame is printed synchronously so it's visible immediately.
-fn spawn_spinner(message: &str) -> tokio::task::JoinHandle<()> {
-    // Print first frame synchronously so it's visible before any await
-    eprint!("\r\x1b[2K⠋ {message}");
-    let _ = std::io::stderr().flush();
-
-    let msg = message.to_string();
-    tokio::spawn(async move {
-        let frames = ['⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏', '⠋'];
-        let mut i = 0;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-            eprint!("\r\x1b[2K{} {msg}", frames[i % frames.len()]);
-            let _ = std::io::stderr().flush();
-            i += 1;
-        }
-    })
+/// An animated spinner on stderr, drawn by a background task.
+///
+/// Every frame is drawn under `stopped`'s lock, and `stop()` sets the flag and
+/// clears the line under the same lock. Aborting the task alone was not enough:
+/// an abort only lands at the task's next `.await`, so a frame already being
+/// drawn could land after the clear — on top of the prompt, which then looked
+/// like a REPL still "Loading...".
+struct Spinner {
+    stopped: Arc<Mutex<bool>>,
+    handle: tokio::task::JoinHandle<()>,
 }
 
-/// Stop the spinner and clear its line.
-fn stop_spinner(handle: tokio::task::JoinHandle<()>) {
-    handle.abort();
-    eprint!("\r\x1b[2K");
-    let _ = std::io::stderr().flush();
+impl Spinner {
+    fn start(message: &str) -> Self {
+        // First frame synchronously, so it is visible before any await.
+        eprint!("\r\x1b[2K⠋ {message}");
+        let _ = std::io::stderr().flush();
+
+        let stopped = Arc::new(Mutex::new(false));
+        let flag = Arc::clone(&stopped);
+        let msg = message.to_string();
+        let handle = tokio::spawn(async move {
+            let frames = ['⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏', '⠋'];
+            let mut i = 0;
+            loop {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                let done = flag.lock().unwrap_or_else(|e| e.into_inner());
+                if *done {
+                    break;
+                }
+                eprint!("\r\x1b[2K{} {msg}", frames[i % frames.len()]);
+                let _ = std::io::stderr().flush();
+                drop(done);
+                i += 1;
+            }
+        });
+        Self { stopped, handle }
+    }
+
+    /// Stop drawing and clear the line. No frame can follow this.
+    fn stop(self) {
+        let mut done = self.stopped.lock().unwrap_or_else(|e| e.into_inner());
+        *done = true;
+        eprint!("\r\x1b[2K");
+        let _ = std::io::stderr().flush();
+        drop(done);
+        self.handle.abort();
+    }
 }
 
 /// Print a visual separator before command output so it's easy to spot.
@@ -659,145 +695,231 @@ fn shell_split(input: &str) -> Vec<String> {
 
 // ── Drive/doc-fetching for tab completion ────────────────────────────────────
 
-async fn fetch_drive_slugs(client: &crate::graphql::GraphQLClient) -> Vec<String> {
-    match client
-        .query(
-            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { name slug state } } }"#,
-            None,
-        )
-        .await
-    {
-        Ok(data) => data
-            .pointer("/findDocuments/items")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                let mut slugs: Vec<String> = Vec::new();
-                for d in arr.iter().filter(|d| {
-                    d.pointer("/state/document/isDeleted")
-                        .and_then(|v| v.as_bool())
-                        != Some(true)
-                }) {
-                    if let Some(slug) = d["slug"].as_str() {
-                        slugs.push(slug.to_string());
-                    }
-                    // Also add the drive name so users can tab-complete by name
-                    if let Some(name) = d["name"].as_str()
-                        && !name.is_empty()
-                        && d["slug"].as_str() != Some(name)
-                    {
-                        slugs.push(name.to_string());
-                    }
-                }
-                slugs
-            })
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
-}
+/// How long one background load of completion data may take. Commands keep the
+/// client's own (much longer) timeout; completions are a convenience, and a
+/// server that cannot answer in this time should not hold anything up.
+const COMPLETION_TIMEOUT: Duration = Duration::from_secs(8);
+/// How old completion data may get before the prompt starts a background reload.
+const COMPLETION_TTL: Duration = Duration::from_secs(5);
 
-/// Fetch folder entries from every (non-deleted) drive's state.global.nodes.
-/// Used for tab completion of `--parent` / `--folder`.
-async fn fetch_folder_entries(client: &crate::graphql::GraphQLClient) -> Vec<FolderEntry> {
-    let data = match client
-        .query(
-            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { slug state } } }"#,
-            None,
-        )
-        .await
-    {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
-    };
+const DRIVES_QUERY: &str = r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id name slug state } } }"#;
 
-    let drives = data
-        .pointer("/findDocuments/items")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
+/// Everything one drive listing yields: completion slugs (slug and, when it
+/// differs, name), folders from each drive's nodes, and `(id, slug)` per drive
+/// for the per-drive document lookups. Deleted drives are skipped.
+fn parse_drive_listing(
+    data: &serde_json::Value,
+) -> (Vec<String>, Vec<FolderEntry>, Vec<(String, String)>) {
+    let mut slugs = Vec::new();
     let mut folders = Vec::new();
-    for d in drives.iter().filter(|d| {
-        d.pointer("/state/document/isDeleted")
-            .and_then(|v| v.as_bool())
-            != Some(true)
-    }) {
-        let drive_slug = d["slug"].as_str().unwrap_or("").to_string();
-        let nodes = match d.pointer("/state/global/nodes").and_then(|v| v.as_array()) {
-            Some(n) => n,
-            None => continue,
-        };
-        for n in nodes {
-            if n["kind"].as_str() != Some("folder") {
-                continue;
-            }
-            if let Some(name) = n["name"].as_str()
-                && !name.is_empty()
-            {
-                folders.push(FolderEntry {
-                    name: name.to_string(),
-                    drive_slug: drive_slug.clone(),
-                });
-            }
-        }
-    }
-    folders
-}
-
-async fn fetch_doc_entries(client: &crate::graphql::GraphQLClient) -> Vec<DocEntry> {
-    let data = match client
-        .query(
-            r#"{ findDocuments(search: { type: "powerhouse/document-drive" }) { items { id slug state } } }"#,
-            None,
-        )
-        .await
-    {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
-    };
-
-    let drives: Vec<_> = data
+    let mut drives = Vec::new();
+    let items = data
         .pointer("/findDocuments/items")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter(|d| {
-                    d.pointer("/state/document/isDeleted")
-                        .and_then(|v| v.as_bool())
-                        != Some(true)
-                })
-                .cloned()
-                .collect()
-        })
+        .map(Vec::as_slice)
         .unwrap_or_default();
-
-    let mut docs = Vec::new();
-    for drv in &drives {
-        let drv_slug = drv["slug"].as_str().unwrap_or("").to_string();
-        let drv_id = drv["id"].as_str().unwrap_or("");
-        if drv_id.is_empty() {
+    for d in items {
+        if d.pointer("/state/document/isDeleted")
+            .and_then(|v| v.as_bool())
+            == Some(true)
+        {
             continue;
         }
-
-        let children_query = format!(
-            r#"{{ documentOutgoingRelationships(sourceIdentifier: "{drv_id}", relationshipType: "child") {{ items {{ id name documentType }} }} }}"#
-        );
-        if let Ok(cd) = client.query(&children_query, None).await
-            && let Some(items) = cd
-                .pointer("/documentOutgoingRelationships/items")
-                .and_then(|v| v.as_array())
+        let slug = d["slug"].as_str().unwrap_or("");
+        if !slug.is_empty() {
+            slugs.push(slug.to_string());
+        }
+        // Also the drive name, so users can tab-complete by name.
+        if let Some(name) = d["name"].as_str()
+            && !name.is_empty()
+            && name != slug
         {
-            for node in items {
-                docs.push(DocEntry {
+            slugs.push(name.to_string());
+        }
+        if let Some(nodes) = d.pointer("/state/global/nodes").and_then(|v| v.as_array()) {
+            for n in nodes {
+                if n["kind"].as_str() != Some("folder") {
+                    continue;
+                }
+                if let Some(name) = n["name"].as_str()
+                    && !name.is_empty()
+                {
+                    folders.push(FolderEntry {
+                        name: name.to_string(),
+                        drive_slug: slug.to_string(),
+                    });
+                }
+            }
+        }
+        if let Some(id) = d["id"].as_str()
+            && !id.is_empty()
+        {
+            drives.push((id.to_string(), slug.to_string()));
+        }
+    }
+    (slugs, folders, drives)
+}
+
+/// A drive's documents (its `child` relationships). A failure yields none: one
+/// unreadable drive should not cost the completions for every other.
+async fn fetch_drive_docs(
+    client: &crate::graphql::GraphQLClient,
+    drive_id: &str,
+    drive_slug: &str,
+) -> Vec<DocEntry> {
+    let query = format!(
+        r#"{{ documentOutgoingRelationships(sourceIdentifier: "{drive_id}", relationshipType: "child") {{ items {{ id name documentType }} }} }}"#
+    );
+    let Ok(data) = client.query(&query, None).await else {
+        return Vec::new();
+    };
+    data.pointer("/documentOutgoingRelationships/items")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|node| DocEntry {
                     id: node["id"].as_str().unwrap_or("").to_string(),
                     name: node["name"].as_str().unwrap_or("").to_string(),
                     doc_type: node["documentType"].as_str().unwrap_or("").to_string(),
-                    drive_slug: drv_slug.clone(),
-                });
-            }
+                    drive_slug: drive_slug.to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One load: a single drive listing (it used to be fetched three times, each
+/// with every drive's full state), then every drive's documents in parallel.
+async fn fetch_completion_data(client: &crate::graphql::GraphQLClient) -> Result<CompletionData> {
+    let listing = client.query(DRIVES_QUERY, None).await?;
+    let (drive_slugs, folders, drives) = parse_drive_listing(&listing);
+
+    let mut set = tokio::task::JoinSet::new();
+    for (index, (id, slug)) in drives.into_iter().enumerate() {
+        let client = client.clone();
+        set.spawn(async move { (index, fetch_drive_docs(&client, &id, &slug).await) });
+    }
+    let mut per_drive = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(result) = joined {
+            per_drive.push(result);
+        }
+    }
+    // Keep drive order stable, whatever order the lookups finished in.
+    per_drive.sort_by_key(|(index, _)| *index);
+    let docs = per_drive.into_iter().flat_map(|(_, docs)| docs).collect();
+
+    Ok(CompletionData {
+        drive_slugs,
+        docs,
+        folders,
+    })
+}
+
+/// Outcome of the latest load, for a one-line notice at the prompt.
+#[derive(Default)]
+struct LoadStatus {
+    error: Option<String>,
+    reported: bool,
+}
+
+/// Loads completion data off the prompt's path. A load runs as a background
+/// task and writes into the helper's shared data when it finishes; the REPL
+/// never awaits it except on an explicit `refresh`.
+struct CompletionLoader {
+    dynamic: Arc<RwLock<DynamicCompletions>>,
+    status: Arc<Mutex<LoadStatus>>,
+    inflight: Option<tokio::task::JoinHandle<()>>,
+    last_started: Option<Instant>,
+    timeout: Duration,
+}
+
+impl CompletionLoader {
+    fn new(dynamic: Arc<RwLock<DynamicCompletions>>) -> Self {
+        Self {
+            dynamic,
+            status: Arc::new(Mutex::new(LoadStatus::default())),
+            inflight: None,
+            last_started: None,
+            timeout: COMPLETION_TIMEOUT,
         }
     }
 
-    docs
+    /// Start a load now, replacing one in flight (e.g. for the old profile).
+    fn start(&mut self, client: &crate::graphql::GraphQLClient) {
+        if let Some(previous) = self.inflight.take() {
+            previous.abort();
+        }
+        let client = client.clone();
+        let dynamic = Arc::clone(&self.dynamic);
+        let status = Arc::clone(&self.status);
+        let timeout = self.timeout;
+        self.last_started = Some(Instant::now());
+        self.inflight = Some(tokio::spawn(async move {
+            let outcome = match tokio::time::timeout(timeout, fetch_completion_data(&client)).await
+            {
+                Ok(Ok(data)) => {
+                    dynamic
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .apply(data);
+                    None
+                }
+                Ok(Err(e)) => Some(format!("{e:#}")),
+                Err(_) => Some(format!(
+                    "{} did not answer within {}s",
+                    client.url,
+                    timeout.as_secs_f32()
+                )),
+            };
+            let mut status = status.lock().unwrap_or_else(|e| e.into_inner());
+            match outcome {
+                None => *status = LoadStatus::default(),
+                // Report a failure once, not after every retry.
+                Some(error) => {
+                    if status.error.is_none() {
+                        status.reported = false;
+                    }
+                    status.error = Some(error);
+                }
+            }
+        }));
+    }
+
+    /// Start a background load if the data is stale and none is running.
+    fn refresh_if_stale(&mut self, client: &crate::graphql::GraphQLClient) {
+        let busy = self.inflight.as_ref().is_some_and(|h| !h.is_finished());
+        let stale = self
+            .last_started
+            .is_none_or(|t| t.elapsed() >= COMPLETION_TTL);
+        if !busy && stale {
+            self.start(client);
+        }
+    }
+
+    /// Load now and wait for it (bounded by COMPLETION_TIMEOUT) — `refresh`.
+    async fn reload(&mut self, client: &crate::graphql::GraphQLClient) {
+        self.start(client);
+        if let Some(handle) = self.inflight.take() {
+            let _ = handle.await;
+        }
+    }
+
+    /// A failure not yet shown to the user, once.
+    fn take_unreported_error(&self) -> Option<String> {
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if status.reported {
+            return None;
+        }
+        status.reported = true;
+        status.error.clone()
+    }
+}
+
+/// The notice printed when completions could not be loaded.
+fn completion_error_notice(error: &str) -> String {
+    format!("(tab completion unavailable: {error} — type `refresh` to retry)")
 }
 
 // ── REPL entry point ────────────────────────────────────────────────────────
@@ -815,19 +937,12 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
         .map(|c| c.models.values().map(|m| m.document_type.clone()).collect())
         .unwrap_or_default();
 
-    // Fetch completion data with a loading indicator
-    let spinner = spawn_spinner("Loading...");
-
-    // Fetch drive slugs for tab completion
-    let drive_slugs = fetch_drive_slugs(&client).await;
-
-    // Fetch document entries for tab completion
-    let doc_entries = fetch_doc_entries(&client).await;
-
-    // Fetch folder entries for tab completion
-    let folder_entries = fetch_folder_entries(&client).await;
-
-    stop_spinner(spinner);
+    // Drives, folders and documents for tab completion load in the background:
+    // the prompt is usable at once, and a slow or wedged server no longer holds
+    // the REPL behind a spinner (it used to wait out every request's timeout).
+    let dynamic = Arc::new(RwLock::new(DynamicCompletions::default()));
+    let mut loader = CompletionLoader::new(Arc::clone(&dynamic));
+    loader.start(&client);
 
     // Fetch profile names for tab completion
     let profile_names: Vec<String> = crate::config::load_config()
@@ -856,13 +971,7 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
         .completion_type(CompletionType::List)
         .build();
 
-    let helper = ReplHelper::new(
-        drive_slugs,
-        model_types,
-        profile_names,
-        doc_entries,
-        folder_entries,
-    );
+    let helper = ReplHelper::new(model_types, profile_names, dynamic);
     let mut rl: Editor<ReplHelper, rustyline::history::DefaultHistory> =
         Editor::with_config(config)?;
     rl.set_helper(Some(helper));
@@ -875,29 +984,13 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
 
     let mut current_profile = name;
 
-    // Track when we last refreshed completion caches so we can transparently
-    // pick up changes made outside the REPL (e.g. a drive created from another
-    // terminal session) without forcing the user to type `refresh`.
-    let mut last_completion_refresh = std::time::Instant::now();
-    const COMPLETION_TTL_SECS: u64 = 5;
-
     loop {
-        // Auto-refresh completions if stale. Cheap (a couple of GraphQL queries)
-        // and only runs at the prompt boundary, never mid-tab, so latency is hidden.
-        if last_completion_refresh.elapsed().as_secs() >= COMPLETION_TTL_SECS {
-            let new_slugs = fetch_drive_slugs(&client).await;
-            let new_docs = fetch_doc_entries(&client).await;
-            let new_folders = fetch_folder_entries(&client).await;
-            if let Some(helper) = rl.helper_mut() {
-                if !new_slugs.is_empty() {
-                    helper.drive_slugs = new_slugs;
-                }
-                if !new_docs.is_empty() {
-                    helper.update_docs(new_docs);
-                }
-                helper.update_folders(new_folders);
-            }
-            last_completion_refresh = std::time::Instant::now();
+        // Pick up changes made outside the REPL (e.g. a drive created from
+        // another terminal) without the user typing `refresh`. The reload runs
+        // in the background, so the prompt below never waits for it.
+        loader.refresh_if_stale(&client);
+        if !quiet && let Some(error) = loader.take_unreported_error() {
+            eprintln!("{}", completion_error_notice(&error).dimmed());
         }
 
         let prompt = format!("{current_profile}> ");
@@ -940,31 +1033,24 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
 
                 // ── Manual refresh ────────────────────────────────────
                 if line.trim() == "refresh" {
-                    let spinner = spawn_spinner("Refreshing completions...");
-                    let new_slugs = fetch_drive_slugs(&client).await;
-                    let new_docs = fetch_doc_entries(&client).await;
-                    let new_folders = fetch_folder_entries(&client).await;
+                    let spinner = Spinner::start("Refreshing completions...");
+                    loader.reload(&client).await;
                     let new_model_types: Vec<String> =
                         crate::graphql::introspection::load_cache(&current_profile)
                             .ok()
                             .flatten()
                             .map(|c| c.models.values().map(|m| m.document_type.clone()).collect())
                             .unwrap_or_default();
-                    stop_spinner(spinner);
-                    if let Some(helper) = rl.helper_mut() {
-                        if !new_slugs.is_empty() {
-                            helper.drive_slugs = new_slugs;
-                        }
-                        if !new_docs.is_empty() {
-                            helper.update_docs(new_docs);
-                        }
-                        helper.update_folders(new_folders);
-                        if !new_model_types.is_empty() {
-                            helper.model_types = new_model_types;
-                        }
+                    spinner.stop();
+                    if let Some(helper) = rl.helper_mut()
+                        && !new_model_types.is_empty()
+                    {
+                        helper.model_types = new_model_types;
                     }
-                    last_completion_refresh = std::time::Instant::now();
-                    eprintln!("Completions refreshed.");
+                    match loader.take_unreported_error() {
+                        Some(error) => eprintln!("{}", completion_error_notice(&error)),
+                        None => eprintln!("Completions refreshed."),
+                    }
                     continue;
                 }
 
@@ -1015,35 +1101,10 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                             eprintln!("Error: {e:#}");
                         }
 
-                        // Refresh completion caches after modifying commands
+                        // Reload completions after a modifying command — in the
+                        // background, so the next prompt is not held up by it.
                         if modifies_drives || modifies_docs || modifies_folders {
-                            let spinner = spawn_spinner("Refreshing completions...");
-                            let new_docs = fetch_doc_entries(&client).await;
-                            let new_slugs = if modifies_drives {
-                                fetch_drive_slugs(&client).await
-                            } else {
-                                Vec::new() // no change needed
-                            };
-                            let new_folders = if modifies_folders {
-                                Some(fetch_folder_entries(&client).await)
-                            } else {
-                                None
-                            };
-                            stop_spinner(spinner);
-                            if let Some(helper) = rl.helper_mut() {
-                                // Only replace drive slugs if we got results back — don't
-                                // wipe the existing list on a transient fetch failure.
-                                if modifies_drives && !new_slugs.is_empty() {
-                                    helper.drive_slugs = new_slugs;
-                                }
-                                if !new_docs.is_empty() {
-                                    helper.update_docs(new_docs);
-                                }
-                                if let Some(folders) = new_folders {
-                                    helper.update_folders(folders);
-                                }
-                            }
-                            last_completion_refresh = std::time::Instant::now();
+                            loader.start(&client);
                         }
 
                         // Re-resolve default profile in case `config use` changed it
@@ -1062,14 +1123,6 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                                 );
                                 client = new_client;
 
-                                let spinner = spawn_spinner("Loading profile data...");
-
-                                let new_slugs = fetch_drive_slugs(&client).await;
-
-                                let new_docs = fetch_doc_entries(&client).await;
-
-                                let new_folders = fetch_folder_entries(&client).await;
-
                                 let new_model_types: Vec<String> =
                                     crate::graphql::introspection::load_cache(&current_profile)
                                         .ok()
@@ -1081,16 +1134,12 @@ pub async fn run(profile_name: Option<&str>, quiet: bool) -> Result<()> {
                                                 .collect()
                                         })
                                         .unwrap_or_default();
-
-                                stop_spinner(spinner);
-
                                 if let Some(helper) = rl.helper_mut() {
-                                    helper.drive_slugs = new_slugs;
                                     helper.model_types = new_model_types;
-                                    helper.update_docs(new_docs);
-                                    helper.update_folders(new_folders);
                                 }
-                                last_completion_refresh = std::time::Instant::now();
+                                // The new profile's drives load in the background
+                                // (and replace the old profile's in flight).
+                                loader.start(&client);
                             }
                         }
 
@@ -1187,19 +1236,29 @@ fn print_repl_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::{FolderEntry, ReplHelper, shell_split};
+    use super::{
+        CompletionData, CompletionLoader, DynamicCompletions, FolderEntry, ReplHelper,
+        parse_drive_listing, shell_split,
+    };
     use rustyline::completion::Completer;
     use rustyline::history::DefaultHistory;
+    use std::sync::{Arc, RwLock};
+    use std::time::{Duration, Instant};
+
+    /// A helper whose server data is already loaded.
+    fn helper_with_data(data: CompletionData) -> ReplHelper {
+        let mut dynamic = DynamicCompletions::default();
+        dynamic.apply(data);
+        ReplHelper::new(vec![], vec![], Arc::new(RwLock::new(dynamic)))
+    }
 
     /// Build a helper with fixed completion data for tests.
     fn helper_with_drives(drives: &[&str]) -> ReplHelper {
-        ReplHelper::new(
-            drives.iter().map(|s| s.to_string()).collect(),
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-        )
+        helper_with_data(CompletionData {
+            drive_slugs: drives.iter().map(|s| s.to_string()).collect(),
+            docs: vec![],
+            folders: vec![],
+        })
     }
 
     /// Build a helper with both drive and folder data for completion tests.
@@ -1207,19 +1266,235 @@ mod tests {
         drives: &[&str],
         folders: &[(&str, &str)], // (folder_name, drive_slug)
     ) -> ReplHelper {
-        ReplHelper::new(
-            drives.iter().map(|s| s.to_string()).collect(),
-            vec![],
-            vec![],
-            vec![],
-            folders
+        helper_with_data(CompletionData {
+            drive_slugs: drives.iter().map(|s| s.to_string()).collect(),
+            docs: vec![],
+            folders: folders
                 .iter()
                 .map(|(name, slug)| FolderEntry {
                     name: (*name).to_string(),
                     drive_slug: (*slug).to_string(),
                 })
                 .collect(),
+        })
+    }
+
+    // ── Background loading ───────────────────────────────────────────
+
+    /// A minimal GraphQL server: answers each POST with `respond(body)`.
+    async fn fake_switchboard(respond: fn(&str) -> String) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    // Read the headers, then exactly Content-Length bytes of body.
+                    let (head_end, length) = loop {
+                        let n = stream.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                            let length = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (i + 4, length);
+                        }
+                    };
+                    while buf.len() < head_end + length {
+                        let n = stream.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let body = String::from_utf8_lossy(&buf[head_end..]).to_string();
+                    let json = respond(&body);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                        json.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}/graphql")
+    }
+
+    /// A server that accepts every connection and never answers — what a
+    /// Switchboard busy replaying a large store looks like from outside.
+    async fn wedged_switchboard() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        format!("http://{addr}/graphql")
+    }
+
+    fn vault_response(body: &str) -> String {
+        if body.contains("findDocuments") {
+            serde_json::json!({ "data": { "findDocuments": { "items": [
+                { "id": "d1", "name": "Vault One", "slug": "vault-one", "state": { "global": { "nodes": [
+                    { "kind": "folder", "name": "notes" },
+                    { "kind": "file", "name": "a note" }
+                ] } } },
+                { "id": "d2", "name": "vault-two", "slug": "vault-two", "state": { "global": { "nodes": [] } } }
+            ] } } })
+            .to_string()
+        } else if body.contains("d1") {
+            serde_json::json!({ "data": { "documentOutgoingRelationships": { "items": [
+                { "id": "n1", "name": "first", "documentType": "bai/knowledge-note" },
+                { "id": "n2", "name": "with space", "documentType": "bai/moc" }
+            ] } } })
+            .to_string()
+        } else {
+            serde_json::json!({ "data": { "documentOutgoingRelationships": { "items": [
+                { "id": "n3", "name": "third", "documentType": "bai/source" }
+            ] } } })
+            .to_string()
+        }
+    }
+
+    fn loader_for(url: &str) -> (CompletionLoader, crate::graphql::GraphQLClient) {
+        let loader = CompletionLoader::new(Arc::new(RwLock::new(DynamicCompletions::default())));
+        (
+            loader,
+            crate::graphql::GraphQLClient::new(url.to_string(), None),
         )
+    }
+
+    #[test]
+    fn one_drive_listing_yields_slugs_folders_and_drives() {
+        let data = serde_json::json!({ "findDocuments": { "items": [
+            { "id": "d1", "name": "Vault One", "slug": "vault-one", "state": { "global": { "nodes": [
+                { "kind": "folder", "name": "notes" }, { "kind": "folder", "name": "" }, { "kind": "file", "name": "x" }
+            ] } } },
+            { "id": "d2", "name": "same", "slug": "same", "state": {} },
+            { "id": "gone", "name": "Gone", "slug": "gone", "state": { "document": { "isDeleted": true } } },
+            { "id": "", "name": "", "slug": "no-id" }
+        ] } });
+        let (slugs, folders, drives) = parse_drive_listing(&data);
+        assert_eq!(slugs, vec!["vault-one", "Vault One", "same", "no-id"]);
+        assert_eq!(
+            folders
+                .iter()
+                .map(|f| (f.name.as_str(), f.drive_slug.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("notes", "vault-one")]
+        );
+        assert_eq!(
+            drives,
+            vec![
+                ("d1".to_string(), "vault-one".to_string()),
+                ("d2".to_string(), "same".to_string())
+            ]
+        );
+        assert_eq!(
+            parse_drive_listing(&serde_json::json!({})).0,
+            Vec::<String>::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_load_fills_drives_folders_and_every_drives_documents() {
+        let url = fake_switchboard(vault_response).await;
+        let (mut loader, client) = loader_for(&url);
+        loader.reload(&client).await;
+
+        assert!(loader.take_unreported_error().is_none());
+        let data = loader.dynamic.read().unwrap();
+        assert_eq!(
+            data.drive_slugs,
+            vec!["vault-one", "Vault One", "vault-two"]
+        );
+        assert_eq!(data.folder_names, vec!["notes"]);
+        // Documents of both drives, in drive order, the spaced name quoted.
+        assert_eq!(data.doc_ids, vec!["first", "\"with space\"", "third"]);
+        assert_eq!(
+            data.doc_drive_slugs,
+            vec!["vault-one", "vault-one", "vault-two"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wedged_server_costs_the_timeout_not_the_prompt_and_keeps_the_last_good_data() {
+        let url = wedged_switchboard().await;
+        let (mut loader, client) = loader_for(&url);
+        loader.timeout = Duration::from_millis(300);
+        loader.dynamic.write().unwrap().drive_slugs = vec!["kept".into()];
+
+        // Starting a load returns at once: the prompt is never behind it.
+        let t = Instant::now();
+        loader.start(&client);
+        assert!(t.elapsed() < Duration::from_millis(50));
+
+        // Even an explicit reload is bounded by the completion timeout, not
+        // the client's 120 s request timeout.
+        let t = Instant::now();
+        loader.reload(&client).await;
+        assert!(
+            t.elapsed() < Duration::from_secs(3),
+            "took {:?}",
+            t.elapsed()
+        );
+
+        let error = loader
+            .take_unreported_error()
+            .expect("the failure is reported");
+        assert!(error.contains("did not answer"), "{error}");
+        assert!(loader.take_unreported_error().is_none(), "reported once");
+        assert_eq!(loader.dynamic.read().unwrap().drive_slugs, vec!["kept"]);
+
+        // A repeat failure is not reported again.
+        loader.reload(&client).await;
+        assert!(loader.take_unreported_error().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_success_after_a_failure_clears_it() {
+        let wedged = wedged_switchboard().await;
+        let (mut loader, client) = loader_for(&wedged);
+        loader.timeout = Duration::from_millis(200);
+        loader.reload(&client).await;
+        assert!(loader.take_unreported_error().is_some());
+
+        let good = crate::graphql::GraphQLClient::new(fake_switchboard(vault_response).await, None);
+        loader.timeout = Duration::from_secs(5);
+        loader.reload(&good).await;
+        assert!(loader.take_unreported_error().is_none());
+        assert_eq!(loader.dynamic.read().unwrap().doc_ids.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn the_prompt_refresh_only_starts_a_load_when_stale_and_idle() {
+        let url = wedged_switchboard().await;
+        let (mut loader, client) = loader_for(&url);
+        loader.timeout = Duration::from_secs(5);
+
+        loader.refresh_if_stale(&client); // never loaded: starts one
+        let first = loader.last_started.expect("started");
+        loader.refresh_if_stale(&client); // in flight and fresh: no restart
+        assert_eq!(loader.last_started, Some(first));
+
+        // Stale but still in flight: still no restart.
+        loader.last_started = Some(Instant::now() - Duration::from_secs(60));
+        let marked = loader.last_started;
+        loader.refresh_if_stale(&client);
+        assert_eq!(loader.last_started, marked);
     }
 
     /// Run the completer against a line and return the candidate replacements
